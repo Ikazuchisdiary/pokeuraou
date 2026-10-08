@@ -520,11 +520,19 @@ PLAY_PONDER_SECONDS = 600.0
 
 
 #: A person's game (`tools/play_human.py`, IKA-392): the selection is read deeper than the
-#: leaf's one estimate of each cell -- `selection_deep`'s default reading, the wall clock's
-#: 90 s (IKA-30's budget for a selection), on every core. The board that decided it: the
-#: reading of 65 cells beat the leaf's selection by +23.2 Elo [+8.0, +38.6]. A count-clock game
-#: or one without a leaf keeps the leaf's solve. Generation and `timematch` do not read it.
-PLAY_SELECTION_READING = "default"
+#: leaf's one estimate of each cell, for the wall clock's 90 s (IKA-30's budget for a
+#: selection), on every core. The board that decided it: the reading of 65 cells beat the
+#: leaf's selection by +23.2 Elo [+8.0, +38.6]. A count-clock game or one without a leaf keeps
+#: the leaf's solve. Generation and `timematch` do not read it.
+#:
+#: Each cell is read at depth 1 (`L6@0`), not by the depth-2 stage of `selection_deep`'s
+#: ``default``, so the same seconds read about twice the cells (IKA-440 stage 3, the user's
+#: decision 10/8): at equal cost (148.8 cells against 71.0, 82.7 s against 93.5 s a pair)
+#: this beat the depth-2 reading of 65 cells by +12.7 Elo [-0.1, +25.6] over 900 pairs.
+#: The depth-2 reading the tool played before is ``PLAY_SELECTION_READING_IKA392``, which
+#: `--selection-reading` takes by its name ``default``.
+PLAY_SELECTION_READING = "stage=L6@0,rects=8-11,confirm=2,shift=add"
+PLAY_SELECTION_READING_IKA392 = "default"
 PLAY_SELECTION_SECONDS = 90.0
 
 

@@ -331,11 +331,13 @@ def main(argv: list[str] | None = None) -> None:
                     "Default: none (the deepening)")
     ap.add_argument("--selection-reading", default=None,
                     help="how the AI reads the selection (IKA-392, selection_deep): `none` (the "
-                    "value function's one estimate of each cell), `default`, or `stage=d2r4b3k8,"
-                    "rects=8-16,confirm=2,shift=add`. Unset: `default` on the wall clock with a "
-                    "leaf (the board that decided it: +23.2 Elo over `none`), else `none`. With "
-                    "--selection-seconds S the reading runs S seconds of wall time (the "
-                    "rectangle widens while time is left), else exactly the stages it names")
+                    "value function's one estimate of each cell), `default` (each cell at the "
+                    "depth-2 stage d2r4b3k8, what this tool played before IKA-440), or a spec "
+                    f"such as `{humanplay.PLAY_SELECTION_READING}`. Unset: that spec, each cell "
+                    "at depth 1, on the wall clock with a leaf (IKA-440: +12.7 Elo over "
+                    "`default` at equal cost; `default` was +23.2 over `none`, IKA-392), else "
+                    "`none`. With --selection-seconds S the reading runs S seconds of wall time "
+                    "(the rectangle widens while time is left), else exactly the stages it names")
     ap.add_argument("--selection-seconds", type=float, default=None,
                     help="the wall-clock time of the deeper selection (unset: "
                     f"{humanplay.PLAY_SELECTION_SECONDS:g} s for the default reading)")

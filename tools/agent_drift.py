@@ -124,8 +124,10 @@ PLAY_ONLY_DEFAULTS = (
     "the selection is read deeper than the leaf's one estimate of each cell, 90 s of wall time on "
     "every core, when the game is on the wall clock with a leaf (`--selection-reading none` "
     "turns it off; IKA-392: the reading beat the leaf's selection by +23.2 Elo [+8.0, +38.6] on "
-    "the time match's board). Generation (`poolplay`, `selfplay`), the time match's conditions "
-    "and the move's reading do not read it",
+    "the time match's board). Each cell is read at depth 1 (`humanplay.PLAY_SELECTION_READING`, "
+    "IKA-440: +12.7 Elo [-0.1, +25.6] over the depth-2 cells at equal cost; "
+    "`--selection-reading default` plays the depth-2 cells). Generation (`poolplay`, "
+    "`selfplay`), the time match's conditions and the move's reading do not read it",
 )
 #: Tools that resolve an unnamed fill or Q their own way on purpose, and why.
 OWN_RESOLUTION = {

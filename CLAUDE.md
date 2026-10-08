@@ -63,7 +63,7 @@ uv run pytest --junitxml=reports/pytest.xml && uv run python tools/ci_skip_audit
 - `search.py`（narrow で候補を絞り、葉の順位付けでメニューを作り、行列を埋める）
 - `equilibrium.py`（HiGHS の LP で均衡を解く）
 - 控えを隠すノードは `beliefnode.py` / `hidden.py`（控えの完成形ごとに解いて畳む）
-- 選出（6→4）は、順序付きの 90×90 のベイズ型ゲーム（`selection.py`）
+- 選出（6→4）は、順序付きの 90×90 のベイズ型ゲーム（`selection.py`）。人と打つ道具は、答えに関わるセルを深く読み直す（`selection_deep.py`、90 秒・全コア）。各セルは深さ 1 で読む（`humanplay.PLAY_SELECTION_READING`。深さ 2 の段で読む前の既定に、同じ費用で +12.7 Elo [−0.1, +25.6]、900 組。IKA-440）。前の既定は `--selection-reading default`。生成と対戦評価の選出は、先に解いた store のまま
 
 **生成と学習の流れ:**
 1. `tools/generate_queue.py` がワーカー（`tools/selfplay.py`）と推論サーバ（`--served`）を立て、局をキューで配る。局の種は局の番号で決まるので、再開は `tools/queue_restart.py` で行う。

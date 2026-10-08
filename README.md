@@ -61,6 +61,11 @@ uv run python tools/play.py -- --human-team 3 --agent-team 17 --human-side 1   #
   下限は `--min-free-gb`、底は `--hard-free-gb`（0 で外す）、ほかは `--max-rss-gb`・`--max-gpu-gb`・`--cuda-memory-gb` で変えられる
   （`tools/play.py -- --min-free-gb 1` のように渡す）
 * 前の既定（1 スレッド、最善応答オラクルなし）は `--threads 1 --oracle none`
+* **選出**（IKA-392・IKA-440）: AI は選出を 90 秒・全コアで読む。90×90 の行列のうち、答えに関わるセル（1 ターン目の局面）を
+  評価モデルの 1 回の見積もりより深く読み、長方形を広げながら解き直す。各セルは深さ 1 で読む（`stage=L6@0,rects=8-11,confirm=2,shift=add`）。
+  深さ 2 の段で読む前の既定より 1 セルが約 2.4 分の 1 の費用で、90 秒で約 2,400 セル読む（前は約 900〜1,200 セル）。
+  同じ費用の対戦評価で、前の既定に +12.7 Elo [−0.1, +25.6]（900 組、IKA-440）。前の既定（深さ 2）は `--selection-reading default`、
+  評価モデルの 1 回の見積もりだけで選ぶなら `--selection-reading none`。データ生成と対戦評価の選出は、先に解いた store のまま
 
 ### 持ち時間とコア数の選び方
 
