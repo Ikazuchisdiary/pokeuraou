@@ -161,6 +161,12 @@ class ValueConfig:
     #: this field. "" builds nothing, so the net, its answers and a training run are those
     #: of every earlier model.
     aux_targets: str = ""
+    #: IKA-439: how many hidden layers the head has (head_dim wide each). 2 is every model
+    #: so far and builds the same modules in the same order, so a saved config without the
+    #: field, and a run that does not name it, are unchanged. Above 2 the extra layers are
+    #: built after the head's own modules (before the auxiliary heads) and then put in front of
+    #: its last Linear, so every module up to the head draws the same initialisation as at 2.
+    head_layers: int = 2
 
 
 class _GroupLayerNorm(nn.Module):
@@ -325,6 +331,19 @@ class ValueNet(nn.Module):
             nn.Dropout(config.dropout),
             nn.Linear(config.head_dim, 1),
         )
+        if config.head_layers < 2:
+            raise ValueError(f"head_layers {config.head_layers}: the head has at least 2")
+        if config.head_layers > 2:
+            extra = []
+            for _ in range(config.head_layers - 2):
+                extra += [
+                    nn.Linear(config.head_dim, config.head_dim),
+                    _norm(config.head_dim, groups),
+                    nn.GELU(),
+                    nn.Dropout(config.dropout),
+                ]
+            layers = list(self.head)
+            self.head = nn.Sequential(*layers[:-1], *extra, layers[-1])
         if config.aux_weight > 0:
             self.aux = nn.Linear(config.head_dim, AUX_DIM)
         if config.aux_targets:
@@ -1635,8 +1654,11 @@ def save_model(
             "weights": weights,
             # IKA-428: `aux_targets` is written only when set, so a model trained without
             # it (or saved for use, which drops it) reads back in code from before it.
+            # IKA-439: `head_layers` likewise only when it is not the usual 2.
             "config": {
-                k: v for k, v in asdict(config).items() if k != "aux_targets" or v
+                k: v
+                for k, v in asdict(config).items()
+                if (k != "aux_targets" or v) and (k != "head_layers" or v != 2)
             },
             "format_id": vocab.format_id,
             "vocab_fingerprint": vocab.fingerprint(),

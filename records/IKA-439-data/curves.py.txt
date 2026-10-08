@@ -1,0 +1,33 @@
+"""Per-epoch held-out loss of each training log (and IKA-438's production logs), as a table."""
+import re
+import sys
+from pathlib import Path
+
+runs = {
+    "prod s0": "C:/tmp/ika438/models/value-mc6.log",
+    "prod s1": "C:/tmp/ika438/models/value-mc6-s1.log",
+}
+for tag in ("w15", "w20", "h3"):
+    for k, suf in ((0, ""), (1, "-s1")):
+        p = Path(f"C:/tmp/ika439/models/value-{tag}{suf}.log")
+        if p.exists():
+            runs[f"{tag} s{k}"] = str(p)
+curves = {}
+extra = {}
+for name, p in runs.items():
+    text = Path(p).read_text(encoding="utf-8", errors="replace")
+    curves[name] = [float(m.group(2)) for m in re.finditer(r"epoch\s+(\d+)\s+train [\d.]+\s+val ([\d.]+)", text)]
+    m = re.search(r"([\d,]+) parameters", text)
+    extra[name] = m.group(1) if m else "?"
+    t = [float(x) for x in re.findall(r"val AUC [\d.]+\s+([\d.]+)s", text)]
+    extra[name] += f", {sum(t) / max(len(t), 1):.0f}s/epoch mean"
+curves = {k: v for k, v in curves.items() if v}
+names = list(curves)
+rows = ["| epoch | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+for e in (1, 5, 10, 15, 20, 24, 25, 26, 27, 28, 29, 30):
+    rows.append(f"| {e} | " + " | ".join(f"{c[e - 1]:.4f}" if len(c) >= e else "-" for c in curves.values()) + " |")
+rows.append("| best (epoch) | " + " | ".join(f"{min(c):.4f} ({c.index(min(c)) + 1})" for c in curves.values()) + " |")
+rows.append("| epochs run | " + " | ".join(str(len(c)) for c in curves.values()) + " |")
+rows.append("| mean of epochs 27-30 | " + " | ".join((f"{sum(c[26:30]) / 4:.4f}" if len(c) >= 30 else "-") for c in curves.values()) + " |")
+print("\n".join(rows))
+print(extra)
