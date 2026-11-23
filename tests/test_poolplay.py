@@ -433,3 +433,84 @@ def test_the_pool_cli_refuses_the_roster_path_flags(monkeypatch) -> None:  # noq
     )
     with pytest.raises(SystemExit):
         tool.main()
+
+
+# ------------------------------------------------------------- a subset of the pairs
+
+
+def test_a_pairs_subset_draws_only_those_pairs_and_records_the_pool_index(
+    pool, shared, tmp_path, monkeypatch  # noqa: ANN001
+) -> None:
+    """IKA-444: `pairs` restricts the draw; ``pool.pair`` stays the index in pool.pairs."""
+    wanted = [(0, 1), (1, 2)]
+    calls: list[dict] = []
+    monkeypatch.setattr(poolplay, "play_game", _fake_play(calls))
+    out = tmp_path / "s.jsonl"
+    generate_pool(
+        pool.reg, pool, games=0, hide_bench=True, seed=444, out=out, solver=shared,
+        objective=HP_SHARE, indices=list(range(40)), pairs=wanted,
+    )
+    records = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
+    assert len(records) == 40
+    ids = [t.id for t in pool.teams]
+    seen = set()
+    for record in records:
+        a, b = (ids.index(t) for t in record["pool"]["teams"])
+        pair = (min(a, b), max(a, b))
+        assert pair in wanted
+        assert pool.pairs[record["pool"]["pair"]] == pair
+        seen.add(pair)
+    assert seen == set(wanted), "both pairs of the subset are drawn"
+
+
+def test_a_pairs_subset_must_be_pairs_of_the_pool(pool, shared, tmp_path) -> None:  # noqa: ANN001
+    for bad in ([], [(1, 0)], [(0, 9)]):
+        with pytest.raises(ValueError, match="subset of pool.pairs"):
+            generate_pool(
+                pool.reg, pool, games=1, hide_bench=True, out=tmp_path / "x.jsonl",
+                solver=shared, objective=HP_SHARE, pairs=bad,
+            )
+
+
+def test_the_pool_cli_passes_the_pair_filters(pool, monkeypatch) -> None:  # noqa: ANN001
+    """`--pairs-no-mirror` / `--pairs-with` reach generate_pool; neither means every pair."""
+    tool = load_tool("selfplay")
+    import pokeuraou.pool as pool_module
+
+    called: dict = {}
+
+    def fake_generate(reg, pool_arg, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        called.update(kwargs)
+        return {"games": 0, "finished": 0, "discarded_unfinished": 0, "wins": 0,
+                "decisions": 0, "turns": 0, "mirror_games": 0, "mirror_wins": 0,
+                "mirror_draws": 0, "path": "x"}
+
+    monkeypatch.setattr(pool_module, "load_pool", lambda name: pool)
+    monkeypatch.setattr(poolplay, "generate_pool", fake_generate)
+    monkeypatch.setattr(tool, "build_leaf", lambda args, reg: (_stub, "value:stub"))
+    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1"])
+    tool.main()
+    assert called["pairs"] is None
+
+    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1",
+                                     "--pairs-no-mirror"])
+    tool.main()
+    assert called["pairs"] == [p for p in pool.pairs if p[0] != p[1]]
+
+    species = pool.teams[0].sets[0].species
+    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1",
+                                     "--pairs-with", species])
+    tool.main()
+    assert called["pairs"] == list(pool.pairs), "every team of this pool holds it"
+
+    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1",
+                                     "--pairs-with", "notaspecies"])
+    with pytest.raises(SystemExit):
+        tool.main()
+
+
+def test_the_roster_path_refuses_the_pair_filters(monkeypatch) -> None:  # noqa: ANN001
+    tool = load_tool("selfplay")
+    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pairs-no-mirror"])
+    with pytest.raises(SystemExit):
+        tool.main()

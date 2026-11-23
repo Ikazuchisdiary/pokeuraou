@@ -140,6 +140,40 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
         "to rank-<name>.jsonl.gz beside --out (IKA-278, teacher data for IKA-274). Changes "
         "no game and no byte of --out.",
     )
+    ap.add_argument(
+        "--pairs-with",
+        nargs="+",
+        default=None,
+        metavar="SPECIES",
+        help="with --pool: draw only the pairs with a team holding one of these species "
+        "(IKA-444; as tools/pool_match.py). Default: every pair.",
+    )
+    ap.add_argument(
+        "--pairs-no-mirror",
+        action="store_true",
+        help="with --pool: leave out the pairs of a team with itself (IKA-444)",
+    )
+
+
+def pool_pairs(
+    pool: Any, species: list[str] | None, no_mirror: bool, error: Any
+) -> list[tuple[int, int]] | None:
+    """The pairs `--pairs-with` / `--pairs-no-mirror` leave, or None for every pair."""
+    if not species and not no_mirror:
+        return None
+    pairs = list(pool.pairs)
+    if species:
+        unknown = [s for s in species if s not in pool.reg.species]
+        if unknown:
+            error(f"--pairs-with: not species ids of {pool.reg.meta.format_id}: {unknown}")
+        holding = {t for t, team in enumerate(pool.teams)
+                   if any(s.species in species for s in team.sets)}
+        pairs = [(a, b) for a, b in pairs if a in holding or b in holding]
+    if no_mirror:
+        pairs = [(a, b) for a, b in pairs if a != b]
+    if not pairs:
+        error(f"--pairs-with {species}{' --pairs-no-mirror' if no_mirror else ''}: no pair left")
+    return pairs
 
 
 #: Flags of the roster path that mean nothing without an own side, with their defaults.
@@ -219,7 +253,11 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
     evaluate, leaf_label = build_leaf(args, reg)
     q_record = _install_q(args, reg, ap)
     selection = "uniform" if args.uniform_selection else SOLVED
+    pairs = pool_pairs(pool, args.pairs_with, args.pairs_no_mirror, ap.error)
     print(pool.summary(), file=sys.stderr)
+    if pairs is not None:
+        print(f"  pairs: {len(pairs)} of {len(pool.pairs)} (--pairs-with {args.pairs_with}"
+              f"{', no mirror' if args.pairs_no_mirror else ''})", file=sys.stderr)
     if pool.character:
         print(f"  {pool.character}", file=sys.stderr)
     print(
@@ -283,6 +321,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         on_finish=client.finish if client is not None else None,
         rank_scores_out=ranks_out,
         q_record=q_record,
+        pairs=pairs,
     )
     if client is not None:
         client.close()
@@ -521,6 +560,8 @@ def main() -> None:
         ap.error("--deepen is the pool path's (IKA-33); the roster path searches at depth 1")
     if args.record_rank_scores:
         ap.error("--record-rank-scores is the pool path's (IKA-278)")
+    if args.pairs_with or args.pairs_no_mirror:
+        ap.error("--pairs-with / --pairs-no-mirror are the pool path's (IKA-444)")
     if args.roster is None:
         args.roster = DEFAULT_ROSTER
     require_bench(args)

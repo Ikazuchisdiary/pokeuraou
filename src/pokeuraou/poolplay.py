@@ -287,8 +287,14 @@ def generate_pool(
     on_finish: Callable[[int], None] | None = None,
     rank_scores_out: Path | None = None,
     q_record: dict[str, list[str]] | None = None,
+    pairs: Sequence[tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     """Plays pool-against-pool games and appends one JSON line per finished game.
+
+    ``pairs`` (IKA-444), when given, is the subset of ``pool.pairs`` the games are drawn
+    from, uniformly as from the whole (`tools/selfplay.py --pairs-with` builds it as
+    `tools/pool_match.py` does). The record's ``pool.pair`` stays the index in
+    ``pool.pairs``. None draws from every pair, as before.
 
     ``q_record`` (IKA-340) is the Q the rank fill ranked by, as `qrank.record_fields`
     gives it (``qModel`` and ``qModelSha256``): written into every record after ``pool``,
@@ -342,7 +348,10 @@ def generate_pool(
         raise ValueError(
             f"the pool is {pool.reg.meta.format_id}, the regulation {reg.meta.format_id}"
         )
-    pairs = pool.pairs
+    every = pool.pairs
+    drawn_from = every if pairs is None else tuple(pairs)
+    if not drawn_from or any(p not in every for p in drawn_from):
+        raise ValueError("pairs must be a non-empty subset of pool.pairs")
     size = reg.meta.picked_team_size
 
     def scheduled() -> Iterator[tuple[int | None, np.random.Generator]]:
@@ -374,7 +383,9 @@ def generate_pool(
         stats["rank_scores_repaired"] = writer.repaired
     with out.open("a", encoding="utf-8") as handle:
         for index, rng in scheduled():
-            k, a, b = draw_pair(rng, pairs)
+            k, a, b = draw_pair(rng, drawn_from)
+            if pairs is not None:
+                k = every.index((min(a, b), max(a, b)))
             team0, team1 = pool.teams[a], pool.teams[b]
             six0, six1 = list(team0.sets), list(team1.sets)
             mirror = a == b
