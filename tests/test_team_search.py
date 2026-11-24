@@ -73,3 +73,22 @@ def test_a_set_with_its_moves_reordered_or_a_gender_is_the_same_play() -> None:
     other = {**member, "moves": list(reversed(member["moves"])), "gender": "M"}
     assert ts.play_key(member) == ts.play_key(other)
     assert ts.set_key(member) != ts.set_key(other)  # the sheet's own identity still differs
+
+
+def test_extra_sets_join_the_swaps_and_new_only_keeps_just_them() -> None:
+    data = _data()
+    base, other = data["teams"]
+    extra = [{"id": "x", "name": "x", "team": other["team"]}]
+    pool = {**data, "teams": [base]}
+    plain, _ = ts.neighbors(pool, [base["id"]], 1)
+    assert plain == []  # one team alone has nothing to swap in
+    cands, _ = ts.neighbors(pool, [base["id"]], 1, extra=extra)
+    assert cands and {c["swap"][0]["from"] for c in cands} == {"x"}
+    # new_only drops every set the pool already has: the extra team's sets are all new here
+    same, _ = ts.neighbors(pool, [base["id"]], 1, extra=extra, new_only=True)
+    assert [c["id"] for c in same] == [c["id"] for c in cands]
+    none, _ = ts.neighbors(data, [base["id"]], 1, extra=extra, new_only=True)
+    assert none == []  # every extra set is a pool set once the pool holds that team
+    # an extra team can be a base
+    from_extra, _ = ts.neighbors(pool, ["x"], 1, extra=extra)
+    assert from_extra and all(c["base"] == "x" for c in from_extra)

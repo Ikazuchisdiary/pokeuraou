@@ -98,15 +98,24 @@ def base_values(store: Path, n: int) -> list[float]:
 
 
 def neighbors(
-    data: dict[str, Any], base_ids: list[str], swaps: int
+    data: dict[str, Any], base_ids: list[str], swaps: int,
+    extra: list[dict[str, Any]] | None = None, new_only: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Candidates ``swaps`` (1 or 2) members away from each base team that pass the
-    roster checks, with counts of what was refused."""
+    roster checks, with counts of what was refused.
+
+    ``extra`` teams (IKA-450: tournament teams, or candidates found before) add their sets
+    to the ones swapped in and may be bases. With ``new_only``, every set swapped in is one
+    no team of ``data`` has, so a search the pool's own sets already covered is not redone."""
     if swaps not in (1, 2):
         raise ValueError("swaps is 1 or 2")
-    teams = {t["id"]: t for t in data["teams"]}
-    pool_keys = {tuple(sorted(play_key(m) for m in t["team"])) for t in data["teams"]}
-    sets = distinct_sets(data["teams"])
+    extra = extra or []
+    teams = {t["id"]: t for t in [*data["teams"], *extra]}
+    pool_keys = {tuple(sorted(play_key(m) for m in t["team"])) for t in [*data["teams"], *extra]}
+    sets = distinct_sets([*data["teams"], *extra])
+    if new_only:
+        old = {play_key(m) for t in data["teams"] for m in t["team"]}
+        sets = [(m, src) for m, src in sets if play_key(m) not in old]
     from pokeuraou.regulation import load_regulation
 
     reg = load_regulation(str(data["regulation"]))
@@ -279,8 +288,13 @@ def main() -> int:
     b.add_argument("--out", required=True)
     n = sub.add_parser("neighbors")
     n.add_argument("--pool", default="regmc-matchupweb")
-    n.add_argument("--base", required=True)
+    n.add_argument("--base", help="base.json: the --bases teams with the highest value")
     n.add_argument("--bases", type=int, default=5)
+    n.add_argument("--base-ids", nargs="+", default=[], help="these bases instead of --base")
+    n.add_argument("--extra", nargs="+", default=[],
+                   help="pool or candidate files whose sets join the swaps (their teams may be bases)")
+    n.add_argument("--new-only", action="store_true",
+                   help="swap in only sets that no team of --pool has")
     n.add_argument("--swaps", type=int, default=1, choices=(1, 2))
     n.add_argument("--out", required=True)
     v = sub.add_parser("value")
@@ -324,10 +338,20 @@ def main() -> int:
         return 0
     if args.cmd == "neighbors":
         data = _pool_data(args.pool)
-        base = json.loads(Path(args.base).read_bytes())
-        ids = [t["id"] for t in sorted(base["teams"], key=lambda t: -t["value"])[: args.bases]]
-        cands, counts = neighbors(data, ids, args.swaps)
+        if args.base_ids:
+            ids = list(args.base_ids)
+        elif args.base:
+            base = json.loads(Path(args.base).read_bytes())
+            ids = [t["id"] for t in sorted(base["teams"], key=lambda t: -t["value"])[: args.bases]]
+        else:
+            ap.error("neighbors needs --base or --base-ids")
+        extra: list[dict[str, Any]] = []
+        for path in args.extra:
+            got = json.loads(Path(path).read_bytes().decode("utf-8"))
+            extra += got.get("teams") or got.get("candidates") or []
+        cands, counts = neighbors(data, ids, args.swaps, extra=extra, new_only=args.new_only)
         _write(Path(args.out), {"pool": args.pool, "bases": ids, "swaps": args.swaps,
+                                "extra": args.extra, "newOnly": args.new_only,
                                 "counts": counts, "candidates": cands})
         print(f"{len(cands)} candidates from {ids}: {counts}")
         return 0
