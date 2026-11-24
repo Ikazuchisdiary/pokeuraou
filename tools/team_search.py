@@ -55,6 +55,15 @@ def set_key(member: dict[str, Any]) -> str:
     return json.dumps(kept, sort_keys=True, ensure_ascii=False)
 
 
+def play_key(member: dict[str, Any]) -> str:
+    """What a set plays as: `set_key` without the gender and with the moves in order. Two
+    sheets that list one set's moves in another order are one candidate (IKA-443: 718 of the
+    first 6,491 candidates repeated another so; 5,771 remain)."""
+    kept = {k: v for k, v in member.items() if k not in ("writtenAs", "gender")}
+    kept["moves"] = sorted(kept.get("moves", []))
+    return json.dumps(kept, sort_keys=True, ensure_ascii=False)
+
+
 def team_id(members: list[dict[str, Any]]) -> str:
     """A candidate's id: the hash of its six sets in order (order decides nothing in a
     selection, but keeping it keeps the base team's slots readable)."""
@@ -96,24 +105,25 @@ def neighbors(
     if swaps not in (1, 2):
         raise ValueError("swaps is 1 or 2")
     teams = {t["id"]: t for t in data["teams"]}
-    pool_keys = {tuple(sorted(set_key(m) for m in t["team"])) for t in data["teams"]}
+    pool_keys = {tuple(sorted(play_key(m) for m in t["team"])) for t in data["teams"]}
     sets = distinct_sets(data["teams"])
     from pokeuraou.regulation import load_regulation
 
     reg = load_regulation(str(data["regulation"]))
     out: dict[str, dict[str, Any]] = {}
     counts = {"tried": 0, "refused": 0, "duplicate": 0, "poolTeam": 0}
+    played: set[tuple[str, ...]] = set()
 
     def consider(base: dict[str, Any], members: list[dict[str, Any]], swap: list[dict]) -> None:
         counts["tried"] += 1
-        key = tuple(sorted(set_key(m) for m in members))
+        key = tuple(sorted(play_key(m) for m in members))
         if key in pool_keys:
             counts["poolTeam"] += 1
             return
-        cid = team_id(sorted(members, key=set_key))
-        if cid in out:
+        if key in played:
             counts["duplicate"] += 1
             return
+        cid = team_id(sorted(members, key=set_key))
         entry = {"id": cid, "name": f"{base['name']} / " + ", ".join(
             f"{s['out']} -> {s['in']}" for s in swap), "team": members,
             "base": base["id"], "swap": swap}
@@ -123,13 +133,14 @@ def neighbors(
             counts["refused"] += 1
             return
         out[cid] = entry
+        played.add(key)
 
     for bid in base_ids:
         base = teams[bid]
-        own = {set_key(m) for m in base["team"]}
+        own = {play_key(m) for m in base["team"]}
         for slot, old in enumerate(base["team"]):
             for new, source in sets:
-                if set_key(new) in own:
+                if play_key(new) in own:
                     continue
                 members = list(base["team"])
                 members[slot] = new
@@ -139,7 +150,7 @@ def neighbors(
                     continue
                 for slot2 in range(slot + 1, 6):
                     for new2, source2 in sets:
-                        if set_key(new2) in own or set_key(new2) == set_key(new):
+                        if play_key(new2) in own or play_key(new2) == play_key(new):
                             continue
                         second = list(members)
                         second[slot2] = new2

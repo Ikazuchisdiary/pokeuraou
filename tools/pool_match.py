@@ -245,6 +245,18 @@ def check_other_arm(args: argparse.Namespace, error: Callable[[str], object]) ->
               "hp-share and mean it (IKA-335)")
 
 
+def focus_pairs(
+    pairs: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+    focus: set[int],
+    field: set[int] | None,
+) -> list[tuple[int, int]]:
+    """The pairs of a ``focus`` team against a ``field`` team (any team when None), in order
+    (`--pairs-focus`, IKA-443)."""
+    return [(a, b) for a, b in pairs
+            if (a in focus and (field is None or b in field))
+            or (b in focus and (field is None or a in field))]
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pool", required=True, help="data/pool/<id>.json, e.g. regmc-matchupweb")
@@ -347,6 +359,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--pairs-with", nargs="+", default=None, metavar="SPECIES",
                     help="draw only the pool's pairs where either team has one of these "
                     "species ids (IKA-411: a match about a change only some teams meet)")
+    ap.add_argument("--pairs-focus", nargs="+", default=None, metavar="TEAM_ID",
+                    help="draw only the pairs of one of these teams against one of "
+                    "--pairs-field (IKA-443: candidate teams against the pool)")
+    ap.add_argument("--pairs-field", nargs="+", default=None, metavar="TEAM_ID",
+                    help="with --pairs-focus: the opponents (default: every team)")
     ap.add_argument("--pairs-no-mirror", action="store_true",
                     help="leave out the pairs of a team against itself (IKA-419d)")
     ap.add_argument("--ally-only-with", nargs="+", default=None, metavar="SPECIES",
@@ -471,6 +488,18 @@ def main(argv: list[str] | None = None) -> None:
         pairs = [(a, b) for a, b in pool.pairs if a in holding or b in holding]
         if not pairs:
             ap.error(f"--pairs-with {args.pairs_with}: no team of the pool has one")
+    if args.pairs_focus:
+        index = {team.id: t for t, team in enumerate(pool.teams)}
+        unknown = [i for i in [*args.pairs_focus, *(args.pairs_field or [])] if i not in index]
+        if unknown:
+            ap.error(f"--pairs-focus / --pairs-field: not team ids of the pool: {unknown}")
+        pairs = focus_pairs(pairs if pairs is not None else pool.pairs,
+                            {index[i] for i in args.pairs_focus},
+                            {index[i] for i in args.pairs_field} if args.pairs_field else None)
+        if not pairs:
+            ap.error("--pairs-focus: no pair left")
+    elif args.pairs_field:
+        ap.error("--pairs-field needs --pairs-focus")
     if args.pairs_no_mirror:
         pairs = [(a, b) for a, b in (pairs if pairs is not None else pool.pairs) if a != b]
     if args.pairs_ally_benefit:
@@ -568,6 +597,7 @@ def main(argv: list[str] | None = None) -> None:
           file=sys.stderr)
     if pairs is not None:
         wanted = [*(args.pairs_with or []),
+                  *([f"{len(args.pairs_focus)} focus teams"] if args.pairs_focus else []),
                   *(["a member gaining from its ally's move"] if args.pairs_ally_benefit else [])]
         print(f"  pairs: {len(pairs)} of {len(pool.pairs)}, those with "
               f"{' / '.join(wanted)} in either team", file=sys.stderr)

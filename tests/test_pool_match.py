@@ -331,3 +331,14 @@ def test_the_worker_writes_records_that_pair_up(pool, tmp_path, monkeypatch, cap
     err = capsys.readouterr().err
     assert "echo, stub = side 0" in err and "echo, stub = side 1" in err
     assert "selection of tested stub" in err
+
+
+def test_focus_pairs_keep_a_focus_team_against_the_field_only() -> None:
+    """IKA-443: candidates (4, 5) against the pool (0-3); candidate against candidate is out."""
+    pool_match = load_tool("pool_match")
+
+    pairs = [(a, b) for a in range(6) for b in range(a, 6)]
+    got = pool_match.focus_pairs(pairs, {4, 5}, {0, 1, 2, 3})
+    assert got == [(0, 4), (0, 5), (1, 4), (1, 5), (2, 4), (2, 5), (3, 4), (3, 5)]
+    every = pool_match.focus_pairs(pairs, {0}, None)
+    assert every == [(0, b) for b in range(6)]  # the mirror too; --pairs-no-mirror drops it

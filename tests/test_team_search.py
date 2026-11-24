@@ -66,3 +66,10 @@ def test_base_values_count_the_mirror_half_and_both_seats(tmp_path) -> None:  # 
     for a, b, v in [(0, 0, 0.5), (0, 1, 0.8), (1, 1, 0.5)]:
         (tmp_path / f"{a:03d}-{b:03d}.json").write_bytes(json.dumps({"entry": {"value": v}}).encode())
     assert ts.base_values(tmp_path, 2) == pytest.approx([0.65, 0.35])
+
+
+def test_a_set_with_its_moves_reordered_or_a_gender_is_the_same_play() -> None:
+    member = _data()["teams"][0]["team"][0]
+    other = {**member, "moves": list(reversed(member["moves"])), "gender": "M"}
+    assert ts.play_key(member) == ts.play_key(other)
+    assert ts.set_key(member) != ts.set_key(other)  # the sheet's own identity still differs
