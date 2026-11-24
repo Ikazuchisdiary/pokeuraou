@@ -283,3 +283,69 @@ def test_check_hold_baton_refuses_a_leak_a_wrong_seat_and_a_wrong_tally() -> Non
                     tally={"held": 1, "held_legal": 1, "open": 0, "open_menu": 0, "leaks": 1})
     with pytest.raises(AssertionError, match="leaks"):
         check_hold_baton(counted, 0, True, species, _bucket())
+
+
+# IKA-444: the drive. With a hold and `BATON_DRIVE`, the holder's slot keeps only Calm Mind
+# rows while its gate is shut and only Baton Pass rows once it is open (a teammate on the
+# bench); the partner slot stays free; nothing changes without the drive or without a hold.
+
+
+def _uses(rows: list[SideAction], move: str, slot: int = 0) -> int:
+    return sum(
+        1 for a in rows
+        if any(isinstance(s, MoveAction) and s.slot == slot and s.move_id == move for s in a.slots)
+    )
+
+
+@pytest.fixture
+def drive():  # noqa: ANN201
+    actions.BATON_DRIVE[0] = True
+    try:
+        yield
+    finally:
+        actions.BATON_DRIVE[0] = False
+
+
+def test_the_drive_uses_calm_mind_while_the_gate_is_shut(menus, drive) -> None:  # noqa: ANN001, ARG001
+    pos = _position({"spa": 1})  # shut
+    with hold_baton(HOLD_BATON_SPECIES, 0):
+        driven = side_actions(None, pos, 0)
+        other_side = side_actions(None, pos, 1)
+    assert len(driven) == 2 and _uses(driven, "calmmind") == 2
+    assert _uses(driven, "batonpass", slot=1) == 1  # the partner still chooses
+    assert len(other_side) == 8  # side 1 holds nothing
+
+
+def test_the_drive_uses_baton_pass_once_the_gate_is_open(menus, drive) -> None:  # noqa: ANN001, ARG001
+    pos = _position({"spa": 1, "spd": 1})
+    with hold_baton(HOLD_BATON_SPECIES, 0):
+        driven = side_actions(None, pos, 0)
+    assert len(driven) == 2 and _batons(driven) == 2
+
+
+def test_the_drive_does_not_pass_to_an_empty_bench(menus, drive) -> None:  # noqa: ANN001, ARG001
+    pos = _position({"spa": 1, "spd": 1})
+    pos.sides[0].pokemon[2].fainted = True  # nobody left to receive it
+    with hold_baton(HOLD_BATON_SPECIES, 0):
+        rows = side_actions(None, pos, 0)
+    assert len(rows) == 8  # open gate, no bench: the hold's own menu, unsteered
+
+
+def test_without_the_drive_or_the_hold_nothing_is_steered(menus) -> None:  # noqa: ANN001
+    shut, opened = _position({"spa": 1}), _position({"spa": 1, "spd": 1})
+    with hold_baton(HOLD_BATON_SPECIES, 0):
+        assert len(side_actions(None, shut, 0)) == 6  # the hold alone (negative control)
+        assert len(side_actions(None, opened, 0)) == 8
+    actions.BATON_DRIVE[0] = True
+    try:
+        assert len(side_actions(None, shut, 0)) == 8  # drive without a hold does nothing
+    finally:
+        actions.BATON_DRIVE[0] = False
+
+
+def test_the_drive_leaves_a_menu_without_calm_mind_alone(menus, drive, monkeypatch) -> None:  # noqa: ANN001, ARG001
+    pos = _position({})
+    monkeypatch.setattr(actions, "BATON_DRIVE_SETUP", "nastyplot")  # not on the menu
+    with hold_baton(HOLD_BATON_SPECIES, 0):
+        rows = side_actions(None, pos, 0)
+    assert len(rows) == 6 and _batons(rows) == 0  # the hold still applies

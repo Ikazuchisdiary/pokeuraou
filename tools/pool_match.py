@@ -63,7 +63,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou import eqselect, qrank  # noqa: E402
+from pokeuraou import actions, eqselect, qrank  # noqa: E402
 from pokeuraou import narrow as narrowing  # noqa: E402
 from pokeuraou.actions import ALLY_TARGET_MODES, team_ally_benefits  # noqa: E402
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
@@ -366,6 +366,10 @@ def main(argv: list[str] | None = None) -> None:
                     "holding Espathra until Espathra's Special Attack and Special Defense are "
                     "both +1 or more (IKA-419g)")
     ap.add_argument("--baseline-hold-baton", action="store_true", help="same for the other arm")
+    ap.add_argument("--drive-baton", action="store_true",
+                    help="with a Baton hold (either arm's): the held Espathra uses Calm Mind while "
+                    "its gate is shut and Baton Pass once it is open and a teammate can receive "
+                    "it, whenever its menu has them; its partner stays free (IKA-444)")
     ap.add_argument("--bench-oracle", action="store_true",
                     help="the tested arm believes the opponent's bench is the four the "
                     "opponent really drew: a ceiling for any bench belief, not a legal "
@@ -409,6 +413,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.inference is not None and args.baseline:
         ap.error("--baseline is loaded here; with --inference use --baseline-inference-arm")
     check_other_arm(args, ap.error)
+    if args.drive_baton:
+        if not (args.hold_baton or args.baseline_hold_baton):
+            ap.error("--drive-baton steers a Baton hold: give --hold-baton or --baseline-hold-baton")
+        actions.BATON_DRIVE[0] = True
     # Each arm's fill as generation resolves it (IKA-338): named, or q-nocover for a
     # leaf-ranked menu.
     args.rank_fill = resolve_rank_fill(args.rank_fill, args.rank_leaf)
@@ -573,6 +581,7 @@ def main(argv: list[str] | None = None) -> None:
                + (f", back {list(arm.line1_back)}" if arm.line1_back else "")
                if arm.line1 else "")
             + (" / Baton Pass held until Espathra is +1/+1 in Sp. Atk/Sp. Def"
+               + (", driven: Calm Mind, then Baton Pass" if args.drive_baton else "")
                if arm.hold_baton else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")

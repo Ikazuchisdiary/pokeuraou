@@ -148,6 +148,12 @@ BATON_MOVE = "batonpass"
 #: The boosts the holder must have reached before it may pass them.
 BATON_GATE_STATS = ("spa", "spd")
 BATON_GATE_LEVEL = 1
+#: IKA-444: the baton drive. While True, a hold (`BATON_HOLD`) also steers the holder: with
+#: its gate shut it uses `BATON_DRIVE_SETUP` when its menu has it, and with the gate open it
+#: uses Baton Pass when its menu has it and a teammate is on the bench to receive it. The
+#: rest of the side's action stays free. Off ships (False); it does nothing without a hold.
+BATON_DRIVE: list[bool] = [False]
+BATON_DRIVE_SETUP = "calmmind"
 
 
 @contextmanager
@@ -186,10 +192,31 @@ def baton_slots(pos: Position, side_index: int, species: str) -> list[tuple[int,
 
 def uses_baton(action: SideAction, slots: set[int]) -> bool:
     """Whether ``action`` has a move slot in ``slots`` using Baton Pass."""
+    return uses_move(action, slots, BATON_MOVE)
+
+
+def uses_move(action: SideAction, slots: set[int], move_id: str) -> bool:
+    """Whether ``action`` has a move slot in ``slots`` using ``move_id``."""
     return any(
-        isinstance(a, MoveAction) and a.slot in slots and a.move_id == BATON_MOVE
+        isinstance(a, MoveAction) and a.slot in slots and a.move_id == move_id
         for a in action.slots
     )
+
+
+def _driven(pos: Position, side_index: int, species: str, actions: list[SideAction]) -> list[SideAction]:
+    """`BATON_DRIVE`'s steer: per holder slot, only the rows using the move the line asks for,
+    when the menu has such rows (else that slot is left as it is)."""
+    side = pos.sides[side_index]
+    on_field = {party for party in side.active if party is not None}
+    bench = any(not p.fainted for i, p in enumerate(side.pokemon) if i not in on_field)
+    for slot, opened in baton_slots(pos, side_index, species):
+        if opened and not bench:
+            continue
+        move = BATON_MOVE if opened else BATON_DRIVE_SETUP
+        steered = [a for a in actions if uses_move(a, {slot}, move)]
+        if steered:
+            actions = steered
+    return actions
 
 
 def _without_held_baton(pos: Position, side_index: int, actions: list[SideAction]) -> list[SideAction]:
@@ -197,12 +224,11 @@ def _without_held_baton(pos: Position, side_index: int, actions: list[SideAction
     if hold is None or hold[1] != side_index:
         return actions
     closed = {slot for slot, opened in baton_slots(pos, side_index, hold[0]) if not opened}
-    if not closed:
-        return actions
-    kept = [a for a in actions if not uses_baton(a, closed)]
+    kept = [a for a in actions if not uses_baton(a, closed)] if closed else actions
     # Never leave the menu empty: the holder's other moves are always legal, and this keeps a
     # position with nothing else (Struggle-like locks) the way it was.
-    return kept or actions
+    kept = kept or actions
+    return _driven(pos, side_index, hold[0], kept) if BATON_DRIVE[0] else kept
 
 
 #: `normal` moves whose use on an ally is what they are for (doubles staples): After You and
