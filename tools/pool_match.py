@@ -370,6 +370,11 @@ def main(argv: list[str] | None = None) -> None:
                     help="with a Baton hold (either arm's): the held Espathra uses Calm Mind while "
                     "its gate is shut and Baton Pass once it is open and a teammate can receive "
                     "it, whenever its menu has them; its partner stays free (IKA-444)")
+    ap.add_argument("--drive-screens", default=None, metavar="SPECIES",
+                    help="with a Baton hold (either arm's): on the held side, the Pokemon whose "
+                    "species id starts with this (raichu: Raichu and Mega Raichu X) sets "
+                    "Reflect and Light Screen while one is missing, whenever its menu has them "
+                    "(IKA-444)")
     ap.add_argument("--bench-oracle", action="store_true",
                     help="the tested arm believes the opponent's bench is the four the "
                     "opponent really drew: a ceiling for any bench belief, not a legal "
@@ -417,6 +422,10 @@ def main(argv: list[str] | None = None) -> None:
         if not (args.hold_baton or args.baseline_hold_baton):
             ap.error("--drive-baton steers a Baton hold: give --hold-baton or --baseline-hold-baton")
         actions.BATON_DRIVE[0] = True
+    if args.drive_screens:
+        if not (args.hold_baton or args.baseline_hold_baton):
+            ap.error("--drive-screens steers a Baton hold's side: give --hold-baton or --baseline-hold-baton")
+        actions.SCREEN_DRIVE[0] = args.drive_screens
     # Each arm's fill as generation resolves it (IKA-338): named, or q-nocover for a
     # leaf-ranked menu.
     args.rank_fill = resolve_rank_fill(args.rank_fill, args.rank_leaf)
@@ -582,6 +591,7 @@ def main(argv: list[str] | None = None) -> None:
                if arm.line1 else "")
             + (" / Baton Pass held until Espathra is +1/+1 in Sp. Atk/Sp. Def"
                + (", driven: Calm Mind, then Baton Pass" if args.drive_baton else "")
+               + (f", {args.drive_screens} sets Reflect and Light Screen" if args.drive_screens else "")
                if arm.hold_baton else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")

@@ -154,6 +154,13 @@ BATON_GATE_LEVEL = 1
 #: rest of the side's action stays free. Off ships (False); it does nothing without a hold.
 BATON_DRIVE: list[bool] = [False]
 BATON_DRIVE_SETUP = "calmmind"
+#: IKA-444: the screen drive. While set to a species id prefix (``"raichu"`` matches Raichu
+#: and Mega Raichu X), a hold (`BATON_HOLD`) also steers that species on the held side: while
+#: one of `SCREEN_MOVES` is not up on the side, its slot uses only the rows setting a missing
+#: screen, when its menu has them. The Mega Evolution stays to `play_game`'s ``force_mega``,
+#: which picks among the rows left. Off ships (None); it does nothing without a hold.
+SCREEN_DRIVE: list[str | None] = [None]
+SCREEN_MOVES = ("reflect", "lightscreen")
 
 
 @contextmanager
@@ -219,6 +226,25 @@ def _driven(pos: Position, side_index: int, species: str, actions: list[SideActi
     return actions
 
 
+def _screened(pos: Position, side_index: int, prefix: str, actions: list[SideAction]) -> list[SideAction]:
+    """`SCREEN_DRIVE`'s steer: per live slot whose species starts with ``prefix``, only the
+    rows setting a screen the side does not have up, when the menu has such rows."""
+    side = pos.sides[side_index]
+    missing = [m for m in SCREEN_MOVES if not side.has_side_condition(m)]
+    if not missing:
+        return actions
+    for slot, party in enumerate(side.active):
+        if party is None:
+            continue
+        mon = side.pokemon[party]
+        if mon.fainted or not mon.species.startswith(prefix):
+            continue
+        steered = [a for a in actions if any(uses_move(a, {slot}, m) for m in missing)]
+        if steered:
+            actions = steered
+    return actions
+
+
 def _without_held_baton(pos: Position, side_index: int, actions: list[SideAction]) -> list[SideAction]:
     hold = BATON_HOLD[0]
     if hold is None or hold[1] != side_index:
@@ -228,7 +254,11 @@ def _without_held_baton(pos: Position, side_index: int, actions: list[SideAction
     # Never leave the menu empty: the holder's other moves are always legal, and this keeps a
     # position with nothing else (Struggle-like locks) the way it was.
     kept = kept or actions
-    return _driven(pos, side_index, hold[0], kept) if BATON_DRIVE[0] else kept
+    if BATON_DRIVE[0]:
+        kept = _driven(pos, side_index, hold[0], kept)
+    if SCREEN_DRIVE[0] is not None:
+        kept = _screened(pos, side_index, SCREEN_DRIVE[0], kept)
+    return kept
 
 
 #: `normal` moves whose use on an ally is what they are for (doubles staples): After You and
