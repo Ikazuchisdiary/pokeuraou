@@ -24,6 +24,9 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=../vendor/HiGHS/Version.txt");
     println!("cargo:rerun-if-changed=build.rs");
+    // The compiler decides HiGHS's last bits (IKA-446): a new one rebuilds it.
+    println!("cargo:rerun-if-env-changed=CXX");
+    println!("cargo:rerun-if-env-changed=CC");
 
     let target = std::env::var("TARGET").unwrap();
     let mut config = cmake::Config::new(&source);
@@ -42,6 +45,15 @@ fn main() {
                 config.define("CMAKE_RC_COMPILER", slashes(&windres));
             }
         }
+    }
+    if !target.contains("msvc") {
+        // IKA-446: no FMA contraction. scipy's wheel builds HiGHS for baseline x86-64, where
+        // `a * b + c` is a multiply and an add; a compiler whose default target has FMA
+        // (Ubuntu 26.04's g++ 14.3 and 15) fuses them under GCC's default
+        // `-ffp-contract=fast`, rounds once instead of twice, and the LP took other pivots
+        // than scipy's on 199 of 300 test games. Off, every compiler measured (g++ 13, 14.3,
+        // 15 on ubuntu-26.04) gives scipy's bits.
+        config.cflag("-ffp-contract=off").cxxflag("-ffp-contract=off");
     }
     let installed = config
         .profile("Release")

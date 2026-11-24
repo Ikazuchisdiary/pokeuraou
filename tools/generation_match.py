@@ -193,7 +193,7 @@ def main() -> None:
         help="at depth 2, the arm under test reads its strategy off the refined "
         "rectangle solved as its own game, instead of off the full matrix with the "
         "refined cells written into it. IKA-12 played the second reading out and it lost "
-        "48.28% +-0.71 at 5.21x the cost while every number it produced improved, and "
+        "48.28%% +-0.71 at 5.21x the cost while every number it produced improved, and "
         "`search.py` had named the reading as the suspect before the match ran. Only "
         "meaningful with --depth 2.",
     )
