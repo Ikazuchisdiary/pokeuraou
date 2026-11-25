@@ -92,3 +92,24 @@ def test_extra_sets_join_the_swaps_and_new_only_keeps_just_them() -> None:
     # an extra team can be a base
     from_extra, _ = ts.neighbors(pool, ["x"], 1, extra=extra)
     assert from_extra and all(c["base"] == "x" for c in from_extra)
+
+
+def test_combine_pairs_singles_on_two_slots_only() -> None:
+    data = _data()
+    base, other = data["teams"]
+    singles, _ = ts.neighbors(data, [base["id"]], 1)
+    pairs, counts = ts.combine(data, base, singles)
+    assert pairs and counts["sameSlot"] > 0
+    for c in pairs:
+        slots = [s["slot"] for s in c["swap"]]
+        assert len(set(slots)) == 2
+        # the two swapped-in sets are the singles' own, every other slot is the base's
+        by_id = {s["id"]: s for s in singles}
+        for single in (by_id[i] for i in c["singles"]):
+            slot = single["swap"][0]["slot"]
+            assert c["team"][slot] == single["team"][slot]
+        for k in set(range(6)) - set(slots):
+            assert c["team"][k] == base["team"][k]
+    # every pair is one of the full two-swap neighbourhood
+    full, _ = ts.neighbors(data, [base["id"]], 2)
+    assert {c["id"] for c in pairs} <= {c["id"] for c in full}

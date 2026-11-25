@@ -169,6 +169,54 @@ def neighbors(
     return list(out.values()), counts
 
 
+def combine(
+    data: dict[str, Any], base: dict[str, Any], singles: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """IKA-447: two-member swaps built from one base's one-member swaps ``singles`` (each a
+    candidate whose ``base`` is ``base`` and whose ``swap`` has one entry): every pair on two
+    different slots that passes the roster checks. A full two-swap neighbourhood is about
+    150,000 teams a base; pairing only the singles the value already liked keeps it small."""
+    from pokeuraou.regulation import load_regulation
+
+    reg = load_regulation(str(data["regulation"]))
+    pool_keys = {tuple(sorted(play_key(m) for m in t["team"])) for t in data["teams"]}
+    out: dict[str, dict[str, Any]] = {}
+    counts = {"tried": 0, "refused": 0, "duplicate": 0, "poolTeam": 0, "sameSlot": 0}
+    played: set[tuple[str, ...]] = set()
+    for i, a in enumerate(singles):
+        for b in singles[i + 1:]:
+            sa, sb = a["swap"][0], b["swap"][0]
+            if a["base"] != base["id"] or b["base"] != base["id"]:
+                raise ValueError("every single must be a swap of the base")
+            if sa["slot"] == sb["slot"]:
+                counts["sameSlot"] += 1
+                continue
+            counts["tried"] += 1
+            members = list(base["team"])
+            members[sa["slot"]] = a["team"][sa["slot"]]
+            members[sb["slot"]] = b["team"][sb["slot"]]
+            key = tuple(sorted(play_key(m) for m in members))
+            if key in pool_keys:
+                counts["poolTeam"] += 1
+                continue
+            if key in played:
+                counts["duplicate"] += 1
+                continue
+            swap = sorted([sa, sb], key=lambda s: s["slot"])
+            cid = team_id(sorted(members, key=set_key))
+            entry = {"id": cid, "name": f"{base['name']} / " + ", ".join(
+                f"{s['out']} -> {s['in']}" for s in swap), "team": members,
+                "base": base["id"], "swap": swap, "singles": [a["id"], b["id"]]}
+            try:
+                roster_from_data({**entry, "regulation": data["regulation"]}, default_id=cid, reg=reg)
+            except (TeamError, KeyError, ValueError):
+                counts["refused"] += 1
+                continue
+            out[cid] = entry
+            played.add(key)
+    return list(out.values()), counts
+
+
 def pool_with(data: dict[str, Any], candidates: list[dict[str, Any]], name: str) -> dict[str, Any]:
     """A pool file holding the pool's teams and ``candidates`` (each kept with its base and
     swaps, which the loader ignores)."""
@@ -297,6 +345,15 @@ def main() -> int:
                    help="swap in only sets that no team of --pool has")
     n.add_argument("--swaps", type=int, default=1, choices=(1, 2))
     n.add_argument("--out", required=True)
+    c = sub.add_parser("combine", help="IKA-447: pair a base's best one-member swaps")
+    c.add_argument("--pool", default="regmc-matchupweb")
+    c.add_argument("--base-id", required=True)
+    c.add_argument("--base-file", default=None,
+                   help="a pool or candidate file holding the base, if the pool does not")
+    c.add_argument("--singles", nargs="+", required=True, help="candidate files of one-member swaps")
+    c.add_argument("--values", nargs="+", required=True, help="value directories for the singles")
+    c.add_argument("--top", type=int, default=40, help="pair this many singles, best value first")
+    c.add_argument("--out", required=True)
     v = sub.add_parser("value")
     v.add_argument("--pool", default="regmc-matchupweb")
     v.add_argument("--candidates", required=True)
@@ -354,6 +411,30 @@ def main() -> int:
                                 "extra": args.extra, "newOnly": args.new_only,
                                 "counts": counts, "candidates": cands})
         print(f"{len(cands)} candidates from {ids}: {counts}")
+        return 0
+    if args.cmd == "combine":
+        data = _pool_data(args.pool)
+        teams = {t["id"]: t for t in data["teams"]}
+        if args.base_file:
+            got = json.loads(Path(args.base_file).read_bytes().decode("utf-8"))
+            teams.update({t["id"]: t for t in got.get("teams") or got.get("candidates") or []})
+        base = teams[args.base_id]
+        valued: dict[str, tuple[float, dict[str, Any]]] = {}
+        for path in args.singles:
+            for cand in json.loads(Path(path).read_bytes().decode("utf-8"))["candidates"]:
+                if cand.get("base") != base["id"] or len(cand.get("swap", [])) != 1:
+                    continue
+                for d in args.values:
+                    vpath = Path(d) / f"{cand['id']}.json"
+                    if vpath.exists():
+                        valued[cand["id"]] = (float(json.loads(vpath.read_bytes())["mean"]), cand)
+                        break
+        ranked = [c for _v, c in sorted(valued.values(), key=lambda vc: (-vc[0], vc[1]["id"]))]
+        cands, counts = combine(data, base, ranked[: args.top])
+        _write(Path(args.out), {"pool": args.pool, "base": base["id"], "top": args.top,
+                                "singlesValued": len(valued), "counts": counts, "candidates": cands})
+        print(f"{len(cands)} two-swaps of {base['id']} from the top {args.top} "
+              f"of {len(valued)} singles: {counts}")
         return 0
     if args.cmd == "value":
         return _value(args)
