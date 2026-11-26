@@ -74,8 +74,9 @@ from pokeuraou.search import DEFAULT_RANK_FILL, SHIPPED_RANK_FILL, parse_rank_fi
 from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
 from pokeuraou.teams import load_roster  # noqa: E402
 
-#: The M-C leaf that ships (CLAUDE.md): the two-model ensemble. gen-4 with the state and
-#: bind inputs and the auxiliary targets since IKA-430 (value-mc4stx2 from IKA-427,
+#: The M-C leaf that ships (CLAUDE.md): the two-model ensemble. value-mc7x2 (gen-0..7w,
+#: from scratch) since IKA-451 (value-mc6x2 from IKA-438, value-mc5x2 from IKA-432,
+#: value-mc4bindauxx2 from IKA-430, value-mc4stx2 from IKA-427,
 #: value-mc4x2 from IKA-409, value-mc3x2 from IKA-402/405,
 #: value-mc2x2 from IKA-400, value-mc1x2 from IKA-346, value-mc0x2 before it).
 DEFAULT_VALUE = ("data/models/value-mc7.pt", "data/models/value-mc7-s1.pt")
