@@ -197,6 +197,22 @@ def test_an_unknown_kind_is_answered_at_once(turns) -> None:  # noqa: ANN001
         node._exchange({"kind": "aRequestFromTheFuture"})  # noqa: SLF001
 
 
+def test_an_unknown_kind_stops_without_restarting_the_port(turns) -> None:  # noqa: ANN001
+    """A binary older than the request is the same binary after a restart: `port.ask` stops at
+    once with "rebuild it", where it used to restart until the restarts ran out (stage 3.5's
+    old-binary test took 180 s to give up)."""
+    from pokeuraou import port
+
+    reg = turns[0][0]
+    restarts = rustnode._RESTARTS  # noqa: SLF001
+    with pytest.raises(rustnode.PortUnavailable, match="rebuild it"):
+        port.ask(reg, lambda node: node._exchange({"kind": "aRequestFromTheFuture"}))  # noqa: SLF001
+    assert restarts == rustnode._RESTARTS  # noqa: SLF001
+    # The port is still the one that answered: the next request is answered as usual.
+    with pytest.raises(rustnode.PortUnavailable):
+        rustnode.require_node(reg)._exchange({"kind": "aRequestFromTheFuture"})  # noqa: SLF001
+
+
 def test_a_generator_that_is_not_pcg64_is_python_s(turns, flags_off) -> None:  # noqa: ANN001
     reg, pos, chosen = turns[0]
     portlp.set_advance(True)

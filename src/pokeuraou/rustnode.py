@@ -681,6 +681,17 @@ def disable(reason: str) -> bool:
     return False
 
 
+def _raise_unknown_kind(response: dict[str, Any]) -> None:
+    """A binary that does not know the request's kind (`node.rs`, IKA-458) is older than this
+    source: a restart is the same binary and the same answer, so stop now (`port.ask` does not
+    restart on `PortUnavailable`) instead of restarting until the restarts run out."""
+    if response.get("unknownKind"):
+        raise PortUnavailable(
+            f"the Rust node does not know this request ({response.get('error')}); "
+            "the binary predates it -- rebuild it (`cd rust && cargo build --release`)"
+        )
+
+
 class PortUnavailable(RuntimeError):
     """The production roads were asked for the port and there is none to ask (IKA-209)."""
 
@@ -1090,6 +1101,7 @@ class RustNode:
             raise RuntimeError(f"the Rust node process stopped: {self._stderr_text()}")
         with timing.stage("rust.header"):
             response = json.loads(line.decode("utf-8"))
+        _raise_unknown_kind(response)
         if "error" in response:
             raise RuntimeError(f"the Rust node refused the request: {response['error']}")
         _keep(request, payload, response)
@@ -1178,6 +1190,7 @@ class RustNode:
             raise RuntimeError(f"the Rust node process stopped: {self._stderr_text()}")
         with timing.stage("rust.header"):
             response = json.loads(line.decode("utf-8"))
+        _raise_unknown_kind(response)
         if "error" in response:
             raise RuntimeError(f"the Rust node refused the request: {response['error']}")
         return response
