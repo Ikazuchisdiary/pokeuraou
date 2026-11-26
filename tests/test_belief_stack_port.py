@@ -74,18 +74,51 @@ def _same(a, b) -> bool:  # noqa: ANN001
     )
 
 
+PATCHED = "patched side=rebuilt"
+
+
+def test_a_node_that_goes_back_to_python_counts_its_patches_once(  # noqa: ANN001
+    setup, server, stack_off, monkeypatch  # noqa: F811
+) -> None:
+    """With stage 1.3 on but the port unable to take the node, Python stacks it and `_patched`
+    alone counts the rows it patched (the descriptions made on the way count nothing)."""
+    from pokeuraou import beliefnode
+
+    reg, sheet, position = setup
+    ours = narrow(reg, position, 0, limit=10).actions
+    theirs = narrow(reg, position, 1, limit=10).actions
+    spreads = {s: completions(reg, position, s, sheet) for s in (0, 1)}
+    stub, address = server
+    counts = []
+    with RemoteValue(address, "stub", Encoder(reg), buffer_bytes=64 << 20) as leaf:
+        for stack, refuse in ((False, False), (True, True)):
+            if refuse:
+                monkeypatch.setattr(beliefnode, "_fold_request", lambda *a, **k: None)
+            before = leaf.encoder.used.get(PATCHED, 0)
+            _node(reg, position, ours, theirs, spreads, leaf, stack=stack)
+            counts.append(leaf.encoder.used.get(PATCHED, 0) - before)
+    assert counts[0] > 0 and counts[0] == counts[1], counts
+
+
 def _compare(reg, position, ours, theirs, spreads, server, *, batch=8192):  # noqa: ANN001, ANN202
     stub, address = server
     with RemoteValue(address, "stub", Encoder(reg), buffer_bytes=64 << 20, batch_size=batch) as leaf:
+        used = leaf.encoder.used
         del stub.log[:]
+        patched_before = used.get(PATCHED, 0)
         folded = _node(reg, position, ours, theirs, spreads, leaf, stack=False)
         folded_log = list(stub.log)
+        folded_patched = used.get(PATCHED, 0) - patched_before
         before = portlp.COUNTS.get("stacked", 0)
         del stub.log[:]
+        patched_before = used.get(PATCHED, 0)
         stacked = _node(reg, position, ours, theirs, spreads, leaf, stack=True)
         stacked_log = list(stub.log)
+        stacked_patched = used.get(PATCHED, 0) - patched_before
         ran = portlp.COUNTS.get("stacked", 0) - before
     assert ran == 1, "the port did not stack the node: the comparison is vacuous"
+    # The rows patched are counted once on either road (`encoder.note`).
+    assert folded_patched > 0 and stacked_patched == folded_patched
     assert folded_log and sum(rows for rows, _digest in stacked_log) > 0
     assert stacked_log == folded_log, "the server was sent other requests"
     assert _same(folded, stacked)

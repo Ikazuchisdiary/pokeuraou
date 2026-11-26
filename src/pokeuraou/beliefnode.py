@@ -680,11 +680,6 @@ class _Patcher:
         source = self._source
         side = self.side
         slots = tuple(slots)
-        if hasattr(self.encoder, "note"):
-            # What `_patched` notes for the block it makes: the rows it patched.
-            self.encoder.note(
-                "patched side=rebuilt", count if count is not None else len(rows or ())
-            )
 
         def pack(array: np.ndarray, dtype: str) -> str:
             part = np.ascontiguousarray(array[0, side, list(slots)], dtype=dtype)
@@ -784,6 +779,12 @@ def _served_in_port(  # noqa: PLR0913 - the node's pieces
     timing.count("forward.passes", requests)
     timing.count("serve.requests", requests)
     portlp.COUNTS["stacked"] = portlp.COUNTS.get("stacked", 0) + 1
+    if hasattr(encoder, "note"):
+        # What `_patched` notes for each block it makes (the rows it patched), counted here once
+        # the port has made them: a node that goes back to Python is counted by `_patched` alone.
+        for desc, count in zip(descs, rows, strict=True):
+            if desc.get("patch") is not None:
+                encoder.note("patched side=rebuilt", count)
     return _fold_answer(answer, jobs, m, n, asks)
 
 

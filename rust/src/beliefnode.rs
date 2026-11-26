@@ -413,6 +413,15 @@ impl PatchAt {
     }
 }
 
+/// A list of whole numbers; anything else in it, or no list, is an error (no element is dropped).
+fn usizes(v: &Value, what: &str) -> Result<Vec<usize>, String> {
+    v.as_array()
+        .ok_or_else(|| format!("{what} is not a list"))?
+        .iter()
+        .map(|x| x.as_u64().map(|n| n as usize).ok_or_else(|| format!("{what} holds a non-number: {x}")))
+        .collect()
+}
+
 fn i32s(v: &Value) -> Result<Vec<i32>, String> {
     let bytes = b64_decode(v.as_str().ok_or("an i32 array is not base64 text")?)?;
     Ok(bytes.chunks_exact(4).map(|b| i32::from_le_bytes(b.try_into().unwrap())).collect())
@@ -526,13 +535,19 @@ fn served_node(widths: &Widths, value: &Value) -> Result<Value, Value> {
         for part in parts {
             let ticket = part["ticket"].as_u64().ok_or_else(|| error("a part without a ticket".into()))?;
             let held = h.get(&ticket).ok_or_else(|| error(format!("no fill held as {ticket}")))?;
-            let cut: Option<Vec<usize>> = part
-                .get("rows")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_u64).map(|x| x as usize).collect());
+            let cut: Option<Vec<usize>> = match part.get("rows").filter(|r| !r.is_null()) {
+                None => None,
+                Some(list) => Some(usizes(list, "a part's rows").map_err(error)?),
+            };
             let patching = part.get("patch").is_some_and(|p| !p.is_null());
             let mut part_decided: Vec<f64> = match &cut {
-                Some(rs) => rs.iter().map(|r| held.decided.get(*r).copied().unwrap_or(f64::NAN)).collect(),
+                Some(rs) => {
+                    let mut got = Vec::with_capacity(rs.len());
+                    for r in rs {
+                        got.push(*held.decided.get(*r).ok_or_else(|| error(format!("a part's row {r} past the fill")))?);
+                    }
+                    got
+                }
                 None => held.decided.clone(),
             };
             let per_row = (2 * widths.mons_per_side).max(1);
@@ -544,10 +559,7 @@ fn served_node(widths: &Widths, value: &Value) -> Result<Value, Value> {
                 if patching {
                     let p = &part["patch"];
                     let side = p["side"].as_u64().ok_or_else(|| error("a patch without side".into()))? as usize;
-                    let slots: Vec<usize> = p["slots"]
-                        .as_array()
-                        .map(|a| a.iter().filter_map(Value::as_u64).map(|x| x as usize).collect())
-                        .unwrap_or_default();
+                    let slots = usizes(&p["slots"], "a patch's slots").map_err(error)?;
                     patch(&mut block, widths, &at, side, &slots, &p["source"]).map_err(error)?;
                 }
                 rows.push(block.species.len() / per_row);
@@ -576,9 +588,13 @@ fn served_node(widths: &Widths, value: &Value) -> Result<Value, Value> {
         Ok((values, decided))
     })?;
     // `encode.settle`: an ended leaf is its result, after the pass.
+    if decided.len() != values.len() {
+        return Err(json!({ "error": format!(
+            "the server answered {} values for {} leaves", values.len(), decided.len()) }));
+    }
     let mut ended = 0u64;
     for (i, d) in decided.iter().enumerate() {
-        if !d.is_nan() && i < values.len() {
+        if !d.is_nan() {
             ended += 1;
             if !net_scores_ends {
                 values[i] = *d;
@@ -791,6 +807,30 @@ mod tests {
         patch(&mut e, &w, &at, 0, &[1], &source()).unwrap();
         assert_eq!(e.mon[4], 0.0, "can_mega is cleared where the side has mega evolved");
         assert_eq!(e.side[1], 0.0);
+    }
+
+    #[test]
+    fn a_part_read_wrongly_is_an_error_and_not_a_shorter_part() {
+        let (w, _at, e) = tiny();
+        hold(7, true, &e, &json!({ "leaves": 1, "decided": [] }));
+        let request = |rows: Value, slots: Value| {
+            json!({
+                "server": { "address": "127.0.0.1:1", "model": "m", "shm": "s", "bytes": 1 },
+                "patch": { "can_mega": 0, "maxhp_scaled": 1, "hp_fraction": 2, "fainted": 3, "mega_used": 0,
+                           "mega_available": 1, "alive_fraction": 2, "team_hp_fraction": 3, "hp_scale": 250.0 },
+                "parts": [ { "ticket": 7, "rows": rows,
+                             "patch": { "side": 0, "slots": slots, "source": {} } } ],
+            })
+        };
+        // A row that is not a number (it used to be dropped, leaving a shorter part).
+        let got = belief_served(&w, &request(json!([0, "x"]), json!([1])));
+        assert!(got["error"].as_str().unwrap().contains("a part's rows holds a non-number"), "{got}");
+        // A slot that is not a number.
+        let got = belief_served(&w, &request(json!([0]), json!(["x"])));
+        assert!(got["error"].as_str().unwrap().contains("a patch's slots holds a non-number"), "{got}");
+        // A row past the fill.
+        let got = belief_served(&w, &request(json!([5]), json!([1])));
+        assert!(got["error"].as_str().is_some(), "{got}");
     }
 
     #[test]
