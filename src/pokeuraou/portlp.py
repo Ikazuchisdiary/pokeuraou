@@ -72,7 +72,9 @@ COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps"
           # IKA-457 stage 2.2: the replacement nodes the port solved in one request.
           "replaced": 0,
           # IKA-457 stage 2.3: the move nodes whose menus the port built.
-          "menus": 0}
+          "menus": 0,
+          # IKA-457 stage 2.4: the move nodes whose menus and node were one request.
+          "decided": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -204,6 +206,22 @@ def set_menus(on: bool) -> None:
 
 set_menus(MENUS[0])
 
+DECIDE_ENV = "POKEURAOU_GEN_PORT_DECIDE"
+#: IKA-457 stage 2.4: whether a move node's menus and the node over them are one request to the
+#: port (`moveNode`: `rootMenus` and `beliefNode` in one, `beliefnode.fused_node`). Off by default,
+#: and off in `default_on_for_generation`. On includes `MENUS` (and so the stages below it).
+DECIDE = [os.environ.get(DECIDE_ENV, "0").strip() == "1"]
+
+
+def set_decide(on: bool) -> None:
+    """Turn stage 2.4 on or off in this process; on turns `MENUS` on too."""
+    DECIDE[0] = bool(on)
+    if on:
+        set_menus(True)
+
+
+set_decide(DECIDE[0])
+
 
 def default_on_for_generation() -> None:
     """Generation's, and its board's, default: stage 1.4's whole-node road, unless
@@ -228,7 +246,8 @@ def echo() -> str:
         f"node {word[NODE[0]]} (POKEURAOU_GEN_PORT_NODE={os.environ.get(NODE_ENV, '(unset)')}), "
         f"exact {word[EXACT[0]]} ({EXACT_ENV}={os.environ.get(EXACT_ENV, '(unset)')}), "
         f"replace {word[REPLACE[0]]} ({REPLACE_ENV}={os.environ.get(REPLACE_ENV, '(unset)')}), "
-        f"menus {word[MENUS[0]]} ({MENUS_ENV}={os.environ.get(MENUS_ENV, '(unset)')}); "
+        f"menus {word[MENUS[0]]} ({MENUS_ENV}={os.environ.get(MENUS_ENV, '(unset)')}), "
+        f"decide {word[DECIDE[0]]} ({DECIDE_ENV}={os.environ.get(DECIDE_ENV, '(unset)')}); "
         f"faults solved in Python: {COUNTS['faults']}; {counts()}"
     )
 
@@ -452,9 +471,9 @@ def counts() -> dict[str, int]:
     return dict(COUNTS)
 
 
-__all__ = ["COUNTS", "ENV", "EXACT", "EXACT_ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "NODE",
-           "NODE_ENV", "MENUS", "MENUS_ENV", "ON", "REPLACE", "REPLACE_ENV", "PortFault", "STACK",
-           "STACK_ENV", "bayesian_answer", "counts", "default_on_for_generation", "echo",
-           "faulted", "set_exact", "set_fold", "set_gen", "set_menus", "set_node", "set_on",
-           "set_replace", "set_stack", "solve_bayesian_many", "solve_bayesian_one", "solve_many",
-           "solve_one", "solve_subs"]
+__all__ = ["COUNTS", "DECIDE", "DECIDE_ENV", "ENV", "EXACT", "EXACT_ENV", "FOLD", "FOLD_ENV",
+           "GEN", "GEN_ENV", "NODE", "NODE_ENV", "MENUS", "MENUS_ENV", "ON", "REPLACE",
+           "REPLACE_ENV", "PortFault", "STACK", "STACK_ENV", "bayesian_answer", "counts",
+           "default_on_for_generation", "echo", "faulted", "set_decide", "set_exact", "set_fold",
+           "set_gen", "set_menus", "set_node", "set_on", "set_replace", "set_stack",
+           "solve_bayesian_many", "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]

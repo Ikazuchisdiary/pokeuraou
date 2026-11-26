@@ -823,6 +823,76 @@ def _fingerprint(path: Path | str) -> dict:
     return json.loads(_fingerprint_of(str(path)))
 
 
+def ranking_view(
+    pos: Position,
+    spreads: dict[int, list] | None,
+    side: int,
+    rank_view: str,
+    used: dict[int, tuple[int, tuple[str, ...]]] | None,
+) -> Position:
+    """The position side `side` ranks from in `_menus`: the node itself, or the completion of
+    the other side's bench that `rank_view` picks (the heaviest, first on ties; `first` is the
+    first). `used`, when given, gets `side -> (index, species)` of the completion."""
+    if spreads is None:
+        return pos
+    items = spreads[1 - side]
+    if not items:
+        return pos
+    # `max` keeps the first of equal maxima, so uniform weights pick index 0.
+    index = 0 if rank_view == "first" else max(range(len(items)), key=lambda i: items[i].weight)
+    if used is not None:
+        used[side] = (index, tuple(items[index].species))
+    return items[index].position
+
+
+def _decide(  # noqa: PLR0913 - the node's pieces
+    reg: Regulation,
+    pos: Position,
+    limits: tuple[int, int],
+    own_leaf: LeafEvaluator,
+    foe_leaf: LeafEvaluator,
+    budget: Budget,
+    rank_by_leaf: bool,
+    policy: Any,  # noqa: ANN401
+    spreads: dict[int, list] | None,
+    same_menu: bool,
+    cells: tuple[int, int],
+    depths: Sequence[int],
+    selects: tuple[str, str],
+    widened: bool,
+    rank_view: str,
+    used: dict[int, tuple[int, tuple[str, ...]]],
+    rank_fill: str | None,
+) -> tuple[list[SideAction], list[SideAction], Any] | None:
+    """IKA-457 stage 2.4: a hidden-bench move node's menus (`_menus`, a `q-nocover` fill) and the
+    node over them (`belief_solve`'s `belief_payoffs`) in one request to the port, as
+    (ours, theirs, the node) -- or None where the two are built apart, as before. The node is
+    for `belief_solve(..., prebuilt=...)`, and stands for the one both sides share: the two
+    sides search with one leaf over one menu pair, undeepened, at depth 1."""
+    from . import portlp
+
+    if (
+        not portlp.DECIDE[0] or spreads is None or not same_menu or widened
+        or tuple(cells) != (0, 0) or own_leaf is not foe_leaf
+        or tuple(depths) != (1, 1) or tuple(selects) != (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT)
+        or policy is not None or not rank_by_leaf
+    ):
+        return None
+    fill = resolve_rank_fill(rank_fill, True)
+    if not is_q(fill) or rank_fill_covers(fill):
+        return None
+    from . import beliefnode, rootmenus
+
+    views = [ranking_view(pos, spreads, side, rank_view, used) for side in (0, 1)]
+    planned = rootmenus.plan(reg, pos, views, limits, fill, server_key="qServer")
+    if planned is None:
+        return None
+    node = beliefnode.fused_node(reg, pos, planned, budget, spreads, own_leaf, (0, 1))
+    if node is None:
+        return None
+    return planned.menus[0], planned.menus[1], node
+
+
 def _menus(
     reg: Regulation,
     pos: Position,
@@ -922,20 +992,7 @@ def _menus(
         `used`, when given, gets `side -> (index, species)` of the completion side
         `side` ranked from, so the caller can record it.
         """
-        if spreads is None:
-            return [(pos, 1.0)]
-        items = spreads[1 - side]
-        if not items:
-            return [(pos, 1.0)]
-        # `max` keeps the first of equal maxima, so uniform weights pick index 0.
-        index = (
-            0
-            if rank_view == "first"
-            else max(range(len(items)), key=lambda i: items[i].weight)
-        )
-        if used is not None:
-            used[side] = (index, tuple(items[index].species))
-        return [(items[index].position, 1.0)]
+        return [(ranking_view(pos, spreads, side, rank_view, used), 1.0)]
 
     if policy is None and is_q(rank_fill) and not widths and not cover:
         # IKA-457 stage 2.3: both menus in one request to the port, where it is on.
@@ -1641,14 +1698,23 @@ def play_game(
         own_views: dict[int, tuple[int, tuple[str, ...]]] = {}
         foe_views: dict[int, tuple[int, tuple[str, ...]]] | None = None
         rank_scores.at_node(len(record.decisions), pos.turn, 0)  # IKA-278
+        prebuilt = None
         with scope(0):
-            ours, theirs = _menus(
-                reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
-                rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
-                # Side 1 reads these too when the two build one menu.
-                wide=[oracles[side] for side in (0, 1) if widens[side] and (side == 0 or same_menu)],
-                wider=own_wider,
+            decided = _decide(
+                reg, pos, limits, own_leaf, foe_leaf, budget, ranked[0], policies[0], spreads,
+                same_menu, cells, depths, selects, any(widens), views_rule[0], own_views, fills[0],
             )
+            if decided is not None:
+                # IKA-457 stage 2.4: the menus and the node over them, one request.
+                ours, theirs, prebuilt = decided
+            else:
+                ours, theirs = _menus(
+                    reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
+                    rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
+                    # Side 1 reads these too when the two build one menu.
+                    wide=[oracles[side] for side in (0, 1) if widens[side] and (side == 0 or same_menu)],
+                    wider=own_wider,
+                )
         menu_seconds = perf_counter() - menu_started
         if not ours or not theirs:
             break
@@ -1707,6 +1773,7 @@ def play_game(
                                 if hidden_deep[side]
                             } or None,
                             select=selects,
+                            prebuilt=prebuilt,
                         )
                         if asked
                         else {}

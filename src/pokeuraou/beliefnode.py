@@ -542,6 +542,57 @@ def portlp_faulted(where: str, why: object) -> None:
     portlp.faulted(where, why)
 
 
+def fused_node(  # noqa: PLR0913 - the node's pieces
+    reg: Regulation,
+    position: Position,
+    planned,  # noqa: ANN001 - `rootmenus.Plan`
+    budget: Budget,
+    spreads: dict[int, list],
+    evaluate: Callable[[list[Position]], np.ndarray],
+    solve: Sequence[int],
+) -> BeliefNode | None:
+    """IKA-457 stage 2.4: the menus (`planned`, `rootmenus.plan`) and the node over them in one
+    `moveNode` request: the `BeliefNode` `belief_payoffs` would build over those menus, with the
+    menus in ``planned.menus``. None where the node would not be the port's whole-node request's
+    (then nothing has been sent, and Python builds the menus and the node)."""
+    from . import portlp
+    from .encode import rules_of
+
+    if not portlp.NODE[0] or timing.DUPES:
+        return None
+    hidden = {
+        side: (items[0].slots if items and not items[0].exact else ())
+        for side, items in spreads.items()
+    }
+    exact_node = not any(hidden.values())
+    if exact_node and not portlp.EXACT[0]:
+        return None
+    owner = getattr(evaluate, "__self__", evaluate)
+    scorer = getattr(owner, "from_encoded", None)
+    if scorer is None:
+        return None
+    encoder = getattr(owner, "encoder", None) or _encoder_for(reg)
+    rules = rules_of(evaluate)
+    leaf = _stack_leaf(owner, rules)
+    if leaf is None:
+        return None
+    if timing.ON:
+        timing.refine("hidden" if any(hidden.values()) else "exact")
+        timing.count("completions", sum(len(items) for items in spreads.values()))
+    try:
+        done = _node_in_port(
+            reg, leaf, position, None, None, budget, rules, hidden, spreads, solve, scorer,
+            encoder, fused=planned,
+        )
+    except portlp.PortFault as fault:
+        portlp.faulted("moveNode", fault)
+        return None
+    if done is _NOT_ON_THIS_BINARY:
+        return None
+    portlp.COUNTS["decided"] += 1
+    return done
+
+
 def _fold_request(  # noqa: PLR0913 - the node's pieces
     filled,  # noqa: ANN001 - EncodedNode, the reference fill
     jobs: list,
@@ -861,10 +912,15 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     solve: Sequence[int],
     scorer: Callable,
     encoder,  # noqa: ANN001 - Encoder
+    fused=None,  # noqa: ANN001 - `rootmenus.Fused`
 ):  # noqa: ANN202 - a BeliefNode, or `_NOT_ON_THIS_BINARY`
     """The whole node in the port (`beliefNode`, IKA-455 stage 1.4): what `belief_payoffs` does
     from the reference fill to the folded matrices, in one crossing. Python sends the positions,
-    the actions and what it alone reads off them; the answer is the node."""
+    the actions and what it alone reads off them; the answer is the node.
+
+    With ``fused`` (IKA-457 stage 2.4) the actions are not Python's: the request is `moveNode`,
+    which builds both menus first (`fused.request` is `rootMenus`' half) and solves the node over
+    them, `row` and `col` are None, and `fused.finish` takes the menus' half of the answer."""
     from types import SimpleNamespace
 
     from . import portlp, rustnode
@@ -887,17 +943,23 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
                        for mon in item.position.sides[side].pokemon],
             })
     request.update({
-        "ours": _candidates(row),
-        "theirs": _candidates(col),
         "budget": dump_budget(budget),
-        "rows": len(row),
-        "cols": len(col),
         "hidden": [list(hidden.get(0, ())), list(hidden.get(1, ()))],
         "carded": [_red_card_on_field(position, 0), _red_card_on_field(position, 1)],
-        "rowFeat": _action_features(reg, row),
-        "colFeat": _action_features(reg, col),
         "jobs": jobs,
     })
+    if fused is None:
+        request.update({
+            "ours": _candidates(row),
+            "theirs": _candidates(col),
+            "rows": len(row),
+            "cols": len(col),
+            "rowFeat": _action_features(reg, row),
+            "colFeat": _action_features(reg, col),
+        })
+    else:
+        request["kind"] = "moveNode"
+        request.update(fused.request)
     if rules.mega_from_slots:
         request["encoding"] = rules.to_request()
     asks = []
@@ -930,7 +992,9 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
         "hp_scale": float(HP_SCALE),
     }
     started = timing.clock()
-    answer = port.ask(reg, lambda node: node.belief_node(request))
+    answer = port.ask(
+        reg, lambda node: node.move_node(request) if fused is not None else node.belief_node(request)
+    )
     wall = timing.clock() - started
     portlp.COUNTS["crossings"] += 1
     portlp.COUNTS["lps"] += int(answer.get("lps", 0))
@@ -941,6 +1005,9 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
                               "capGb": answer.get("capGb")}, "inference failed")
     if "fills" not in answer:
         raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
+    if fused is not None:
+        # The menus' half of the answer: their counts and clocks, as `rootmenus.menus` books them.
+        fused.finish(answer["rootMenus"])
     # What `fill_encoded` booked for each fill, booked from what the port says it did.
     for fill in answer["fills"]:
         with timing.purpose(fill["purpose"]):
@@ -992,6 +1059,8 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
             encoder.note("patched side=rebuilt", int(rows))
     unmodelled = set(answer["unmodelled"])
     ordered = [SimpleNamespace(side=job["side"]) for job in jobs]
+    if fused is not None:
+        row, col = fused.menus
     payoffs, solved = _fold_answer(answer, ordered, len(row), len(col), asks)
     matrices: dict[int, list[np.ndarray]] = {}
     for job, payoff in zip(ordered, payoffs, strict=True):

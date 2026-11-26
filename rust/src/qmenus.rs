@@ -446,11 +446,19 @@ fn uncovered(pool: &[SideAct], kept: &[usize], limit: usize) -> usize {
 /// request). An empty pool, or a position of another regulation, is a `fault`.
 pub fn root_menus(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
     match root_menus_node(reg, encoder, value) {
-        Ok(answer) | Err(answer) => answer,
+        Ok((answer, _kept)) => answer,
+        Err(answer) => answer,
     }
 }
 
-fn root_menus_node(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
+/// `rootMenus`' answer and the two menus themselves (the actions, for `moveNode`, which solves
+/// the node over them in the same request). The Q's server is `qServer` when the request names
+/// one beside the node's own `server`.
+pub(crate) fn root_menus_node(
+    reg: &Reg,
+    encoder: &Encoder,
+    value: &Value,
+) -> Result<(Value, [Vec<SideAct>; 2]), Value> {
     let fault = |e: String| json!({ "fault": e });
     let widths: Vec<usize> = value["widths"]
         .as_array()
@@ -463,7 +471,8 @@ fn root_menus_node(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value,
     let eps = value.get("eps").and_then(Value::as_f64).unwrap_or(1e-9);
     let properties = value.get("properties").and_then(Value::as_bool).unwrap_or(true);
     let rules = EncodeRules { mega_from_slots: value.get("megaFromSlots").and_then(Value::as_bool).unwrap_or(false) };
-    let server = Server::from_json(&value["server"]).map_err(fault)?;
+    let server = Server::from_json(value.get("qServer").filter(|s| !s.is_null()).unwrap_or(&value["server"]))
+        .map_err(fault)?;
     let blas = Blas::from_json(&value["blas"]).map_err(fault)?;
     let same = value.get("same").and_then(Value::as_bool).unwrap_or(false);
     let pos = crate::held::position(&value["position"]);
@@ -509,6 +518,7 @@ fn root_menus_node(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value,
         },
     })?;
     let mut menus = Vec::with_capacity(2);
+    let mut kept_actions: [Vec<SideAct>; 2] = [Vec::new(), Vec::new()];
     let mut cuts = Vec::with_capacity(2);
     let mut cells = Vec::with_capacity(2);
     let mut unsolved = 0u64;
@@ -524,13 +534,14 @@ fn root_menus_node(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value,
         let both = &solved_once[r].as_ref().expect("solved just above").0;
         let kept = top(&pools[r][s], &both[s], widths[s]);
         cuts.push(uncovered(&pools[r][s], &kept, widths[s]));
+        kept_actions[s] = kept.iter().map(|&i| pools[r][s][i].clone()).collect();
         menus.push(Value::Array(
             kept.iter().map(|&i| Value::Array(pools[r][s][i].iter().map(legal::Act::to_json).collect())).collect(),
         ));
         cells.push(m * n);
     }
     MENUS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(json!({
+    Ok((json!({
         "kind": "rootMenus",
         "menus": menus,
         "uncovered": cuts,
@@ -541,5 +552,72 @@ fn root_menus_node(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value,
         "served": { "requests": stats.requests, "waitUs": stats.wait_ns as f64 / 1e3, "copyUs": stats.copy_ns as f64 / 1e3 },
         "legalUs": legal_ns as f64 / 1e3,
         "arraysUs": arrays_ns as f64 / 1e3,
-    }))
+    }), kept_actions))
+}
+
+/// A slot action as `rustnode.dump_action` writes it, which `parse_slot_action` reads.
+fn act_json(act: &legal::Act) -> Value {
+    match act {
+        legal::Act::Move { slot, index, move_id, target, mega } => json!({
+            "kind": "move", "slot": slot, "moveIndex": index, "moveId": move_id.as_str(),
+            "target": target, "mega": mega,
+        }),
+        legal::Act::Switch { slot, party, species } => json!({
+            "kind": "switch", "slot": slot, "partyIndex": party, "species": species.as_str(),
+        }),
+        legal::Act::Pass { slot } => json!({ "kind": "pass", "slot": slot }),
+    }
+}
+
+/// Showdown's ID normalisation (`regulation.to_id`): lowercase, everything but letters and digits out.
+fn to_id(name: &str) -> String {
+    name.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// What `beliefnode._action_features` reads off an action: whether it forces a switch, attacks,
+/// and which party members its switches bring in.
+fn action_feature(reg: &Reg, action: &SideAct) -> Value {
+    const PHAZING: [&str; 4] = ["dragontail", "circlethrow", "whirlwind", "roar"];
+    let mut phazes = false;
+    let mut attacks = false;
+    let mut switches: Vec<Value> = Vec::new();
+    for act in action {
+        match act {
+            legal::Act::Move { move_id, .. } => {
+                phazes |= PHAZING.contains(&move_id.as_str());
+                attacks |= reg
+                    .moves
+                    .get(move_id)
+                    .is_some_and(|m| m.category != crate::reg::Category::Status);
+            }
+            legal::Act::Switch { party, species, .. } => switches.push(json!([party, to_id(species.as_str())])),
+            legal::Act::Pass { .. } => {}
+        }
+    }
+    json!({ "p": phazes, "a": attacks, "s": switches })
+}
+
+/// IKA-457 stage 2.4 `moveNode`: a move node's menus and the node over them in one request.
+///
+/// `rootMenus`' request and `beliefNode`'s (minus `ours`, `theirs`, `rows`, `cols`, `rowFeat` and
+/// `colFeat`, which come from the menus built here), with the Q's server named `qServer`. The
+/// answer is `beliefNode`'s and `rootMenus`' under `rootMenus`. A fault in either is the answer.
+pub fn move_node(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
+    let (menus_answer, kept) = match root_menus_node(reg, encoder, value) {
+        Ok(got) => got,
+        Err(answer) => return answer,
+    };
+    let mut asked = value.clone();
+    asked["ours"] = Value::Array(kept[0].iter().map(|a| Value::Array(a.iter().map(act_json).collect())).collect());
+    asked["theirs"] = Value::Array(kept[1].iter().map(|a| Value::Array(a.iter().map(act_json).collect())).collect());
+    asked["rows"] = json!(kept[0].len());
+    asked["cols"] = json!(kept[1].len());
+    asked["rowFeat"] = Value::Array(kept[0].iter().map(|a| action_feature(reg, a)).collect());
+    asked["colFeat"] = Value::Array(kept[1].iter().map(|a| action_feature(reg, a)).collect());
+    let mut answer = crate::beliefplan::belief_node(reg, encoder, &asked);
+    if answer.get("fault").is_some() || answer.get("serverError").is_some() {
+        return answer;
+    }
+    answer["rootMenus"] = menus_answer;
+    answer
 }

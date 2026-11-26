@@ -1233,6 +1233,8 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("qMenus") => crate::qmenus::q_menus(reg, encoder, &value),
         // IKA-457 stage 2.3: a move node's two menus by the Q in one crossing (`rootMenus`).
         Ok(value) if value["kind"].as_str() == Some("rootMenus") => crate::qmenus::root_menus(reg, encoder, &value),
+        // IKA-457 stage 2.4: those menus and the hidden bench's node over them in one request.
+        Ok(value) if value["kind"].as_str() == Some("moveNode") => crate::qmenus::move_node(reg, encoder, &value),
         // IKA-389: held positions written out, for a caller that kept only their numbers
         // (a `bare` turn's branches) and needs one whole.
         Ok(value) if value["kind"].as_str() == Some("positions") => json!({
