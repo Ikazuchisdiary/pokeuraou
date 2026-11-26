@@ -923,7 +923,7 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     them, `row` and `col` are None, and `fused.finish` takes the menus' half of the answer."""
     from types import SimpleNamespace
 
-    from . import portlp, rustnode
+    from . import portlp
     from .encode import HP_SCALE
     from .inference import request_failed
     from .rustnode import _candidates, _position, dump_budget  # noqa: PLC2701

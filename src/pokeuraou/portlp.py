@@ -84,7 +84,9 @@ COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps"
           # IKA-458 stage 3.2: the self-switch nodes the port chose and played on.
           "selfswitched": 0,
           # IKA-458 stage 3.6a: the replacement phases the port chose and played in one request.
-          "phased": 0}
+          "phased": 0,
+          # IKA-458 stage 3.6b: the moves the port played inside a game request.
+          "played": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
