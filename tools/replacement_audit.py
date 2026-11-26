@@ -395,13 +395,6 @@ class SheetFinder:
             from pokeuraou.teams import load_roster
 
             self.roster = load_roster(args.roster)
-        if args.book:
-            from pokeuraou.selection_book import SelectionBook
-
-            book = SelectionBook.read(Path(args.book))
-            for entry in book.entries.values():
-                for sets in entry.class_sets:
-                    self.index.setdefault(tuple(s.species for s in sets), []).append((entry, sets))
 
     def for_game(self, g: dict[str, Any]) -> tuple[tuple[Any, Any], tuple[Any, Any] | None]:
         from pokeuraou.selection_book import BenchPrior
@@ -606,7 +599,6 @@ def main() -> None:
     ap.add_argument("--leads", action="store_true", help="condition the bench prior on the leads (IKA-118)")
     ap.add_argument("--definition", choices=("belief", "true"), default="belief")
     ap.add_argument("--value", help="the leaf the records were generated with (.pt)")
-    ap.add_argument("--book", help="selection book (M-B): finds the foe six and its prior")
     ap.add_argument("--roster", default="rizabanadohido")
     ap.add_argument("--pool", help="pool file (M-C)")
     ap.add_argument("--selection-store", help="the run's selection-solved directory (M-C)")

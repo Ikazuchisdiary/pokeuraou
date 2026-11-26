@@ -448,7 +448,7 @@ def _reads_their_back_two(positions):  # noqa: ANN001, ANN202
     return np.asarray(out, dtype=np.float64)
 
 
-def _self_switch_pick(reg, sheet, foe, monkeypatch, *, hidden):  # noqa: ANN001, ANN202
+def _self_switch_pick(reg, sheet, foe, monkeypatch, *, hidden, prior=None):  # noqa: ANN001, ANN202
     import types
 
     import numpy as np
@@ -469,6 +469,7 @@ def _self_switch_pick(reg, sheet, foe, monkeypatch, *, hidden):  # noqa: ANN001,
         start=_uturn_start(reg, sheet[:4], foe),
         evaluate=_reads_their_back_two,
         sheets=(sheet, sheet),
+        bench_prior=prior,
         max_turns=1,
     )
     picks = [d for d in record.decisions if d.kind == "selfswitch"]
@@ -489,6 +490,23 @@ def test_the_self_switch_does_not_read_their_true_bench(setup, monkeypatch) -> N
     brought = sheet[:4]  # Garchomp and Sylveon at the back
     other = sheet[:2] + sheet[4:6]  # Toxapex and Incineroar at the back
     assert [s.species for s in other[2:]] == ["toxapex", "incineroar"]
+
+    # The positive control that replaces the open game (IKA-460): a belief that is certain
+    # of side 1's real four reads that bench, so the leaf does reach the choice and the node
+    # picks differently for the two benches; with the belief left open it must not.
+    from pokeuraou.selection_book import BenchPrior
+
+    species = tuple(s.species for s in sheet)
+    certain = [
+        _self_switch_pick(
+            reg, sheet, foe, monkeypatch, hidden=True,
+            prior=(None, BenchPrior(selections=(picks,), probabilities=(1.0,), species=species)),
+        )
+        for foe, picks in ((brought, (0, 1, 2, 3)), (other, (0, 1, 4, 5)))
+    ]
+    assert certain == ["switch 4, pass", "switch 3, pass"], (
+        f"a belief certain of side 1's bench should follow it: {certain}"
+    )
 
     hidden_picks = [
         _self_switch_pick(reg, sheet, foe, monkeypatch, hidden=True)

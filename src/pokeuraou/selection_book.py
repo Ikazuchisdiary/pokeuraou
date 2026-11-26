@@ -42,19 +42,14 @@ from so a reader can never confuse them.
 
 from __future__ import annotations
 
-import gzip
-import json
 import math
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .priors import SampledSet
-from .regulation import repo_root
-from .standings import TournamentTeam
 
 #: Exploration defaults. `epsilon` is the share of games drawn from the softened
 #: distribution instead of the equilibrium; `temperature` shapes that share towards
@@ -86,41 +81,6 @@ DEFAULT_EPSILON = 0.25
 #: all three consumers read it -- self-play, its CLI, and `book_check`'s `gen` arm, which
 #: exists to imitate generation and would otherwise imitate the wrong thing.
 DEFAULT_TEMPERATURE = 0.5
-
-
-def selection_dir() -> Path:
-    return repo_root() / "data" / "selection"
-
-
-def _member_key(species: str, ability: str | None, item: str | None,
-                nature: str, moves: Sequence[str]) -> str:
-    return "|".join(
-        (species, ability or "?", item or "-", nature, ",".join(sorted(moves)))
-    )
-
-
-def key_for_team(team: TournamentTeam) -> str:
-    """The cache key: the opponent's six exactly as their team sheet shows them.
-
-    Public information, available to both players before selection -- see constraint 1 in
-    the module docstring. An ability the sheet did not show (the mega forme case) is keyed
-    as unknown rather than filled in, because filling it in would key on something we
-    cannot see and would split one team into several entries.
-
-    Species order is kept, not sorted: two entries with the same six in a different party
-    order are the same sheet, but the selection indices in a cached strategy refer to
-    *this* order, so an entry may only be reused for a team that lists them the same way.
-    """
-    return "/".join(
-        _member_key(
-            m.species,
-            None if m.ability_is_post_mega else m.ability,
-            m.item,
-            m.nature,
-            m.moves,
-        )
-        for m in team.members
-    )
 
 
 def set_to_json(entry: SampledSet) -> dict[str, Any]:
@@ -376,294 +336,6 @@ class BookEntry:
         )
 
 
-@dataclass(slots=True)
-class SelectionBook:
-    """Solved selections keyed by team sheet, plus what they were solved with."""
-
-    entries: dict[str, BookEntry] = field(default_factory=dict)
-    #: The roster the row strategies belong to. A book solved for one of our teams says
-    #: nothing about another, and loading it against the wrong roster would silently
-    #: reinterpret 90 indices -- so the roster is stored and checked.
-    roster: str = ""
-    model: str = ""
-    format_id: str = ""
-    #: What the games that trained this book's leaf could see, as
-    #: ``{"open": n, "hidden-bench": m}``. The book prints a win probability, and that is a
-    #: prediction about whoever played the games the leaf learned from -- measured on place
-    #: 109, a leaf whose pool is 83% omniscient claims 62.8% where open play returns 59.2%
-    #: and the hidden-bench play the product actually ships returns 50.0%. Empty means the
-    #: book predates this being recorded, not that the pool was open.
-    information: dict[str, int] = field(default_factory=dict)
-
-    def __len__(self) -> int:
-        return len(self.entries)
-
-    def get(self, team: TournamentTeam) -> BookEntry | None:
-        return self.entries.get(key_for_team(team))
-
-    def add(self, entry: BookEntry) -> None:
-        self.entries[entry.key] = entry
-
-    def write(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with gzip.open(path, "wt", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "header": {
-                            "roster": self.roster,
-                            "model": self.model,
-                            "format": self.format_id,
-                            "information": self.information,
-                            "entries": len(self.entries),
-                        }
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-            for entry in self.entries.values():
-                handle.write(json.dumps(entry.to_json(), ensure_ascii=False) + "\n")
-
-    @classmethod
-    def read(cls, path: Path) -> SelectionBook:
-        book = cls()
-        with gzip.open(path, "rt", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                data = json.loads(line)
-                header = data.get("header")
-                if header is not None:
-                    book.roster = header.get("roster", "")
-                    book.model = header.get("model", "")
-                    book.format_id = header.get("format", "")
-                    book.information = dict(header.get("information") or {})
-                    continue
-                book.add(BookEntry.from_json(data))
-        return book
-
-    def covered(self, teams: Iterable[TournamentTeam]) -> tuple[int, int]:
-        """(how many of these teams the book answers, how many there are)."""
-        total = 0
-        hit = 0
-        for team in teams:
-            total += 1
-            hit += int(key_for_team(team) in self.entries)
-        return hit, total
-
-    def require_roster(self, roster: str) -> None:
-        """Refuses a book solved for another of our teams.
-
-        The 90 numbers in a row strategy are indices into *a party order*, so reading a
-        book against a different roster would not fail -- it would quietly recommend the
-        wrong four. Checked wherever a book is loaded rather than trusted to the filename.
-        """
-        if self.roster and roster and self.roster != roster:
-            raise ValueError(
-                f"this selection book was solved for roster {self.roster!r}, not "
-                f"{roster!r}; its 90 selections index that team's party order"
-            )
-
-
-#: The selection rules a head-to-head run can put on either seat, as "ours/theirs".
-#: "book" is the equilibrium, "gen" is the equilibrium plus the exploration share that
-#: generation actually plays, and "uniform" is the draw generation used before any of this.
-ARMS = ("uniform/uniform", "book/uniform", "book/book", "gen/gen")
-
-
-def _pick(rng: np.random.Generator, weights: np.ndarray) -> int:
-    cumulative = np.cumsum(np.asarray(weights, dtype=np.float64))
-    cumulative /= cumulative[-1]
-    return min(
-        int(np.searchsorted(cumulative, rng.random(), side="right")), len(cumulative) - 1
-    )
-
-
-def draw_across(
-    ours: BookEntry | None,
-    theirs: BookEntry | None,
-    rng: np.random.Generator,
-    *,
-    epsilon: float = 0.0,
-    temperature: float = 1.0,
-) -> SelectionDraw:
-    """One draw where the two sides consult DIFFERENT books.
-
-    :meth:`BookEntry.draw` takes both sides' selections from one entry, which is right
-    when both sides are the same agent and wrong the moment they are not: a book is the
-    equilibrium of the selection game as one model's value function defines it, so an
-    agent drawing from another model's book selects by an evaluation it does not use.
-
-    `tools/generation_match.py` accepted `--baseline-selection-book` and then consulted a
-    single book per game -- whichever arm sat at side 0 -- so the flag only ever swapped
-    which book governed BOTH sides, in half the games. Two matches run to compare own
-    books against a shared one returned the identical 380/848 in the seat they shared,
-    which is what finally showed it; the provenance said each arm used its own the whole
-    time.
-
-    The order of the three draws is the invariant, and it is spelled out again here for
-    the reason `draw_arm` gives: two sides drawn by different code paths is exactly where
-    the tempting shortcut reappears. Ours is taken first and BEFORE the class, so nothing
-    downstream of the opponent's private type -- not even the position in the stream --
-    can reach our draw.
-
-    The class is neither arm's to choose. It is the opponent's investment, and it comes
-    from the spread prior rather than from any model: every entry of every book solved
-    for this roster carries identical `class_sets`, `class_weights` and `selections`,
-    which is checked here rather than trusted, because a class drawn from the wrong book
-    would silently pair one side's column strategy with the other side's spreads.
-
-    Either side may be ``None``, meaning that arm has no book and draws its four
-    uniformly. That is what "uniform selection" is -- a property of the ARM, which travels
-    with it into whichever seat it sits in. `generation_match`'s
-    `--baseline-uniform-selection` promised "the other arm draws its four uniformly" and
-    delivered it only where that arm sat at side 0, because the uniform draw replaced our
-    pick and side 0 is always our roster; in the other seat the same arm took its four
-    from the book's column strategy. The flag was correct in half the games.
-    """
-    field = ours if ours is not None else theirs
-    if field is None:
-        raise ValueError("at least one side must have a book to name the opponent")
-    if ours is not None and theirs is not None and ours.class_sets != theirs.class_sets:
-        raise ValueError(
-            "the two books disagree about the opponent's spread classes, so there is no "
-            "single opponent for the two sides to be playing"
-        )
-    count = len(field.selections)
-    uniform = np.full(count, 1.0 / count)
-
-    our_mixture = (
-        uniform
-        if ours is None
-        else ours.our_mixture(epsilon=epsilon, temperature=temperature)
-    )
-    our_index = _pick(rng, our_mixture)
-    class_index = _pick(rng, np.asarray(field.class_weights, dtype=np.float64))
-    theirs_mixture = (
-        uniform
-        if theirs is None
-        else theirs.their_mixture(
-            class_index, epsilon=epsilon, temperature=temperature
-        )
-    )
-    their_index = _pick(rng, theirs_mixture)
-    return SelectionDraw(
-        foe_six=field.class_sets[class_index],
-        our_pick=field.selections[our_index],
-        foe_pick=field.selections[their_index],
-        our_equilibrium=(
-            uniform if ours is None
-            else np.asarray(ours.our_strategy, dtype=np.float64)
-        ),
-        foe_equilibrium=(
-            uniform if theirs is None
-            else np.asarray(theirs.their_strategies[class_index], dtype=np.float64)
-        ),
-        our_mixture=our_mixture,
-        foe_mixture=theirs_mixture,
-        # Whose value? The side that has a book, and ours when both do -- it is the
-        # reason two books give different numbers at all, each cell value being that
-        # model's estimate of the same position.
-        value=field.value,
-        class_index=class_index,
-    )
-
-
-def draw_arm(
-    arm: str,
-    entry: BookEntry,
-    class_index: int,
-    rng: np.random.Generator,
-    *,
-    epsilon: float = DEFAULT_EPSILON,
-    temperature: float = DEFAULT_TEMPERATURE,
-) -> tuple[int, int]:
-    """(our selection index, theirs) under one named rule, ours drawn first.
-
-    Lives here rather than in the measurement tool because it carries the same invariant
-    :meth:`BookEntry.draw` does, and an invariant worth stating is worth testing: whatever
-    the arm, our index is a function of the entry and the stream, never of
-    ``class_index``. That argument exists only to look up the opponent's column strategy,
-    which is theirs to know -- they hold the investment, we do not.
-
-    A harness that mixes rules is exactly where the leak would reappear, because there the
-    two sides are drawn by different code paths and the tempting shortcut is to pass the
-    class into both.
-    """
-    if arm not in ARMS:
-        raise ValueError(f"unknown arm {arm!r}; expected one of {ARMS}")
-    ours_rule, theirs_rule = arm.split("/")
-    count = len(entry.selections)
-
-    if ours_rule == "book":
-        ours = _pick(rng, entry.our_strategy)
-    elif ours_rule == "gen":
-        ours = _pick(
-            rng, entry.our_mixture(epsilon=epsilon, temperature=temperature)
-        )
-    else:
-        ours = int(rng.integers(count))
-
-    if theirs_rule == "book":
-        theirs = _pick(rng, entry.their_strategies[class_index])
-    elif theirs_rule == "gen":
-        theirs = _pick(
-            rng,
-            entry.their_mixture(
-                class_index, epsilon=epsilon, temperature=temperature
-            ),
-        )
-    else:
-        theirs = int(rng.integers(count))
-    return ours, theirs
-
-
-def start_book(
-    path: Path,
-    *,
-    roster: str,
-    model: str,
-    format_id: str,
-    information: dict[str, int] | None = None,
-) -> None:
-    """Writes the header if ``path`` is new, so entries can be appended one at a time.
-
-    An 80-minute solve that only lands on disk at the end is an 80-minute solve that a
-    Ctrl-C throws away. gzip members concatenate, so appending is a valid file at every
-    point and :meth:`SelectionBook.read` needs no special case.
-    """
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(path, "wt", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "header": {
-                        "roster": roster,
-                        "model": model,
-                        "format": format_id,
-                        "information": information or {},
-                    }
-                },
-                ensure_ascii=False,
-            )
-            + "\n"
-        )
-
-
-def append_entry(path: Path, entry: BookEntry) -> None:
-    with gzip.open(path, "at", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry.to_json(), ensure_ascii=False) + "\n")
-
-
-def find_cached_book(name: str) -> Path | None:
-    path = selection_dir() / f"{name}.jsonl.gz"
-    return path if path.exists() else None
-
-
 @dataclass(frozen=True)
 class BenchPrior:
     """One side's selection distribution, carried into a game to price its hidden bench.
@@ -819,24 +491,15 @@ def entry_bench_weights(
 
 
 __all__ = [
-    "ARMS",
     "DEFAULT_EPSILON",
     "DEFAULT_TEMPERATURE",
-    "BookEntry",
-    "SelectionBook",
-    "SelectionDraw",
-    "append_entry",
     "BenchPrior",
+    "BookEntry",
+    "SelectionDraw",
     "bench_weights",
-    "draw_across",
-    "draw_arm",
     "entry_bench_weights",
     "explore_mixture",
-    "find_cached_book",
-    "key_for_team",
     "perplexity",
-    "selection_dir",
     "set_from_json",
     "set_to_json",
-    "start_book",
 ]
