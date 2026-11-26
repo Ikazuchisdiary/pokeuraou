@@ -76,7 +76,9 @@ COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps"
           # IKA-457 stage 2.4: the move nodes whose menus and node were one request.
           "decided": 0,
           # IKA-458 stage 3.1: the turns whose weights, draw and drawn branch were one request.
-          "advanced": 0}
+          "advanced": 0,
+          # IKA-458 stage 3.4: the steps whose seen identities and completions the port made.
+          "hidden": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -242,6 +244,25 @@ def set_advance(on: bool) -> None:
 
 set_advance(ADVANCE[0])
 
+HIDDEN_ENV = "POKEURAOU_GEN_PORT_HIDDEN"
+#: IKA-458 stage 3.4: whether what each side has shown (`hidden.seen_identities`) and the
+#: positions its unseen slots could hold, priced by the selection prior (`hidden.completions`,
+#: `selfplay._bench_weights`), are one request to the port (`hiddenstep.step`,
+#: `rust/src/hiddenbench.rs` `hiddenStep`), the completions kept there by number. Off by
+#: default, and off in `default_on_for_generation`. On includes `ADVANCE` (and so the stages
+#: below it).
+HIDDEN = [os.environ.get(HIDDEN_ENV, "0").strip() == "1"]
+
+
+def set_hidden(on: bool) -> None:
+    """Turn stage 3.4 on or off in this process; on turns `ADVANCE` on too."""
+    HIDDEN[0] = bool(on)
+    if on:
+        set_advance(True)
+
+
+set_hidden(HIDDEN[0])
+
 
 def default_on_for_generation() -> None:
     """Generation's, and its board's, default: stage 1.4's whole-node road, unless
@@ -276,7 +297,8 @@ def echo() -> str:
         f"replace {word[REPLACE[0]]} ({REPLACE_ENV}={os.environ.get(REPLACE_ENV, '(unset)')}), "
         f"menus {word[MENUS[0]]} ({MENUS_ENV}={os.environ.get(MENUS_ENV, '(unset)')}), "
         f"decide {word[DECIDE[0]]} ({DECIDE_ENV}={os.environ.get(DECIDE_ENV, '(unset)')}), "
-        f"advance {word[ADVANCE[0]]} ({ADVANCE_ENV}={os.environ.get(ADVANCE_ENV, '(unset)')}); "
+        f"advance {word[ADVANCE[0]]} ({ADVANCE_ENV}={os.environ.get(ADVANCE_ENV, '(unset)')}), "
+        f"hidden {word[HIDDEN[0]]} ({HIDDEN_ENV}={os.environ.get(HIDDEN_ENV, '(unset)')}); "
         f"faults solved in Python: {COUNTS['faults']}; {counts()}"
     )
 

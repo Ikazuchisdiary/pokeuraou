@@ -1191,6 +1191,15 @@ fn answer<R: BufRead, W: Write>(
             crate::held::define_actions(&value["acts"]);
             return Ok(());
         }
+        // IKA-458 stage 3.4: a game's sheets and selection priors, once; not answered.
+        Ok(value) if value["kind"].as_str() == Some("hiddenGame") => {
+            crate::hiddenbench::define_game(&value);
+            return Ok(());
+        }
+        // IKA-458 stage 3.4: what each side has shown and the positions its unseen slots could hold.
+        Ok(value) if value["kind"].as_str() == Some("hiddenStep") => {
+            crate::hiddenbench::hidden_step(reg, &value)
+        }
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
         Ok(value)

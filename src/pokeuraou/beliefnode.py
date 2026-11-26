@@ -939,8 +939,10 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
                 "slots": list(hidden.get(side, ())),
                 "exact": bool(item.exact),
                 "root": item.position is position,
-                "pk": [[ident(mon.species), ident(mon.base_species), mon.slot]
-                       for mon in item.position.sides[side].pokemon],
+                "pk": [list(p) for p in item.pk] if item.pk is not None else [
+                    [ident(mon.species), ident(mon.base_species), mon.slot]
+                    for mon in item.position.sides[side].pokemon
+                ],
             })
     request.update({
         "budget": dump_budget(budget),

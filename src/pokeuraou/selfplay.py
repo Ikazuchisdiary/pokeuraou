@@ -1380,6 +1380,8 @@ def play_game(
     """
     # Closes the stretch since the last game's last record (IKA-98); the first one ends startup.
     timing.decided("between")
+    from . import hiddenstep, portlp
+
     limits = (search_limit, search_limit) if isinstance(search_limit, int) else search_limit
     depths = (depth, depth) if isinstance(depth, int) else depth
     ranked = (
@@ -1564,6 +1566,7 @@ def play_game(
     # marked, and the next decision's belief offered worlds without it -- 15.8% of the
     # move decisions and 23.6% of the replacements in the shipping pool (IKA-117).
     seen: list[frozenset[str]] = [frozenset(), frozenset()]
+    hidden_game = None  # IKA-458 stage 3.4: this game's sheets and priors, numbered for the port
     # Which two each side led with, read off the turn-1 position and carried as names for
     # the same reason `seen` is (IKA-118). The bench belief conditions on it: a selection
     # is ordered, and one that brought a lead but planned it for the back is not what this
@@ -1603,15 +1606,31 @@ def play_game(
         if pos.ended:
             break
 
-        seen = [seen_identities(pos, i, seen[i]) for i in (0, 1)]
-        shown = [seen_slots(pos, i, seen[i]) for i in (0, 1)]
-        recorded_shown = _shown_record(pos, None if sheets is None else seen)
+        # IKA-458 stage 3.4: the seen identities and slots and each side's completions from
+        # the port, where `portlp.HIDDEN` is on and nothing makes the belief another's.
+        stepped = None
+        if sheets is not None and portlp.HIDDEN[0] and not any(dex_bases):
+            if hidden_game is None:
+                hidden_game = hiddenstep.Game.of(
+                    sheets, bench_prior if bench_prior is not None else (None, None)
+                )
+            stepped = hiddenstep.step(reg, pos, hidden_game, seen, leads)
+        if stepped is not None:
+            seen, shown, recorded_shown = stepped.seen, stepped.shown, stepped.recorded
+            for note in stepped.notes:
+                if note not in record.unmodelled:
+                    record.unmodelled.append(note)
+        else:
+            seen = [seen_identities(pos, i, seen[i]) for i in (0, 1)]
+            shown = [seen_slots(pos, i, seen[i]) for i in (0, 1)]
+            recorded_shown = _shown_record(pos, None if sheets is None else seen)
         owed = port.replacements_needed(reg, pos)
         if any(owed[0]) or any(owed[1]):
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
                 sheets=sheets, shown=shown, bench_prior=bench_prior, leads=leads,
                 recorded_shown=recorded_shown, dex_base=dex_bases, selects=selects,
+                stepped=stepped,
             )
             continue
 
@@ -1622,7 +1641,12 @@ def play_game(
         # number* using a bench nobody has seen, however carefully the matrix over them is
         # then solved.
         spreads = None
-        if sheets is not None:
+        if stepped is not None:
+            if stepped.error is not None:
+                record.unmodelled.append(f"hidden bench: {stepped.error}")
+                break
+            spreads = _believed(stepped.spreads, drops)
+        elif sheets is not None:
             try:
                 views = [
                     _belief_view(reg, pos, side, shown[side], dex_bases[1 - side], record, 1 - side)
@@ -2769,6 +2793,7 @@ def _do_replacement_node(
     recorded_shown: list[list[str]] | None = None,
     dex_base: tuple[bool, bool] = (False, False),
     selects: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
+    stepped: Any = None,  # noqa: ANN401 - `hiddenstep.Step`: the completions the port made
 ) -> Position:
     """Solves and applies the replacement phase.
 
@@ -2846,24 +2871,30 @@ def _do_replacement_node(
     if sheets is not None:
         seen = shown or [frozenset(), frozenset()]
         answers: dict[int, tuple[list[float], float]] = {}
-        try:
-            views = [
-                _belief_view(reg, pos, side, seen[side], dex_base[1 - side], record, 1 - side)
-                for side in (0, 1)
-            ]
-            spreads = {
-                side: completions(
-                    reg, views[side], side, sheets[side], seen=seen[side],
-                    weights=_bench_weights(
-                        bench_prior, side, views[side], seen[side], record,
-                        (leads or [None, None])[side],
-                    ),
-                )
-                for side in (0, 1)
-            }
-        except ValueError as problem:
-            record.unmodelled.append(f"hidden bench at a replacement: {problem}")
-            spreads = {}
+        if stepped is not None:
+            # The port made them with the step (IKA-458 stage 3.4).
+            if stepped.error is not None:
+                record.unmodelled.append(f"hidden bench at a replacement: {stepped.error}")
+            spreads = {} if stepped.error is not None else stepped.spreads
+        else:
+            try:
+                views = [
+                    _belief_view(reg, pos, side, seen[side], dex_base[1 - side], record, 1 - side)
+                    for side in (0, 1)
+                ]
+                spreads = {
+                    side: completions(
+                        reg, views[side], side, sheets[side], seen=seen[side],
+                        weights=_bench_weights(
+                            bench_prior, side, views[side], seen[side], record,
+                            (leads or [None, None])[side],
+                        ),
+                    )
+                    for side in (0, 1)
+                }
+            except ValueError as problem:
+                record.unmodelled.append(f"hidden bench at a replacement: {problem}")
+                spreads = {}
         if spreads:
             from . import portlp, replacenode
             from .equilibrium import solve_bayesian

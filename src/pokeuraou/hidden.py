@@ -63,6 +63,9 @@ class Completion:
     #: True when nothing was hidden, so this is the position itself. A caller that wants
     #: to know whether it is paying for uncertainty asks this rather than counting.
     exact: bool = False
+    #: Each Pokemon of the completed side as (species id, base species id, slot), when the
+    #: port made this completion (IKA-458 stage 3.4) and the caller need not read it.
+    pk: tuple[tuple[str, str, int], ...] | None = None
 
 
 def identity(mon: Pokemon) -> str:

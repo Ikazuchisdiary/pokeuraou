@@ -33,6 +33,7 @@ mod encode_games;
 mod encoded_node;
 mod fixedpoint;
 mod held;
+mod hiddenbench;
 mod id;
 mod inert;
 mod legal;
