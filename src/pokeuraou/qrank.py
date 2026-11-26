@@ -1006,6 +1006,10 @@ def add_q_flags(ap: Any) -> None:  # noqa: ANN401 - an ArgumentParser
         "--q-model-named", nargs=2, action="append", default=[], metavar=("NAME", "FILE"),
         help="the same loaded here",
     )
+    ap.add_argument(
+        "--q-inference-named", nargs=2, action="append", default=[], metavar=("NAME", "HOST:PORT"),
+        help="IKA-461: the server of the named Q's arm, when it is not --inference",
+    )
 
 
 #: Where the default Q is, from the repository root: the Q of M-C's shipped leaf
@@ -1115,7 +1119,9 @@ def install_from_args(
         if how == "arm":
             if getattr(args, "inference", None) is None:
                 error("--q-arm is an arm of the inference server: it needs --inference")
-            model = RemoteQ(args.inference, what, encoder)
+            # IKA-461: a named Q may be on a server of its own (`--q-inference-named`).
+            at = dict(getattr(args, "q_inference_named", None) or []).get(name, args.inference)
+            model = RemoteQ(at, what, encoder)
         else:
             model = LocalQ(Path(what), encoder, device=getattr(args, "device", None) or "cpu")
         install(model, name)
