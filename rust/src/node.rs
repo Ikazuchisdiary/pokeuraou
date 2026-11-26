@@ -1211,6 +1211,11 @@ fn answer<R: BufRead, W: Write>(
         // IKA-455: a belief node's matrices folded from the fills' span blocks and the values,
         // and its Bayesian games solved (`beliefnode.rs`; `portlp.py`, off by default).
         Ok(value) if value["kind"].as_str() == Some("beliefFold") => crate::beliefnode::belief_fold(&value),
+        // IKA-455 stage 1.3: the same, with the leaves the port held stacked and scored by the
+        // inference server here first (`beliefnode.rs`).
+        Ok(value) if value["kind"].as_str() == Some("beliefServed") => {
+            crate::beliefnode::belief_served(&encoder.widths, &value)
+        }
         // IKA-386: a depth-2 call's sub-games filled, scored by the inference server and
         // solved here, in one crossing (`portserved.py`, off by default).
         Ok(value) if value["kind"].as_str() == Some("fillsServed") => fills_served(reg, encoder, &value),
@@ -1306,6 +1311,11 @@ fn answer<R: BufRead, W: Write>(
                     let (mut header, encoded, leaf_values, spans) =
                         crate::encoded_node::fill(reg, encoder, &request);
                     let body_bytes = header["bytes"].as_u64().unwrap_or(0) as usize;
+                    // IKA-455 stage 1.3: kept for the request that stacks it, when asked.
+                    if let Some(ticket) = value.get("hold").and_then(Value::as_u64) {
+                        let clear = value.get("holdClear").and_then(Value::as_bool).unwrap_or(false);
+                        crate::beliefnode::hold(ticket, clear, &encoded, &header);
+                    }
                     return match &request.shm {
                         Some(target) => place_body(
                             &encoded, &leaf_values, &spans, body_bytes, target, shared, input,

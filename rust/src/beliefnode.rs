@@ -143,9 +143,12 @@ pub fn belief_fold(value: &Value) -> Value {
 }
 
 fn fold_node(value: &Value) -> Result<Value, String> {
+    fold_with(value, f64s(&value["values"])?)
+}
+
+fn fold_with(value: &Value, values: Vec<f64>) -> Result<Value, String> {
     let m = value["rows"].as_u64().ok_or("beliefFold without rows")? as usize;
     let n = value["cols"].as_u64().ok_or("beliefFold without cols")? as usize;
-    let values = f64s(&value["values"])?;
     let dirty: Vec<bool> = b64_decode(value["dirty"].as_str().ok_or("beliefFold without dirty")?)?
         .iter()
         .map(|b| *b != 0)
@@ -298,6 +301,301 @@ fn fold_node(value: &Value) -> Result<Value, String> {
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Stage 1.3: the node's leaves held here, stacked and scored here
+// ---------------------------------------------------------------------------
+
+use crate::encode::{Encoded, Widths};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+/// A fill kept in the port for the request that stacks it: its arrays and which of its leaves
+/// the battle ended in (NaN where it did not, as `Encoded.decided`).
+struct Held {
+    encoded: Encoded,
+    decided: Vec<f64>,
+}
+
+thread_local! {
+    static HELD: RefCell<HashMap<u64, Held>> = RefCell::new(HashMap::new());
+}
+
+fn copy_of(e: &Encoded) -> Encoded {
+    Encoded {
+        species: e.species.clone(),
+        ability: e.ability.clone(),
+        item: e.item.clone(),
+        moves: e.moves.clone(),
+        mon: e.mon.clone(),
+        mask: e.mask.clone(),
+        side: e.side.clone(),
+        field: e.field.clone(),
+        unknown_volatiles: e.unknown_volatiles.clone(),
+    }
+}
+
+/// Keep a fill under `ticket` (`clear` first drops every one held: a node's reference fill
+/// starts the node). `header` is the fill's own header, whose `decided` says which leaves ended.
+pub fn hold(ticket: u64, clear: bool, encoded: &Encoded, header: &Value) {
+    let rows = header["leaves"].as_u64().unwrap_or(0) as usize;
+    let mut decided = vec![f64::NAN; rows];
+    for pair in header["decided"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        if let (Some(i), Some(v)) = (pair.get(0).and_then(Value::as_u64), pair.get(1).and_then(Value::as_f64)) {
+            if (i as usize) < rows {
+                decided[i as usize] = v;
+            }
+        }
+    }
+    HELD.with(|h| {
+        let mut h = h.borrow_mut();
+        if clear {
+            h.clear();
+        }
+        h.insert(ticket, Held { encoded: copy_of(encoded), decided });
+    });
+}
+
+/// Rows `rows` of `e`, in that order (`beliefnode._subset`).
+fn subset(e: &Encoded, w: &Widths, rows: &[usize]) -> Result<Encoded, String> {
+    let m = w.mons_per_side;
+    let per = (2 * m, 2 * m, 2 * m, 2 * m * 4, 2 * m * w.mon, 2 * m, 2 * w.side, w.field);
+    let n = e.species.len() / per.0.max(1);
+    if let Some(bad) = rows.iter().find(|r| **r >= n) {
+        return Err(format!("a subset row {bad} of {n}"));
+    }
+    fn pick<T: Copy>(v: &[T], per: usize, rows: &[usize]) -> Vec<T> {
+        let mut out = Vec::with_capacity(rows.len() * per);
+        for r in rows {
+            out.extend_from_slice(&v[r * per..(r + 1) * per]);
+        }
+        out
+    }
+    Ok(Encoded {
+        species: pick(&e.species, per.0, rows),
+        ability: pick(&e.ability, per.1, rows),
+        item: pick(&e.item, per.2, rows),
+        moves: pick(&e.moves, per.3, rows),
+        mon: pick(&e.mon, per.4, rows),
+        mask: pick(&e.mask, per.5, rows),
+        side: pick(&e.side, per.6, rows),
+        field: pick(&e.field, per.7, rows),
+        unknown_volatiles: e.unknown_volatiles.clone(),
+    })
+}
+
+/// The names' places in a row, and `HP_SCALE`, as `encode.py` has them (`beliefnode._patched`).
+struct PatchAt {
+    can_mega: usize,
+    maxhp_scaled: usize,
+    hp_fraction: usize,
+    fainted: usize,
+    mega_used: usize,
+    mega_available: usize,
+    alive_fraction: usize,
+    team_hp_fraction: usize,
+    hp_scale: f64,
+}
+
+impl PatchAt {
+    fn of(v: &Value) -> Result<PatchAt, String> {
+        let at = |k: &str| v[k].as_u64().map(|x| x as usize).ok_or(format!("a patch without `{k}`"));
+        Ok(PatchAt {
+            can_mega: at("can_mega")?,
+            maxhp_scaled: at("maxhp_scaled")?,
+            hp_fraction: at("hp_fraction")?,
+            fainted: at("fainted")?,
+            mega_used: at("mega_used")?,
+            mega_available: at("mega_available")?,
+            alive_fraction: at("alive_fraction")?,
+            team_hp_fraction: at("team_hp_fraction")?,
+            hp_scale: v["hp_scale"].as_f64().ok_or("a patch without `hp_scale`")?,
+        })
+    }
+}
+
+fn i32s(v: &Value) -> Result<Vec<i32>, String> {
+    let bytes = b64_decode(v.as_str().ok_or("an i32 array is not base64 text")?)?;
+    Ok(bytes.chunks_exact(4).map(|b| i32::from_le_bytes(b.try_into().unwrap())).collect())
+}
+
+fn f32s(v: &Value) -> Result<Vec<f32>, String> {
+    let bytes = b64_decode(v.as_str().ok_or("an f32 array is not base64 text")?)?;
+    Ok(bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect())
+}
+
+/// `beliefnode._patched` (the rebuilt-side-vector rule): `e`'s rows with side `side`'s hidden
+/// `slots` replaced by the completion's (`source`: one row per slot, in `slots`' order), the
+/// side's `can_mega` cleared where it has mega evolved, and its `mega_available`,
+/// `alive_fraction` and `team_hp_fraction` rebuilt from the patched rows. numpy's float32
+/// reads and float64 arithmetic are kept as they are (the HPs are whole numbers there, so the
+/// sums are exact in any order).
+fn patch(e: &mut Encoded, w: &Widths, at: &PatchAt, side: usize, slots: &[usize], source: &Value) -> Result<(), String> {
+    let (m, f, s) = (w.mons_per_side, w.mon, w.side);
+    let n = e.species.len() / (2 * m).max(1);
+    let (species, ability, item) = (i32s(&source["species"])?, i32s(&source["ability"])?, i32s(&source["item"])?);
+    let (moves, mon, mask) = (i32s(&source["moves"])?, f32s(&source["mon"])?, f32s(&source["mask"])?);
+    let k = slots.len();
+    if species.len() != k || ability.len() != k || item.len() != k || moves.len() != 4 * k || mon.len() != f * k || mask.len() != k {
+        return Err("a patch source of the wrong shape".into());
+    }
+    if slots.iter().any(|slot| *slot >= m) {
+        return Err("a patch slot past the party".into());
+    }
+    for r in 0..n {
+        let base = (r * 2 + side) * m;
+        for (t, &slot) in slots.iter().enumerate() {
+            e.species[base + slot] = species[t];
+            e.ability[base + slot] = ability[t];
+            e.item[base + slot] = item[t];
+            e.moves[(base + slot) * 4..(base + slot) * 4 + 4].copy_from_slice(&moves[4 * t..4 * t + 4]);
+            e.mon[(base + slot) * f..(base + slot) * f + f].copy_from_slice(&mon[f * t..f * t + f]);
+            e.mask[base + slot] = mask[t];
+        }
+        let sbase = (r * 2 + side) * s;
+        let spent = e.side[sbase + at.mega_used] > 0.0;
+        if spent {
+            for &slot in slots {
+                e.mon[(base + slot) * f + at.can_mega] = 0.0;
+            }
+        }
+        let mut holder = false;
+        let (mut count, mut alive) = (0i64, 0i64);
+        let (mut maxhp_sum, mut hp_sum) = (0.0f64, 0.0f64);
+        for j in 0..m {
+            let present = e.mask[base + j] > 0.0;
+            let row = (base + j) * f;
+            if present && e.mon[row + at.can_mega] > 0.0 {
+                holder = true;
+            }
+            if present {
+                count += 1;
+                if !(e.mon[row + at.fainted] > 0.0) {
+                    alive += 1;
+                }
+                let maxhp = (e.mon[row + at.maxhp_scaled] as f64 * at.hp_scale).round_ties_even();
+                let hp = (e.mon[row + at.hp_fraction] as f64 * maxhp).round_ties_even();
+                maxhp_sum += maxhp;
+                hp_sum += hp;
+            }
+        }
+        e.side[sbase + at.mega_available] = if holder && !spent { 1.0 } else { 0.0 };
+        e.side[sbase + at.alive_fraction] = (alive as f64 / count.max(1) as f64) as f32;
+        let total = if maxhp_sum > 0.0 { maxhp_sum } else { 1.0 };
+        e.side[sbase + at.team_hp_fraction] = (hp_sum / total) as f32;
+    }
+    Ok(())
+}
+
+fn server_failed(failed: crate::served::Failed) -> Value {
+    match failed {
+        crate::served::Failed::Refused { error, oom, cap_gb } => json!({ "serverError": error, "oom": oom, "capGb": cap_gb }),
+        crate::served::Failed::Broken(error) => json!({ "serverError": error }),
+    }
+}
+
+/// `beliefServed`: `beliefFold`'s request with the values not given but asked for. Its `parts`
+/// are the node's blocks of leaves in the order Python stacks them (`beliefnode._stacked`);
+/// each is a held fill (`ticket`), optionally cut to `rows` and patched
+/// (`{side, slots, source}`). They go to the inference server as `RemoteValue.from_encoded`
+/// sends a stacked batch (the same requests, cut where it cuts), the ended leaves are settled as
+/// `encode.settle` does, and the values are folded as `beliefFold` folds them.
+pub fn belief_served(widths: &Widths, value: &Value) -> Value {
+    match served_node(widths, value) {
+        Ok(answer) => answer,
+        Err(failed) => failed,
+    }
+}
+
+fn served_node(widths: &Widths, value: &Value) -> Result<Value, Value> {
+    let error = |e: String| json!({ "error": e });
+    let server = crate::served::Server::from_json(&value["server"]).map_err(error)?;
+    let net_scores_ends = value.get("netScoresEnds").and_then(Value::as_bool).unwrap_or(false);
+    let at = PatchAt::of(&value["patch"]).map_err(error)?;
+    let parts = value["parts"].as_array().ok_or_else(|| error("beliefServed without parts".into()))?;
+    let mut stats = crate::served::Stats::default();
+    let (mut values, decided) = HELD.with(|h| -> Result<(Vec<f64>, Vec<f64>), Value> {
+        let h = h.borrow();
+        enum Src {
+            Held(u64),
+            Owned(usize),
+        }
+        let mut owned: Vec<Encoded> = Vec::new();
+        let mut sources: Vec<Src> = Vec::new();
+        let mut rows: Vec<usize> = Vec::new();
+        let mut decided: Vec<f64> = Vec::new();
+        for part in parts {
+            let ticket = part["ticket"].as_u64().ok_or_else(|| error("a part without a ticket".into()))?;
+            let held = h.get(&ticket).ok_or_else(|| error(format!("no fill held as {ticket}")))?;
+            let cut: Option<Vec<usize>> = part
+                .get("rows")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_u64).map(|x| x as usize).collect());
+            let patching = part.get("patch").is_some_and(|p| !p.is_null());
+            let mut part_decided: Vec<f64> = match &cut {
+                Some(rs) => rs.iter().map(|r| held.decided.get(*r).copied().unwrap_or(f64::NAN)).collect(),
+                None => held.decided.clone(),
+            };
+            let per_row = (2 * widths.mons_per_side).max(1);
+            if cut.is_some() || patching {
+                let mut block = match &cut {
+                    Some(rs) => subset(&held.encoded, widths, rs).map_err(error)?,
+                    None => copy_of(&held.encoded),
+                };
+                if patching {
+                    let p = &part["patch"];
+                    let side = p["side"].as_u64().ok_or_else(|| error("a patch without side".into()))? as usize;
+                    let slots: Vec<usize> = p["slots"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(Value::as_u64).map(|x| x as usize).collect())
+                        .unwrap_or_default();
+                    patch(&mut block, widths, &at, side, &slots, &p["source"]).map_err(error)?;
+                }
+                rows.push(block.species.len() / per_row);
+                sources.push(Src::Owned(owned.len()));
+                owned.push(block);
+            } else {
+                rows.push(held.encoded.species.len() / per_row);
+                sources.push(Src::Held(ticket));
+            }
+            if let Some(want) = part.get("count").and_then(Value::as_u64) {
+                if *rows.last().unwrap() != want as usize {
+                    return Err(error(format!("a part of {} rows where {want} were named", rows.last().unwrap())));
+                }
+            }
+            decided.append(&mut part_decided);
+        }
+        let blocks: Vec<&Encoded> = sources
+            .iter()
+            .map(|s| match s {
+                Src::Held(t) => &h[t].encoded,
+                Src::Owned(i) => &owned[*i],
+            })
+            .collect();
+        let batch = crate::served::begin(&server, widths, &blocks, &rows, &mut stats).map_err(server_failed)?;
+        let values = crate::served::finish(&server, batch, &mut stats).map_err(server_failed)?;
+        Ok((values, decided))
+    })?;
+    // `encode.settle`: an ended leaf is its result, after the pass.
+    let mut ended = 0u64;
+    for (i, d) in decided.iter().enumerate() {
+        if !d.is_nan() && i < values.len() {
+            ended += 1;
+            if !net_scores_ends {
+                values[i] = *d;
+            }
+        }
+    }
+    let mut answer = fold_with(value, values).map_err(error)?;
+    answer["served"] = json!({
+        "requests": stats.requests,
+        "rows": stats.rows,
+        "ended": ended,
+        "waitUs": stats.wait_ns as f64 / 1e3,
+        "copyUs": stats.copy_ns as f64 / 1e3,
+    });
+    Ok(answer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +717,97 @@ mod tests {
         let want = solve_bayesian(&[(negated, 3, 2)], &[1.0], 1e-9).unwrap();
         assert_eq!(got["answers"][0]["valueRow"].as_f64().unwrap().to_bits(), want.value_row.to_bits());
         assert_eq!(got["answers"][0]["x"].as_str().unwrap(), f64s_text(&want.x));
+    }
+
+    fn tiny() -> (Widths, PatchAt, Encoded) {
+        // One row, two Pokemon a side, four mon columns, four side columns.
+        let w = Widths { mon: 4, side: 4, field: 1, mons_per_side: 2 };
+        let at = PatchAt {
+            can_mega: 0,
+            maxhp_scaled: 1,
+            hp_fraction: 2,
+            fainted: 3,
+            mega_used: 0,
+            mega_available: 1,
+            alive_fraction: 2,
+            team_hp_fraction: 3,
+            hp_scale: 250.0,
+        };
+        let mut e = Encoded::default();
+        e.species = vec![1, 2, 3, 4];
+        e.ability = vec![0; 4];
+        e.item = vec![0; 4];
+        e.moves = vec![0; 16];
+        // Side 0: slot 0 present (max HP 100, half HP), slot 1 hidden (a placeholder).
+        e.mon = vec![0.0; 16];
+        e.mon[1] = 0.4;
+        e.mon[2] = 0.5;
+        e.mask = vec![1.0, 1.0, 1.0, 1.0];
+        e.side = vec![0.0; 8];
+        e.field = vec![0.0];
+        (w, at, e)
+    }
+
+    fn source() -> Value {
+        // Slot 1's own row: holds a stone, max HP 50, full HP, standing.
+        json!({
+            "species": f32_free_i32s(&[9]),
+            "ability": f32_free_i32s(&[8]),
+            "item": f32_free_i32s(&[7]),
+            "moves": f32_free_i32s(&[1, 2, 3, 4]),
+            "mon": f32s_text(&[1.0, 0.2, 1.0, 0.0]),
+            "mask": f32s_text(&[1.0]),
+        })
+    }
+
+    fn f32_free_i32s(v: &[i32]) -> String {
+        b64_encode(&v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>())
+    }
+
+    fn f32s_text(v: &[f32]) -> String {
+        b64_encode(&v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>())
+    }
+
+    #[test]
+    fn a_patched_row_takes_the_completions_bench_and_rebuilds_the_side() {
+        let (w, at, mut e) = tiny();
+        patch(&mut e, &w, &at, 0, &[1], &source()).unwrap();
+        // The slot's row is the completion's; the other side and the other slot are not touched.
+        assert_eq!((e.species[0], e.species[1], e.species[2]), (1, 9, 3));
+        assert_eq!(&e.moves[4..8], &[1, 2, 3, 4]);
+        assert_eq!(&e.mon[4..8], &[1.0, 0.2, 1.0, 0.0]);
+        // A stone is held and the Mega is unspent; both stand; HP 50 + 50 of 100 + 50.
+        assert_eq!(e.side[1], 1.0);
+        assert_eq!(e.side[2], 1.0);
+        assert_eq!(e.side[3], (100.0f64 / 150.0) as f32);
+        // The other side's vector is as it was.
+        assert_eq!(&e.side[4..8], &[0.0; 4]);
+    }
+
+    #[test]
+    fn a_spent_mega_takes_the_stone_off_the_patched_row() {
+        let (w, at, mut e) = tiny();
+        e.side[0] = 1.0; // mega_used
+        patch(&mut e, &w, &at, 0, &[1], &source()).unwrap();
+        assert_eq!(e.mon[4], 0.0, "can_mega is cleared where the side has mega evolved");
+        assert_eq!(e.side[1], 0.0);
+    }
+
+    #[test]
+    fn a_subset_keeps_its_rows_in_the_order_asked() {
+        let (w, _at, mut e) = tiny();
+        // Two rows: the second a copy with other species.
+        e.species.extend_from_slice(&[5, 6, 7, 8]);
+        e.ability.extend_from_slice(&[0; 4]);
+        e.item.extend_from_slice(&[0; 4]);
+        e.moves.extend_from_slice(&[0; 16]);
+        e.mon.extend_from_slice(&[0.0; 16]);
+        e.mask.extend_from_slice(&[1.0; 4]);
+        e.side.extend_from_slice(&[0.0; 8]);
+        e.field.push(0.5);
+        let cut = subset(&e, &w, &[1, 0, 1]).unwrap();
+        assert_eq!(cut.species, vec![5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(cut.field, vec![0.5, 0.0, 0.5]);
+        assert!(subset(&e, &w, &[2]).is_err());
     }
 }

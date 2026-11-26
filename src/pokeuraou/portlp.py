@@ -65,7 +65,7 @@ ON = [os.environ.get(ENV, "0").strip() == "1"]
 #: What went: crossings, games (`solve_many`), Bayesian games (`solve_bayesian_many`),
 #: sub-games folded in the port and given whole, and the LPs the port reports it solved (the
 #: positive control).
-COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps": 0}
+COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps": 0, "stacked": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -107,6 +107,24 @@ def set_fold(on: bool) -> None:
 
 
 set_fold(FOLD[0])
+
+STACK_ENV = "POKEURAOU_GEN_PORT_STACK"
+#: IKA-455 stage 1.3: whether a hidden bench's node is also stacked and scored in the port --
+#: the port keeps each fill's arrays, patches the reference's bench rows per completion,
+#: lays the batch into the leaf's shared block and asks the inference server itself, then folds
+#: (`beliefnode.belief_payoffs`, `rust/src/beliefnode.rs` `beliefServed`). Off by default. On
+#: includes `FOLD` (and so `GEN`). Only where the leaf is an inference server's.
+STACK = [os.environ.get(STACK_ENV, "0").strip() == "1"]
+
+
+def set_stack(on: bool) -> None:
+    """Turn stage 1.3 on or off in this process; on turns `FOLD` on too."""
+    STACK[0] = bool(on)
+    if on:
+        set_fold(True)
+
+
+set_stack(STACK[0])
 
 
 def _b64(a: np.ndarray) -> str:
@@ -306,7 +324,7 @@ def counts() -> dict[str, int]:
     return dict(COUNTS)
 
 
-__all__ = ["COUNTS", "ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "ON", "bayesian_answer", "counts",
-           "set_fold", "set_gen", "set_on",
+__all__ = ["COUNTS", "ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "ON", "STACK", "STACK_ENV",
+           "bayesian_answer", "counts", "set_fold", "set_gen", "set_on", "set_stack",
            "solve_bayesian_many",
            "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]

@@ -271,6 +271,8 @@ class EncodedNode:
     #: IKA-381 (`portlp`, when on): the body's span block as the port wrote it, and its span
     #: and leaf counts, for the port to fold the matrix from (`folds`). None when off.
     span_block: tuple[bytes, int, int] | None = None
+    #: IKA-455 stage 1.3: the number the port holds this fill's arrays under, when asked.
+    ticket: int | None = None
 
     @staticmethod
     @timing.timed("rust.unpack")
@@ -1448,6 +1450,8 @@ class RustNode:
         *,
         rules: Any = None,  # noqa: ANN401 - EncodingRules; encode imports numpy
         json_spans: bool = False,
+        hold: int | None = None,
+        hold_clear: bool = False,
     ) -> EncodedNode:
         """The node's leaves, already encoded, and how to fold their values.
 
@@ -1479,6 +1483,12 @@ class RustNode:
         # only the test holding the two to the same lists does.
         if json_spans:
             request["jsonSpans"] = True
+        # IKA-455 stage 1.3: the port keeps these arrays under this number (the first fill of
+        # a node says `hold_clear`, dropping what the last node held) for `beliefServed`.
+        if hold is not None:
+            request["hold"] = int(hold)
+            if hold_clear:
+                request["holdClear"] = True
         # Sent only for a leaf that asks for an undone fix, so every other request is the
         # bytes it always was.
         wants_old = bool(rules is not None and rules.mega_from_slots)
@@ -1503,6 +1513,7 @@ class RustNode:
                 f"it applied it (echo {node.mega_from_slots!r}); the binary predates "
                 "IKA-141 -- rebuild it"
             )
+        node.ticket = hold
         # What the child says it spent, on its own clock. From this side the two
         # are one wait on a pipe, so there is no other honest source for the split.
         timing.add("rust.child.resolve", node.resolve_us / 1e6)

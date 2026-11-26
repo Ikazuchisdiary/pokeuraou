@@ -57,7 +57,8 @@ the port is available to be compared against.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import itertools
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -286,10 +287,19 @@ def belief_payoffs(
     # (IKA-141). A leaf without an encoder is scored under the current rules.
     encoder = getattr(owner, "encoder", None) or _encoder_for(reg)
     rules = rules_of(evaluate)
+    # IKA-455 stage 1.3: the port keeps each fill's arrays and stacks and scores them itself,
+    # where the leaf is an inference server's (`_stack_leaf`); then each fill is held by number.
+    leaf = _stack_leaf(owner, rules)
+    tickets: Iterator[int] | None = _TICKETS if leaf is not None else None
+    ref_ticket = next(tickets) if tickets is not None else None
 
     with timing.region("belief.ref"):
         filled = port.ask(
-            reg, lambda node: node.fill_encoded(position, row, col, budget, [], None, rules=rules)
+            reg,
+            lambda node: node.fill_encoded(
+                position, row, col, budget, [], None, rules=rules,
+                hold=ref_ticket, hold_clear=True,
+            ),
         )
     if rules.mega_from_slots and filled.mega_from_slots is not True:
         # A binary that predates the field encoded with the current rule. The fill cannot
@@ -313,10 +323,24 @@ def belief_payoffs(
     # 3.02 for `move.exact` (IKA-98). Each part is a block of rows in one `Encoded`; the
     # values go back to the completion that asked for them by the block's start.
     parts: list[tuple[int, Callable[[], Encoded]]] = []
+    #: How the port makes each part from the fills it holds, or None where it cannot.
+    descs: list[dict | None] = []
 
-    def block(rows: int, make: Callable[[], Encoded]) -> int:
+    def block(rows: int, make: Callable[[], Encoded], desc: dict | None = None) -> int:
         parts.append((rows, make))
+        descs.append(desc)
         return len(parts) - 1
+
+    patchers: dict[tuple[int, int], _Patcher] = {}
+
+    def patcher(side: int, item) -> _Patcher:  # noqa: ANN001 - Completion
+        # One per completion and side: the completion's root is encoded once for all of them.
+        found = patchers.get((side, id(item)))
+        if found is None:
+            found = patchers[(side, id(item))] = _Patcher(
+                side, item, reg, position, encoder, rules
+            )
+        return found
 
     # Which dirty cells reach each side's own bench, and through which slots (IKA-269).
     reach = {
@@ -334,9 +358,10 @@ def belief_payoffs(
             slots = hidden.get(side, ())
             for item in items:
                 job = _Job(side=side, item=item)
+                ref_desc = None if ref_ticket is None else {"ticket": ref_ticket}
                 if item.exact or not slots:
                     if reference_block is None:
-                        reference_block = block(len(reference), lambda: reference)
+                        reference_block = block(len(reference), lambda: reference, ref_desc)
                     job.shared = reference_block
                 else:
                     job.shared = block(
@@ -344,25 +369,53 @@ def belief_payoffs(
                         lambda item=item, side=side, slots=slots: _patched(
                             reference, side, slots, item, reg, position, encoder, rules
                         ),
+                        None if ref_ticket is None
+                        else patcher(side, item).desc(ref_ticket, None, slots, len(reference)),
                     )
                 if wanted and side in reach and not item.exact:
                     own_cells = _borrow(
                         job, reach[side], claimed[side], filled, wanted, block,
-                        lambda rows, patch, item=item, side=side: _patched(
-                            rows, side, patch, item, reg, position, encoder, rules
+                        patcher(side, item) if ref_ticket is not None
+                        else (
+                            lambda rows, patch, item=item, side=side: _patched(
+                                rows, side, patch, item, reg, position, encoder, rules
+                            )
                         ),
                     )
                     if own_cells:
                         _gather_dirty(
-                            job, reg, position, row, col, budget, own_cells, rules, scorer, block
+                            job, reg, position, row, col, budget, own_cells, rules, scorer, block,
+                            tickets,
                         )
                 elif wanted:
                     _gather_dirty(
-                        job, reg, position, row, col, budget, wanted, rules, scorer, block
+                        job, reg, position, row, col, budget, wanted, rules, scorer, block,
+                        tickets,
                     )
                     if job.dirty_from_reference and reference_block is None:
-                        reference_block = block(len(reference), lambda: reference)
+                        reference_block = block(len(reference), lambda: reference, ref_desc)
                 jobs.append(job)
+
+    if leaf is not None and all(desc is not None for desc in descs):
+        served = _served_in_port(
+            reg, leaf, filled, jobs, reference_block, dirty, parts, descs, len(row), len(col),
+            solve, spreads, encoder,
+        )
+        if served is not None:
+            payoffs, solved = served
+            shared = redone = 0
+            matrices = {}
+            with timing.region("belief.fold"):
+                for job, payoff in zip(jobs, payoffs, strict=True):
+                    shared += int((~dirty).sum())
+                    if wanted:
+                        unmodelled |= job.notes
+                        redone += len(wanted) if job.resolved is None else job.resolved
+                    matrices.setdefault(1 - job.side, []).append(payoff)
+            for job in jobs:
+                if job.filled is not None:
+                    job.filled.encoded = None
+            return BeliefNode(matrices, unmodelled, shared, redone, solved)
 
     with timing.region("belief.stack"):
         stacked, starts = _stacked(parts, reference)
@@ -445,23 +498,20 @@ def belief_payoffs(
     return BeliefNode(matrices, unmodelled, shared, redone)
 
 
-def _fold_in_port(  # noqa: PLR0913 - the node's pieces
-    reg: Regulation,
+def _fold_request(  # noqa: PLR0913 - the node's pieces
     filled,  # noqa: ANN001 - EncodedNode, the reference fill
     jobs: list,
     reference_block: int | None,
     dirty: np.ndarray,
-    values: np.ndarray,
     starts: list[int],
     parts: list,
     m: int,
     n: int,
     solve: Sequence[int],
     spreads: dict[int, list],
-) -> tuple[list[np.ndarray], dict] | None:
-    """Every completion's matrix, folded in the port from the fills' span blocks and the
-    values (`rust/src/beliefnode.rs`), and the Bayesian games of ``solve``'s sides solved there
-    too; None where this road is off or a fill kept no span block (the Python loop folds).
+) -> tuple[dict, list] | None:
+    """`beliefFold`'s request but for the values, and the games it asks to have solved; None
+    where this road is off or a fill kept no span block (the Python loop folds).
 
     The arithmetic is the loop's: numpy's dot in the order the port copies, a replaced cell's
     tree by `fold_value`. IKA-455 stage 1.2.
@@ -493,7 +543,6 @@ def _fold_in_port(  # noqa: PLR0913 - the node's pieces
         "kind": "beliefFold",
         "rows": m,
         "cols": n,
-        "values": portlp._b64(values),  # noqa: SLF001
         "dirty": base64.b64encode(
             np.ascontiguousarray(dirty, dtype=np.uint8).tobytes()
         ).decode("ascii"),
@@ -530,9 +579,18 @@ def _fold_in_port(  # noqa: PLR0913 - the node's pieces
             asks.append((side, np.asarray([item.weight for item in items], dtype=np.float64)))
     request["solve"] = [{"side": side, "weights": portlp._b64(w)}  # noqa: SLF001
                         for side, w in asks]
-    answer = portlp._ask(reg, request)  # noqa: SLF001
-    if "error" in answer:
-        raise RuntimeError(f"`beliefFold`: {answer['error']}")
+    return request, asks
+
+
+def _fold_answer(
+    answer: dict, jobs: list, m: int, n: int, asks: list
+) -> tuple[list[np.ndarray], dict]:
+    """Every completion's matrix and the solved games out of `beliefFold`'s (or
+    `beliefServed`'s) answer."""
+    import base64
+
+    from . import portlp
+
     flat = np.frombuffer(base64.b64decode(answer["matrices"]), dtype="<f8")
     payoffs = [
         flat[k * m * n : (k + 1) * m * n].reshape(m, n).astype(np.float64)
@@ -550,6 +608,183 @@ def _fold_in_port(  # noqa: PLR0913 - the node's pieces
     portlp.COUNTS["folded"] += len(jobs)
     portlp.COUNTS["bayes"] += len(answer["answers"])
     return payoffs, solved
+
+
+def _fold_in_port(  # noqa: PLR0913 - the node's pieces
+    reg: Regulation,
+    filled,  # noqa: ANN001 - EncodedNode, the reference fill
+    jobs: list,
+    reference_block: int | None,
+    dirty: np.ndarray,
+    values: np.ndarray,
+    starts: list[int],
+    parts: list,
+    m: int,
+    n: int,
+    solve: Sequence[int],
+    spreads: dict[int, list],
+) -> tuple[list[np.ndarray], dict] | None:
+    """Every completion's matrix folded in the port from the values (IKA-455 stage 1.2), and
+    the games of ``solve``'s sides solved there; None where the Python loop folds."""
+    from . import portlp
+
+    made = _fold_request(filled, jobs, reference_block, dirty, starts, parts, m, n, solve, spreads)
+    if made is None:
+        return None
+    request, asks = made
+    request["values"] = portlp._b64(values)  # noqa: SLF001
+    answer = portlp._ask(reg, request)  # noqa: SLF001
+    if "error" in answer:
+        raise RuntimeError(f"`beliefFold`: {answer['error']}")
+    return _fold_answer(answer, jobs, m, n, asks)
+
+
+#: The numbers fills are held under in the port (a node's first fill clears the last node's).
+_TICKETS = itertools.count(1)
+
+
+def _stack_leaf(owner, rules):  # noqa: ANN001, ANN202 - the leaf, an inference.RemoteValue
+    """The inference server's leaf when stage 1.3 takes this node, or None."""
+    from . import portlp
+
+    if not portlp.STACK[0] or timing.DUPES or rules.patch_shares_side:
+        return None
+    from .inference import RemoteValue
+
+    return owner if type(owner) is RemoteValue else None
+
+
+class _Patcher:
+    """`_patched` for one completion and side, and how the port makes the same block.
+
+    Called as `_patched(rows, side, slots, item, ...)` for the Python road; `desc` says the
+    same to the port: the held fill, the rows cut from it and the completion's own rows for the
+    slots (its root encoded once, as `_patched` encodes it, bench columns not asked for).
+    """
+
+    def __init__(self, side, item, reg, position, encoder, rules) -> None:  # noqa: ANN001, PLR0913
+        self.side, self.item, self.reg, self.position = side, item, reg, position
+        self.encoder, self.rules = encoder, rules
+        self._source = None
+
+    def __call__(self, rows, slots):  # noqa: ANN001, ANN204
+        return _patched(
+            rows, self.side, slots, self.item, self.reg, self.position, self.encoder, self.rules
+        )
+
+    def desc(self, ticket: int, rows: list[int] | None, slots, count: int | None = None) -> dict:  # noqa: ANN001
+        import base64
+
+        if self._source is None:
+            self._source = self.encoder.encode_positions([self.item.position], bind=False)
+        source = self._source
+        side = self.side
+        slots = tuple(slots)
+        if hasattr(self.encoder, "note"):
+            # What `_patched` notes for the block it makes: the rows it patched.
+            self.encoder.note(
+                "patched side=rebuilt", count if count is not None else len(rows or ())
+            )
+
+        def pack(array: np.ndarray, dtype: str) -> str:
+            part = np.ascontiguousarray(array[0, side, list(slots)], dtype=dtype)
+            return base64.b64encode(part.tobytes()).decode("ascii")
+
+        return {
+            "ticket": ticket,
+            "rows": None if rows is None else [int(r) for r in rows],
+            "patch": {
+                "side": side,
+                "slots": [int(s) for s in slots],
+                "source": {
+                    "species": pack(source.species, "<i4"),
+                    "ability": pack(source.ability, "<i4"),
+                    "item": pack(source.item, "<i4"),
+                    "moves": pack(source.moves, "<i4"),
+                    "mon": pack(source.mon, "<f4"),
+                    "mask": pack(source.mask, "<f4"),
+                },
+            },
+        }
+
+
+def _served_in_port(  # noqa: PLR0913 - the node's pieces
+    reg: Regulation,
+    leaf,  # noqa: ANN001 - inference.RemoteValue
+    filled,  # noqa: ANN001 - EncodedNode, the reference fill
+    jobs: list,
+    reference_block: int | None,
+    dirty: np.ndarray,
+    parts: list,
+    descs: list,
+    m: int,
+    n: int,
+    solve: Sequence[int],
+    spreads: dict[int, list],
+    encoder,  # noqa: ANN001 - Encoder
+) -> tuple[list[np.ndarray], dict] | None:
+    """The node stacked, scored by the inference server and folded in the port (`beliefServed`,
+    IKA-455 stage 1.3); None where Python stacks (a fill without a span block)."""
+    from . import portlp, rustnode
+    from .encode import HP_SCALE
+    from .inference import request_failed
+
+    rows = [rows for rows, _make in parts]
+    starts = [0]
+    for count in rows[:-1]:
+        starts.append(starts[-1] + count)
+    made = _fold_request(filled, jobs, reference_block, dirty, starts, parts, m, n, solve, spreads)
+    if made is None:
+        return None
+    request, asks = made
+    mon_k = {name: k for k, name in enumerate(encoder.mon_names)}
+    side_k = {name: k for k, name in enumerate(encoder.side_names)}
+    request["kind"] = "beliefServed"
+    request["server"] = {
+        "address": leaf.address,
+        "model": leaf.model,
+        "shm": leaf._block.name,  # noqa: SLF001 - the leaf's own block, idle while the port asks
+        "bytes": int(leaf._block.size),  # noqa: SLF001
+        "batch": int(leaf.batch_size),
+        "merge": bool(leaf.merge),
+    }
+    request["netScoresEnds"] = bool(leaf.encoder.rules.net_scores_ends)
+    request["patch"] = {
+        "can_mega": mon_k["can_mega"],
+        "maxhp_scaled": mon_k["maxhp_scaled"],
+        "hp_fraction": mon_k["hp_fraction"],
+        "fainted": mon_k["fainted"],
+        "mega_used": side_k["mega_used"],
+        "mega_available": side_k["mega_available"],
+        "alive_fraction": side_k["alive_fraction"],
+        "team_hp_fraction": side_k["team_hp_fraction"],
+        "hp_scale": float(HP_SCALE),
+    }
+    request["parts"] = [{**desc, "count": count} for desc, count in zip(descs, rows, strict=True)]
+    with timing.region("belief.score"):
+        answer = portlp._ask(reg, request)  # noqa: SLF001
+    if "serverError" in answer:
+        raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
+                              "capGb": answer.get("capGb")}, "inference failed")
+    if "error" in answer:
+        raise RuntimeError(f"`beliefServed`: {answer['error']}")
+    if "served" not in answer:
+        raise RuntimeError("the port did not answer `beliefServed`; the binary predates it -- rebuild it")
+    served = answer["served"]
+    waited = float(served.get("waitUs", 0.0)) / 1e6
+    # The server's share of the port's answer is the leaf's clock, as `portserved` has it.
+    rustnode.PORT_WAITED[0] -= waited
+    requests, count = int(served.get("requests", 0)), int(served.get("rows", 0))
+    leaf.waited += waited
+    leaf.copied += float(served.get("copyUs", 0.0)) / 1e6
+    leaf.calls += requests
+    leaf.evaluated += count
+    leaf.ended += int(served.get("ended", 0))
+    timing.count("leaves", count)
+    timing.count("forward.passes", requests)
+    timing.count("serve.requests", requests)
+    portlp.COUNTS["stacked"] = portlp.COUNTS.get("stacked", 0) + 1
+    return _fold_answer(answer, jobs, m, n, asks)
 
 
 def _packed(spans: list) -> dict | None:
@@ -680,7 +915,7 @@ def _borrow(  # noqa: PLR0913 - one completion's dirty cells, and where each is 
     claimed: dict,
     filled,  # noqa: ANN001 - EncodedNode, the reference fill
     wanted: list[tuple[int, int]],
-    block: Callable[[int, Callable], int],
+    block: Callable[..., int],
     patch: Callable,
 ) -> list[tuple[int, int]]:
     """Which of the node's dirty cells this completion resolves itself; the rest are booked.
@@ -736,6 +971,10 @@ def _borrow(  # noqa: PLR0913 - one completion's dirty cells, and where each is 
             lambda owner=owner, rows=rows, rest=rest: patch(
                 _subset(owner.filled.encoded, rows), rest
             ),
+            # IKA-455 stage 1.3: the same block as the port would make it from the held fill.
+            patch.desc(owner.filled.ticket, rows, rest)
+            if owner.filled.ticket is not None and hasattr(patch, "desc")
+            else None,
         )
         job.borrowed.append(
             (index, [(i, j, [at[int(k)] for k in ix], w) for (i, j), (ix, w) in cells], [])
@@ -765,7 +1004,8 @@ def _gather_dirty(  # noqa: PLR0913 - one completion's dirty cells, and where th
     wanted: list[tuple[int, int]],
     rules,  # noqa: ANN001 - EncodingRules
     scorer: Callable,
-    block: Callable[[int, Callable], int],
+    block: Callable[..., int],
+    tickets: Iterator[int] | None = None,
 ) -> None:
     """Fill one completion's dirty cells over there without scoring them; book the block.
 
@@ -778,17 +1018,21 @@ def _gather_dirty(  # noqa: PLR0913 - one completion's dirty cells, and where th
             # The reference fill's own leaves (its refusals have already stopped the node).
             job.dirty_from_reference = True
             return
+        ticket = next(tickets) if tickets is not None else None
         own = port.ask(
             reg,
             lambda node: node.fill_encoded(
-                item.position, row, col, budget, [], wanted, rules=rules
+                item.position, row, col, budget, [], wanted, rules=rules, hold=ticket
             ),
         )
         port.raise_refused(own.refused)
         port.note_port_rule([scorer], own)
         timing.count("leaves.node", len(own.encoded))
         job.filled = own
-        job.dirty = block(len(own.encoded), lambda own=own: own.encoded)
+        job.dirty = block(
+            len(own.encoded), lambda own=own: own.encoded,
+            None if ticket is None else {"ticket": ticket},
+        )
         job.notes |= set(own.unmodelled)
 
 
