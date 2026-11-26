@@ -516,7 +516,7 @@ def test_a_batch_longer_than_one_chunk_is_cut_where_batchedvalue_cuts(parts, dev
 
 def _blocks(encoder, regulation, sizes):
     """Encoded blocks of the given row counts, cut from one encoding."""
-    from pokeuraou.beliefnode import _subset
+    from ._served import subset as _subset
 
     encoded = encoder.encode_positions(_positions(regulation, sum(sizes)))
     out, at = [], 0
@@ -583,7 +583,9 @@ def test_blocks_scored_together_are_what_each_block_gets_alone(parts, device_nam
         assert np.array_equal(got, want)
     # The positive control: the same rows in blocks of other sizes are other answers here
     # (every block one row longer, the next block's first row borrowed).
-    from pokeuraou.beliefnode import _stacked, _subset
+    from pokeuraou.beliefnode import _stacked
+
+    from ._served import subset as _subset
 
     stacked, starts = _stacked([(len(b.species), (lambda b=b: b)) for b in blocks], blocks[0])
     shifted = [
@@ -705,7 +707,7 @@ def test_a_graph_replay_is_the_eager_answer_for_an_ensemble_too(parts):
     # The positive control: on this net and card a row's answer does move with the size of
     # its call (16 of these 45 sizes on the RTX 5070 when one row is added), so a replay
     # at the wrong size would have been seen.
-    from pokeuraou.beliefnode import _subset
+    from ._served import subset as _subset
 
     moved = 0
     for size in sizes[:45]:
@@ -728,7 +730,8 @@ def test_a_lone_request_is_a_graph_replay_and_the_eager_answer(parts, monkeypatc
     regulation, encoder, net = parts
     device = torch.device("cuda")
     from pokeuraou import inference
-    from pokeuraou.beliefnode import _subset
+
+    from ._served import subset as _subset
 
     # A small ceiling, so a few rows cover both roads.
     monkeypatch.setattr(inference, "GRAPH_ROWS", 24)
@@ -777,7 +780,8 @@ def test_two_arms_capturing_at_once_answer_as_eager(parts):
     regulation, encoder, net = parts
     device = torch.device("cuda")
     from pokeuraou import inference
-    from pokeuraou.beliefnode import _subset
+
+    from ._served import subset as _subset
 
     local = BatchedValue(net.to(device), encoder, device=device)
     encoded = encoder.encode_positions(_positions(regulation, 48))
@@ -844,7 +848,8 @@ def test_graphs_met_on_many_threads_hold_memory_on_one_side_stream(parts):
     regulation, encoder, net = parts
     device = torch.device("cuda")
     from pokeuraou import inference
-    from pokeuraou.beliefnode import _subset
+
+    from ._served import subset as _subset
 
     local = BatchedValue(net.to(device), encoder, device=device)
     model = inference.served_model(BatchedValue(net.to(device), encoder, device=device))

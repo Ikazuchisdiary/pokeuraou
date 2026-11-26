@@ -38,7 +38,7 @@ from pokeuraou.position import Position
 from pokeuraou.search import believed_ranking, leaf_ranking
 
 from ._harness import load_tool
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +53,7 @@ def _generate(pool, out: Path, ranks: Path | None, indices=(0, 1, 2)):  # noqa: 
     solver = SolvedSelections(pool.reg, pool.teams, _stub)
     stats = generate_pool(
         pool.reg, pool, games=0, seed=278, out=out, solver=solver,
-        evaluate=_stub, objective=HP_SHARE, search_limit=3, max_turns=8,
+        evaluate=_served_stub, objective=HP_SHARE, search_limit=3, max_turns=8,
         rank_by_leaf=True, indices=list(indices), rank_scores_out=ranks,
         rank_fill="refs2",
     )
@@ -192,10 +192,10 @@ def test_a_hidden_ranking_is_its_completion_and_the_record_rebuilds_it(pool, pla
             rebuilt = rank_scores.completion_position(reg, pool, game, row)
             truth = Position.from_json(game["decisions"][row["decision"]]["position"])
             pool_actions = _actions(reg, truth, row["side"], row["candidates"])
-            again = leaf_ranking(reg, rebuilt, row["side"], _stub, budget=Budget.matrix())
+            again = leaf_ranking(reg, rebuilt, row["side"], _served_stub, budget=Budget.matrix())
             assert np.array_equal(again(pool_actions), np.asarray(row["score"]))
             # Control: the true bench is another position, and it scores otherwise.
-            true_rank = leaf_ranking(reg, truth, row["side"], _stub, budget=Budget.matrix())
+            true_rank = leaf_ranking(reg, truth, row["side"], _served_stub, budget=Budget.matrix())
             moved += not np.array_equal(true_rank(pool_actions), np.asarray(row["score"]))
     assert guessed > 0, "no ranking read a guessed bench; the check would be vacuous"
     assert moved > 0, "the true bench scored the same everywhere; the rebuild proves nothing"

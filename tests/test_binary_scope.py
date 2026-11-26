@@ -25,8 +25,8 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.pool import load_pool
 from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
 
-from .test_board_belief_once import _other
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_board_belief_once import _other, _other_served
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 
 
 @pytest.fixture(scope="module")
@@ -80,9 +80,13 @@ def test_a_scope_does_not_hold_positions(pool, copy_of_the_port) -> None:  # noq
         rustnode.hold_positions(False)
 
 
+#: The position function a selection solve reads, and the served leaf a game's nodes are scored on.
+_SERVED = {_stub: _served_stub, _other: _other_served}
+
+
 def _arm(pool, name, leaf, binary=None):  # noqa: ANN001, ANN202
     return PoolArm(
-        name=name, evaluate=leaf, solver=SolvedSelections(pool.reg, pool.teams, leaf),
+        name=name, evaluate=_SERVED[leaf], solver=SolvedSelections(pool.reg, pool.teams, leaf),
         limit=4, rank_by_leaf=True, rank_fill="refs2", rust_binary=binary,
     )
 

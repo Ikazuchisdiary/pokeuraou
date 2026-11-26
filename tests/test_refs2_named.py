@@ -38,7 +38,7 @@ from pokeuraou.poolplay import PoolArm, SolvedSelections, generate_pool
 from pokeuraou.search import DEFAULT_RANK_FILL, SHIPPED_RANK_FILL
 
 from ._harness import load_tool
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 from .test_q_rank import _StubQ
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +69,7 @@ def _game(pool, **kwargs):  # noqa: ANN001, ANN003, ANN202
     team = list(pool.teams[0].sets)
     return selfplay.play_game(
         pool.reg, np.random.default_rng(3), team[:4], team[:4], "t",
-        search_limit=3, max_turns=2, evaluate=_stub, sheets=(team, team), **kwargs,
+        search_limit=3, max_turns=2, evaluate=_served_stub, sheets=(team, team), **kwargs,
     )
 
 
@@ -111,9 +111,9 @@ def test_refs2_named_needs_no_q_and_a_damage_side_keeps_its_bytes(pool, no_q) ->
 
 
 def test_a_pool_arm_resolves_its_fill_at_construction() -> None:
-    leafy = PoolArm(name="a", evaluate=_stub, solver=None, limit=2, rank_by_leaf=True)
+    leafy = PoolArm(name="a", evaluate=_served_stub, solver=None, limit=2, rank_by_leaf=True)
     damage = PoolArm(name="b", evaluate=None, solver=None, limit=2, rank_by_leaf=False)
-    named = PoolArm(name="c", evaluate=_stub, solver=None, limit=2, rank_by_leaf=True,
+    named = PoolArm(name="c", evaluate=_served_stub, solver=None, limit=2, rank_by_leaf=True,
                     rank_fill="refs2")
     assert (leafy.rank_fill, damage.rank_fill, named.rank_fill) == ("q-nocover", "refs2", "refs2")
 
@@ -122,7 +122,7 @@ def _generate(pool, out: Path, **kwargs):  # noqa: ANN001, ANN003, ANN202
     solver = SolvedSelections(pool.reg, pool.teams, _stub)
     generate_pool(
         pool.reg, pool, games=0, seed=278, out=out, solver=solver,
-        evaluate=_stub, objective=HP_SHARE, search_limit=3, max_turns=8, rank_by_leaf=True,
+        evaluate=_served_stub, objective=HP_SHARE, search_limit=3, max_turns=8, rank_by_leaf=True,
         indices=[0, 1, 2], **kwargs,
     )
     return [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines() if x]

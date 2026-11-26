@@ -42,10 +42,14 @@ from pokeuraou.selfplay import GameRecord
 from pokeuraou.teams import TeamError
 
 from ._harness import load_tool
+from ._served import hp_share_leaf
 
 
 def _stub(positions):  # noqa: ANN001, ANN202
-    """Antisymmetric: HP summed per side, the active pair counted twice (leads matter)."""
+    """Antisymmetric: HP summed per side, the active pair counted twice (leads matter).
+
+    What a selection solve reads (it scores ~10^5 leaves; in Python, on positions). A game's
+    nodes are scored by the port on the inference server (IKA-460): `_served_stub`."""
     out = np.empty(len(positions), dtype=np.float64)
     for i, pos in enumerate(positions):
         strength = [
@@ -54,6 +58,10 @@ def _stub(positions):  # noqa: ANN001, ANN202
         ]
         out[i] = 1.0 / (1.0 + np.exp(-(strength[0] - strength[1]) / 150.0))
     return out
+
+
+#: An arm's leaf in a played game: the tests' hp-share server (antisymmetric too).
+_served_stub = hp_share_leaf()
 
 
 def _roster_team() -> list[dict]:

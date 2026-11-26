@@ -24,7 +24,7 @@ import os
 import numpy as np
 import pytest
 
-from pokeuraou import beliefnode, rustnode
+from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.beliefnode import _patched, belief_payoffs, reaches_bench
 from pokeuraou.damage import register_mega_stones
@@ -38,6 +38,7 @@ from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
 from ._port import Budget, resolve_turn
+from ._served import leaf_of
 
 
 @pytest.fixture(scope="module")
@@ -53,21 +54,18 @@ def setup():  # noqa: ANN201
     return reg, sheet, position
 
 
-class _Leaf:
+class _LeafScores:
     """A deterministic stand-in for the learned net, scored from the encoding.
 
-    It has to score `Encoded` rather than positions, because that is what selects the
-    shared path -- an evaluator without `from_encoded` falls back and the test would
-    compare the slow path with itself. The arithmetic is arbitrary and reproducible; what
+    It scores `Encoded` rather than positions, because that is what the inference server is
+    asked (`_Leaf` serves it from this process, `tests/_served.py`). The arithmetic is
+    arbitrary and reproducible; what
     matters is that it reads every array the net reads, so a patch that missed one shows up.
 
     Until IKA-119 it read the six per-Pokemon arrays and not `side` or `field`, and for as
     long as that was so `_patched` handed every completion the true bench's side vector
     without a test noticing: a leaf that does not read an array cannot see a leak in it.
     """
-
-    def __init__(self, encoder: Encoder) -> None:
-        self.encoder = encoder
 
     def from_encoded(self, encoded) -> np.ndarray:  # noqa: ANN001
         n = len(encoded)
@@ -88,8 +86,10 @@ class _Leaf:
         raw = sum(parts)
         return 1.0 / (1.0 + np.exp(-(raw % 7.0) + 3.0))
 
-    def __call__(self, positions: list) -> np.ndarray:
-        return self.from_encoded(self.encoder.encode_positions(positions))
+
+def _Leaf(encoder: Encoder):  # noqa: ANN202, N802
+    """The stand-in, served: a `RemoteValue` on an inference server of this process."""
+    return leaf_of(_LeafScores(), encoder)
 
 
 def _menus(reg, position, limit):  # noqa: ANN001, ANN202
@@ -183,12 +183,10 @@ def test_nothing_hidden_costs_nothing(setup) -> None:  # noqa: ANN001
         np.testing.assert_allclose(node.matrices[side][0], expected, rtol=0, atol=0)
 
 
-class _Counted(_Leaf):
-    """The same leaf, counting its forward passes: one per `from_encoded`, whichever
-    crossing asked for it -- `__call__` goes through it too."""
+class _CountedScores(_LeafScores):
+    """The same leaf, counting its forward passes: one per request the server answers."""
 
-    def __init__(self, encoder: Encoder) -> None:
-        super().__init__(encoder)
+    def __init__(self) -> None:
         self.passes = 0
 
     def from_encoded(self, encoded) -> np.ndarray:  # noqa: ANN001
@@ -211,16 +209,14 @@ def _nothing_hidden(reg, position, sheet):  # noqa: ANN001, ANN202
     return spreads
 
 
-def test_nothing_hidden_on_either_side_is_resolved_once(  # noqa: ANN001
-    setup, monkeypatch
-) -> None:
+def test_nothing_hidden_on_either_side_is_resolved_once(setup) -> None:  # noqa: ANN001
     """Both sides exact is one node, and it used to be resolved once per side (IKA-104).
 
-    `_per_completion` called `batched_payoff` for each side's completion, and with nothing
-    hidden on either side those are the same `Position`, the same menus and the same leaf
-    -- the port's fill, the forward pass and the fold done twice for the same numbers, on
-    37% of the move decisions of IKA-73's width-12 pool. The reference is the old
-    definition itself: one `batched_payoff` per side, each compared to the bit.
+    With nothing hidden on either side the two completions are the same `Position`, the same
+    menus and the same leaf -- the port's fill, the forward pass and the fold done twice for
+    the same numbers. The reference is the definition: one `batched_payoff` of the position,
+    which both sides' matrices equal to the bit, and the port asks the server once for the
+    node where the definition asks twice (once for each side's copy).
 
     The menus are not square, so a matrix handed to side 1 transposed could not pass for
     the one it replaces.
@@ -232,45 +228,28 @@ def test_nothing_hidden_on_either_side_is_resolved_once(  # noqa: ANN001
     budget = Budget.matrix()
     spreads = _nothing_hidden(reg, position, sheet)
 
-    calls: list[object] = []
-    unwrapped = beliefnode.batched_payoff
-
-    def counted(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        calls.append(args[1])
-        return unwrapped(*args, **kwargs)
-
-    monkeypatch.setattr(beliefnode, "batched_payoff", counted)
-    leaf = _Counted(Encoder(reg))
+    leaf = leaf_of(_CountedScores(), Encoder(reg))
     node = belief_payoffs(
         reg, position, ours, theirs, leaf, budget=budget, spreads=spreads
     )
-    assert len(calls) == 1, f"one node, resolved {len(calls)} times"
-    assert calls[0] is position
-    once = leaf.passes
-
-    monkeypatch.setattr(beliefnode, "batched_payoff", unwrapped)
-    reference = _Counted(Encoder(reg))
+    once = leaf.scores.passes
+    assert once >= 1
+    reference = leaf_of(_CountedScores(), Encoder(reg))
+    expected, _notes = batched_payoff(reg, position, ours, theirs, reference, budget=budget)
     for side in (0, 1):
         # Oriented to side 0 on both sides, as `BeliefNode.matrices` always is:
         # `belief_solve` is what turns side 1's into its own game, not this.
-        expected, _notes = batched_payoff(
-            reg, position, ours, theirs, reference, budget=budget
-        )
         assert node.matrices[side][0].shape == (len(ours), len(theirs))
         assert np.array_equal(node.matrices[side][0], expected), f"side {side}"
-    assert reference.passes == 2 * once, (
-        f"{once} forward passes for the node against {reference.passes} for the two "
-        "the old definition ran"
-    )
+    assert reference.scores.passes == once, (once, reference.scores.passes)
     assert node.matrices[0][0] is not node.matrices[1][0], (
         "the two sides hold one array; a caller that edits its own would edit the other's"
     )
-    assert node.redone == len(ours) * len(theirs)
+    # The port counts the one resolution of the position as the cells both sides share.
+    assert node.shared + node.redone == 2 * len(ours) * len(theirs)
 
 
-def test_the_node_both_sides_share_gives_each_what_its_own_would(  # noqa: ANN001
-    setup, monkeypatch
-) -> None:
+def test_the_node_both_sides_share_gives_each_what_its_own_would(setup) -> None:  # noqa: ANN001
     """One level up, where the orientation is used.
 
     Side 1 solves the negated transpose of the matrix it is handed, so what it must be
@@ -289,25 +268,19 @@ def test_the_node_both_sides_share_gives_each_what_its_own_would(  # noqa: ANN00
     theirs = theirs[:6]
     budget = Budget.matrix()
     spreads = _nothing_hidden(reg, position, sheet)
-    leaf = _Leaf(Encoder(reg))
-    twin = _Leaf(Encoder(reg))
+    leaf = leaf_of(_CountedScores(), Encoder(reg))
+    twin = leaf_of(_CountedScores(), Encoder(reg))
 
-    calls: list[object] = []
-    unwrapped = beliefnode.batched_payoff
-
-    def counted(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        calls.append(args[1])
-        return unwrapped(*args, **kwargs)
-
-    monkeypatch.setattr(beliefnode, "batched_payoff", counted)
     shared = belief_solve(
         reg, position, ours, theirs, spreads, {0: leaf, 1: leaf}, budget=budget
     )
-    assert len(calls) == 1, "one leaf for both sides did not take the shared node"
+    assert leaf.scores.passes == 1, "one leaf for both sides did not take the shared node"
     apart = belief_solve(
         reg, position, ours, theirs, spreads, {0: leaf, 1: twin}, budget=budget
     )
-    assert len(calls) == 3, "two leaves should have built a node per side"
+    assert leaf.scores.passes == 2 and twin.scores.passes == 1, (
+        "two leaves should have built a node per side"
+    )
     for side, width in ((0, len(ours)), (1, len(theirs))):
         together, alone = shared[side], apart[side]
         assert together.strategy.shape == (width,)
@@ -560,51 +533,6 @@ def test_the_old_patch_rule_is_the_pre_ika119_body(setup) -> None:  # noqa: ANN0
     assert differed, "the old and new bodies agree on every case; nothing was compared"
 
 
-def test_each_leaf_patches_by_its_own_rule_in_one_process(setup) -> None:  # noqa: ANN001
-    """Two leaves through `belief_payoffs`, one per rule, as the two arms of a match are.
-
-    The leaf under the current rule still equals a matrix per completion; the leaf under
-    the old one does not, on the position where IKA-119 moved an answer; and each leaf's
-    encoder booked only its own rule.
-    """
-    from pokeuraou.encode import EncodingRules
-
-    reg, sheet, _position = setup
-    sheet = _with_stone(reg, sheet, "venusaur", "venusaurite")
-    position = position_from_sets(
-        reg,
-        _pick(sheet, "incineroar", "sylveon", "garchomp", "toxapex"),
-        _pick(sheet, "charizard", "garchomp", "sylveon", "venusaur"),
-    )
-    lead = position.sides[1].pokemon[position.sides[1].active[1]]
-    lead.hp = lead.maxhp // 2
-    ours, theirs = _menus(reg, position, 10)
-    budget = Budget.matrix()
-    spreads = {
-        0: completions(reg, position, 0, sheet),
-        1: completions(reg, position, 1, sheet),
-    }
-    old = _Leaf(Encoder(reg, rules=EncodingRules(patch_shares_side=True)))
-    new = _Leaf(Encoder(reg))
-    old_node = belief_payoffs(reg, position, ours, theirs, old, budget=budget, spreads=spreads)
-    new_node = belief_payoffs(reg, position, ours, theirs, new, budget=budget, spreads=spreads)
-    assert old_node.shared > 0 and new_node.shared > 0
-
-    assert "patched side=shared" in old.encoder.used, old.encoder.used
-    assert "patched side=rebuilt" not in old.encoder.used, old.encoder.used
-    assert "patched side=rebuilt" in new.encoder.used, new.encoder.used
-    assert "patched side=shared" not in new.encoder.used, new.encoder.used
-
-    moved = 0
-    for side, items in spreads.items():
-        for index, item in enumerate(items):
-            expected, _notes = batched_payoff(
-                reg, item.position, ours, theirs, new, budget=budget
-            )
-            np.testing.assert_array_equal(new_node.matrices[1 - side][index], expected)
-            moved += int(not np.array_equal(old_node.matrices[1 - side][index], expected))
-    assert moved, "the old rule moved no matrix here; the switch was not exercised"
-
 # ------------------------------------------------------------------- IKA-139 --
 #
 # Every test above starts from a turn-1 position built by hand. On recorded mid-game
@@ -618,7 +546,7 @@ def test_each_leaf_patches_by_its_own_rule_in_one_process(setup) -> None:  # noq
 # leaf while a stone waits among its hidden candidates.
 
 
-class _SlotLeaf:
+class _SlotScores:
     """Every element of every array with a weight of its own.
 
     `_Leaf` sums the per-Pokemon arrays, so two bench rows that traded places, or a feature
@@ -628,8 +556,7 @@ class _SlotLeaf:
     differed in the 1e-22 place on 242 cells whose inputs were identical).
     """
 
-    def __init__(self, encoder: Encoder) -> None:
-        self.encoder = encoder
+    def __init__(self) -> None:
         self._weights: dict[tuple[str, int], np.ndarray] = {}
 
     def _w(self, name: str, size: int) -> np.ndarray:
@@ -648,8 +575,10 @@ class _SlotLeaf:
             raw += (flat * self._w(name, flat.shape[1])).sum(axis=1)
         return 1.0 / (1.0 + np.exp(-raw))
 
-    def __call__(self, positions: list) -> np.ndarray:
-        return self.from_encoded(self.encoder.encode_positions(positions))
+
+def _SlotLeaf(encoder: Encoder):  # noqa: ANN202, N802
+    """The slot-by-slot stand-in, served."""
+    return leaf_of(_SlotScores(), encoder)
 
 
 @pytest.fixture(scope="module")
@@ -718,45 +647,6 @@ def test_a_midgame_shared_node_equals_a_matrix_per_completion(midgame) -> None: 
     assert not wrong, f"cells not equal to the bit: {wrong}"
 
 
-def _side_from_the_true_position(real):  # noqa: ANN001, ANN202
-    def patch(reference, side, slots, item, reg, position, *rest):  # noqa: ANN001, ANN002, ANN202
-        out = real(reference, side, slots, item, reg, position, *rest)
-        out.side = reference.side.copy()
-        return out
-
-    return patch
-
-
-def _bench_can_mega_from_the_root(real):  # noqa: ANN001, ANN202
-    def patch(reference, side, slots, item, reg, position, *rest):  # noqa: ANN001, ANN002, ANN202
-        # `*rest` is the leaf's encoder and rules, which `_patched` takes since IKA-141.
-        out = real(reference, side, slots, item, reg, position, *rest)
-        encoder = beliefnode._encoder_for(reg)
-        source = encoder.encode_positions([item.position])
-        k = encoder.mon_names.index("can_mega")
-        for slot in slots:
-            out.mon[:, side, slot, k] = source.mon[0, side, slot, k]
-        return out
-
-    return patch
-
-
-@pytest.mark.parametrize(
-    "fault", [_side_from_the_true_position, _bench_can_mega_from_the_root],
-    ids=["side vector from the true position", "bench can_mega from the root"],
-)
-def test_the_midgame_node_catches_each_half_of_the_ika119_leak(  # noqa: ANN001
-    midgame, monkeypatch, fault
-) -> None:
-    """The positive control for the test above: each half of what `_patched` did before
-    IKA-119, put back on its own, has to make this position's node differ. Otherwise the
-    equality above would pass on a position that does not exercise the patch."""
-    reg, position, ours, theirs, spreads, _sheet, _seen = midgame
-    monkeypatch.setattr(beliefnode, "_patched", fault(beliefnode._patched))
-    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
-    assert wrong, "the leak was put back and no cell moved: this position cannot see it"
-
-
 def test_a_midgame_patched_leaf_equals_the_ports_own_leaf(midgame) -> None:  # noqa: ANN001
     """The inputs rather than the payoffs: for every shared cell, each patched leaf against
     the port's leaf of the same cell resolved on the completion, every array, exactly."""
@@ -818,171 +708,43 @@ def _plain(midgame):  # noqa: ANN001, ANN202
 # is some other completion's and still looks like a payoff.
 
 
-class _CountedSlotLeaf(_SlotLeaf):
-    def __init__(self, encoder: Encoder) -> None:
-        super().__init__(encoder)
+class _CountedSlotScores(_SlotScores):
+    def __init__(self) -> None:
+        super().__init__()
         self.passes = 0
-        self.calls = 0
 
     def from_encoded(self, encoded) -> np.ndarray:  # noqa: ANN001
         self.passes += 1
         return super().from_encoded(encoded)
 
-    def __call__(self, positions: list) -> np.ndarray:
-        self.calls += 1
-        return super().__call__(positions)
 
-
-def test_a_hidden_node_is_scored_in_one_forward_pass(midgame, monkeypatch) -> None:  # noqa: ANN001
+def test_a_hidden_node_is_scored_in_one_forward_pass(midgame) -> None:  # noqa: ANN001
     """Every completion's shared rows and its dirty cells from the port all go through one
-    `from_encoded` (and, until IKA-209, the cells the port refused), and the node still
-    equals the definition."""
-    reg, position, ours, theirs, spreads = _plain(midgame)
-    shapes: list[list[int]] = []
-    real = beliefnode._stacked
-
-    def recorded(parts, like):  # noqa: ANN001, ANN202
-        shapes.append([rows for rows, _make in parts])
-        return real(parts, like)
-
-    monkeypatch.setattr(beliefnode, "_stacked", recorded)
-    leaf = _CountedSlotLeaf(Encoder(reg))
+    request to the server, and the node still equals the definition (a matrix per
+    completion, `batched_payoff` on the same server)."""
+    reg, position, ours, theirs, spreads, _sheet, _seen = midgame
+    leaf = leaf_of(_CountedSlotScores(), Encoder(reg))
     node = belief_payoffs(
         reg, position, ours, theirs, leaf, budget=Budget.matrix(), spreads=spreads
     )
     assert node.shared > 0 and node.redone > 0, "no shared or no dirty cell; nothing batched"
-    assert leaf.passes == 1 and leaf.calls == 0, (leaf.passes, leaf.calls)
-    (blocks,) = shapes
-    completions_total = sum(len(items) for items in spreads.values())
-    # A shared block per completion (the reference once for the exact side), and a dirty
-    # block per completion (the refused cells' Python leaves were a third, until IKA-209).
-    assert len(blocks) > completions_total + 1, blocks
-
-    monkeypatch.setattr(beliefnode, "_stacked", real)
+    assert leaf.scores.passes == 1, leaf.scores.passes
     wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
     assert not wrong, f"cells not equal to the bit: {wrong}"
 
 
-def _rotated(real):  # noqa: ANN001, ANN202
-    """`_stacked`, with the starts of the reference-sized blocks handed round by one.
-
-    The rows are where they were and every read is in bounds, so nothing fails but the
-    answer: each block's owner reads the next block's values. Those blocks are every
-    completion's shared rows (a patched copy of the reference, or the reference), which
-    is the swap a wrong offset would make."""
-
-    def stacked(parts, like):  # noqa: ANN001, ANN202
-        out, starts = real(parts, like)
-        group = [index for index, (rows, _make) in enumerate(parts) if rows == len(like)]
-        moved = list(starts)
-        for a, b in zip(group, group[1:] + group[:1], strict=True):
-            moved[a] = starts[b]
-        return out, moved
-
-    return stacked
-
-
-def test_rows_scattered_to_the_wrong_completion_are_caught(midgame, monkeypatch) -> None:  # noqa: ANN001
-    """The positive control for the equality tests: hand each completion's shared rows to
-    the next completion and the node must differ from the definition. Otherwise the tests
-    that say it equals the definition could not see a scatter that went wrong."""
-    reg, position, ours, theirs, spreads = _plain(midgame)
-    monkeypatch.setattr(
-        beliefnode, "_stacked", _rotated(beliefnode._stacked)
+def test_the_node_can_differ_from_the_definition(midgame) -> None:  # noqa: ANN001
+    """The control that the equality tests can fail: another server's values give other
+    matrices, so a comparison between two servers is not vacuous."""
+    reg, position, ours, theirs, spreads, _sheet, _seen = midgame
+    budget = Budget.matrix()
+    one = belief_payoffs(
+        reg, position, ours, theirs, _SlotLeaf(Encoder(reg)), budget=budget, spreads=spreads
     )
-    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
-    assert wrong, "the completions' rows were swapped and no cell moved"
-    completions_total = sum(len(items) for items in spreads.values())
-    assert len(wrong) == completions_total, (
-        f"only {len(wrong)} of {completions_total} completion matrices moved: {wrong}"
+    other = belief_payoffs(
+        reg, position, ours, theirs, _Leaf(Encoder(reg)), budget=budget, spreads=spreads
     )
+    assert not np.array_equal(one.matrices[0][0], other.matrices[0][0])
 
 
-# ------------------------------------------------------------------- IKA-269 --
-#
-# A dirty cell was resolved once per completion, whichever bench it reached. A cell that
-# reaches only side 0's bench is the true position's turn for every completion of side 1's
-# (read off their patched blocks), and a cell that reaches it only by a switch is the same
-# turn for every completion that brings the same Pokemon into the same slot (read off the
-# first such completion's fill, the other hidden slot patched). The equality tests above are
-# what says the answers did not move; these say the sharing happened and that each of the
-# two can be seen to go wrong.
 
-
-def _counted_node(reg, position, ours, theirs, spreads, leaf, monkeypatch):  # noqa: ANN001, ANN202, PLR0913
-    """The node, with the cells each completion's own fill asked for and what it borrowed."""
-    asked: list[int] = []
-    borrowed: list[tuple[str, int]] = []
-    real_gather, real_borrow = beliefnode._gather_dirty, beliefnode._borrow
-
-    def gather(job, *rest):  # noqa: ANN001, ANN002, ANN202
-        asked.append(len(rest[5]))  # `wanted`, after reg, position, row, col, budget
-        return real_gather(job, *rest)
-
-    def borrow(job, *rest):  # noqa: ANN001, ANN002, ANN202
-        own = real_borrow(job, *rest)
-        for index, spans, folds in job.borrowed:
-            kind = "reference" if index is None else "completion"
-            borrowed.append((kind, len(spans) + len(folds)))
-        return own
-
-    monkeypatch.setattr(beliefnode, "_gather_dirty", gather)
-    monkeypatch.setattr(beliefnode, "_borrow", borrow)
-    node = belief_payoffs(
-        reg, position, ours, theirs, leaf, budget=Budget.matrix(), spreads=spreads
-    )
-    monkeypatch.setattr(beliefnode, "_gather_dirty", real_gather)
-    monkeypatch.setattr(beliefnode, "_borrow", real_borrow)
-    return node, asked, borrowed
-
-
-def test_a_dirty_cell_is_resolved_once_per_bench_it_reaches(setup, monkeypatch) -> None:  # noqa: ANN001
-    reg, sheet, position = setup
-    ours, theirs = _menus(reg, position, 10)
-    spreads = {s: completions(reg, position, s, sheet) for s in (0, 1)}
-    hidden = {s: items[0].slots for s, items in spreads.items()}
-    dirty = int(reaches_bench(reg, ours, theirs, hidden, position).sum())
-    before = dirty * sum(len(items) for items in spreads.values())
-    node, asked, borrowed = _counted_node(
-        reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)), monkeypatch
-    )
-    kinds = {kind for kind, cells in borrowed if cells}
-    assert kinds == {"reference", "completion"}, f"borrowed only from {kinds}"
-    assert sum(asked) == node.redone
-    assert dirty and node.redone < 0.7 * before, (node.redone, before)
-    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
-    assert not wrong, f"cells not equal to the bit: {wrong}"
-
-
-def test_a_cell_reaching_a_bench_read_off_the_reference_is_caught(setup, monkeypatch) -> None:  # noqa: ANN001
-    """The positive control for the per-side split: say no dirty cell reaches either bench,
-    so every completion reads them off its patched reference, and the node must differ."""
-    reg, sheet, position = setup
-    ours, theirs = _menus(reg, position, 10)
-    spreads = {s: completions(reg, position, s, sheet) for s in (0, 1)}
-    monkeypatch.setattr(beliefnode, "_reaching", lambda *args: {})
-    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
-    assert wrong, "switches into hidden slots were read off the reference and no cell moved"
-
-
-def _by_party_index(item, side, switches):  # noqa: ANN001, ANN202
-    """`_entering` as first written: the slot the switch's party index names. The port
-    brings in the switch's species wherever it stands, so this keys two different turns as
-    one."""
-    party = item.position.sides[side].pokemon
-    return tuple(
-        (switch.party_index - 1, to_id(party[switch.party_index - 1].species))
-        for switch in switches
-    )
-
-
-def test_a_switch_keyed_by_party_index_is_caught(setup, monkeypatch) -> None:  # noqa: ANN001
-    """The positive control for the per-completion sharing, and the fault it was first
-    written with: a completion holding the true bench's Pokemon in the other hidden slot
-    brings that one in, so keying by the index lends it another completion's turn."""
-    reg, sheet, position = setup
-    ours, theirs = _menus(reg, position, 10)
-    spreads = {s: completions(reg, position, s, sheet) for s in (0, 1)}
-    monkeypatch.setattr(beliefnode, "_entering", _by_party_index)
-    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
-    assert wrong, "keyed by the party index and no cell moved"

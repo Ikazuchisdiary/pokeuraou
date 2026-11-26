@@ -42,8 +42,8 @@ def solve(  # noqa: PLR0913 - the node's pieces
     from .inference import request_failed
 
     owners: list[Any] = []
-    for side in (0, 1):
-        owner = served_leaf(leaves[side], "the replacement node")
+    served = [served_leaf(leaves[side], "the replacement node") for side in (0, 1)]
+    for owner in served:
         if not any(owner is seen for seen in owners):
             owners.append(owner)
 
@@ -59,7 +59,7 @@ def solve(  # noqa: PLR0913 - the node's pieces
     jobs: list[dict[str, Any]] = []
     positions: list[tuple[int, Position]] = []
     for side in (0, 1):
-        owner = getattr(leaves[side], "__self__", leaves[side])
+        owner = served[side]
         index = next(k for k, seen in enumerate(owners) if seen is owner)
         for item in spreads[1 - side]:
             request[f"p{len(jobs)}"] = rustnode._position(item.position)  # noqa: SLF001

@@ -24,12 +24,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pokeuraou import beliefnode, equilibrium, search, selfplay
+from pokeuraou import beliefnode, portlp, search, selfplay
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.pool import load_pool
 from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
 
-from .test_poolplay import _stub, _variants, _write_pool
+from ._served import steep_leaf
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 
 
 @pytest.fixture(scope="module")
@@ -52,6 +53,8 @@ def _other(positions):  # noqa: ANN001, ANN202
         out[i] = 1.0 / (1.0 + np.exp(-(strength[0] - strength[1]) / 60.0))
     return out
 
+
+_other_served = steep_leaf()
 
 REAL = search.belief_solve
 
@@ -85,7 +88,7 @@ def _counting(monkeypatch, solve):  # noqa: ANN001, ANN202
         finally:
             inside[0] = False
 
-    real_node, real_lp = beliefnode.belief_payoffs, equilibrium.solve_bayesian
+    real_node, real_lp = beliefnode.belief_payoffs, portlp.bayesian_answer
 
     def counted_node(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         counts["node"] += inside[0]
@@ -98,7 +101,8 @@ def _counting(monkeypatch, solve):  # noqa: ANN001, ANN202
     monkeypatch.setattr(selfplay, "belief_solve", counted_solve)
     # `belief_solve` imports both at call time, so the module attributes are what it gets.
     monkeypatch.setattr(beliefnode, "belief_payoffs", counted_node)
-    monkeypatch.setattr(equilibrium, "solve_bayesian", counted_lp)
+    # The port solves a node's games with the fold and hands each back through `bayesian_answer`.
+    monkeypatch.setattr(portlp, "bayesian_answer", counted_lp)
     return counts
 
 
@@ -114,9 +118,9 @@ def _play(pool, arms, which):  # noqa: ANN001, ANN202
 
 
 def _arms(pool):  # noqa: ANN001, ANN202
-    a = PoolArm(name="a", evaluate=_stub, solver=SolvedSelections(pool.reg, pool.teams, _stub),
+    a = PoolArm(name="a", evaluate=_served_stub, solver=SolvedSelections(pool.reg, pool.teams, _stub),
                 limit=4, rank_by_leaf=True, rank_fill="refs2")
-    b = PoolArm(name="b", evaluate=_other,
+    b = PoolArm(name="b", evaluate=_other_served,
                 solver=SolvedSelections(pool.reg, pool.teams, _other),
                 limit=4, rank_by_leaf=True, rank_fill="refs2")
     return a, b

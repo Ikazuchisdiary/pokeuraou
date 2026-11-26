@@ -16,6 +16,9 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "oracle: needs the built TypeScript Showdown oracle")
     config.addinivalue_line("markers", "slow: long-running (exhaustive sweeps, benchmarks)")
+    config.addinivalue_line(
+        "markers", "unserved: HP_SHARE is not served as a leaf in this test (IKA-460)"
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -32,19 +35,61 @@ def _positions_not_held() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _served_leaves_closed() -> Iterator[None]:
+    """The stand-in inference servers and leaves a test made (`tests/_served.py`) are closed
+    when it ends."""
+    yield
+    from ._served import close_all
+
+    close_all()
+
+
+_REFUSE_UNSERVED = [False]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hp_share_is_served() -> Iterator[None]:
+    """`payoff.HP_SHARE` (and a left-out leaf, which is HP_SHARE) is a served leaf here.
+
+    The port scores a node on the inference server, so a leaf held in the process is
+    `beliefnode.UnservedLeaf` (IKA-460). Many tests take HP_SHARE as "a leaf"; this gives them
+    the stand-in for the Rust server's hp-share arm (`tests/_served.hp_share_leaf`, the same
+    formula read off the encoding). A test that wants the refusal marks itself
+    ``@pytest.mark.unserved``. Session-wide, because module-scoped fixtures play games too."""
+    from pokeuraou import beliefnode
+    from pokeuraou.payoff import HP_SHARE
+
+    from ._served import hp_share_leaf, served_from
+
+    real = beliefnode.served_leaf
+
+    def served_leaf(evaluate: object, what: str = "the hidden bench's node") -> object:
+        owner = getattr(evaluate, "__self__", evaluate)
+        if _REFUSE_UNSERVED[0]:
+            return real(evaluate, what)
+        if evaluate is None or owner is HP_SHARE:
+            return hp_share_leaf()
+        if hasattr(owner, "from_encoded") and hasattr(owner, "encoder"):
+            # A stand-in that scores `Encoded` (a test's own leaf, or a net held here) is
+            # served from this process, its own `from_encoded` answering the port's requests.
+            return served_from(owner)
+        return real(evaluate, what)
+
+    beliefnode.served_leaf = served_leaf
+    yield
+    beliefnode.served_leaf = real
+
+
+@pytest.fixture(autouse=True)
+def _unserved_marker(request: pytest.FixtureRequest) -> Iterator[None]:
+    _REFUSE_UNSERVED[0] = request.node.get_closest_marker("unserved") is not None
+    yield
+    _REFUSE_UNSERVED[0] = False
+
+
+@pytest.fixture(autouse=True)
 def _port_roads_restored() -> Iterator[None]:
-    """`portlp`'s roads are process-wide, and generation's entry points turn them on for good
-    (`portlp.default_on_for_generation`, IKA-455).
-
-    test_pool_match runs `pool_match.main` in-process, which left every road on for the rest
-    of its worker: a later test_q_rank counted the port's solves as shared ones, and
-    test_belief_fold_port and test_port_faults compared the port against a "Python" node the
-    port had solved too. Four tests failed on CI at 131d811 for that alone.
-
-    Every road is restored, not a list of them: when stage 3.6 became the default (cb653bb)
-    the stages after 1.4 (`PLAY`, `HIDDEN`, ...) stayed on past `pool_match.main` too, and
-    test_hidden's stand-in priors met the port's hidden bench.
-    """
+    """`portlp`'s ladder switches (`portlp.ON`) are process-wide: restored after each test."""
     from pokeuraou import portlp
 
     roads = [

@@ -27,7 +27,7 @@ from . import port, portlp, rustnode, timing
 from .hidden import Completion
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from .regulation import Regulation
 
@@ -37,16 +37,32 @@ _GAME_NUMBERS = itertools.count(1)
 GAMES_MAX = 16
 
 
-@dataclass(slots=True)
 class Game:
-    """A game's sheets and selection priors, numbered for the port (`hiddenGame`)."""
+    """A game's sheets and selection priors, numbered for the port (`hiddenGame`). The line that
+    defines them to the port is made when the port first asks for it (a game that is never
+    read by the port, because the positions are not held, never builds it)."""
 
-    number: int
-    line: bytes
+    __slots__ = ("_built", "_line", "number")
+
+    def __init__(self, number: int, line: bytes | Callable[[], bytes]) -> None:
+        self.number = number
+        self._built = isinstance(line, bytes)
+        self._line = line
+
+    @property
+    def line(self) -> bytes:
+        if not self._built:
+            self._line = self._line()
+            self._built = True
+        return self._line
 
     @classmethod
     def of(cls, sheets: Sequence[Sequence[Any]], bench_prior: Sequence[Any]) -> Game:  # noqa: ANN401
         number = next(_GAME_NUMBERS)
+        return cls(number, lambda: cls._line_of(number, sheets, bench_prior))
+
+    @staticmethod
+    def _line_of(number: int, sheets: Sequence[Sequence[Any]], bench_prior: Sequence[Any]) -> bytes:  # noqa: ANN401
         body = {
             "kind": "hiddenGame",
             "id": number,
@@ -69,7 +85,7 @@ class Game:
                 for p in bench_prior
             ],
         }
-        return cls(number, (json.dumps(body, ensure_ascii=False) + "\n").encode("utf-8"))
+        return (json.dumps(body, ensure_ascii=False) + "\n").encode("utf-8")
 
 
 @dataclass(slots=True)

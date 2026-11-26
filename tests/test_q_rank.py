@@ -40,7 +40,7 @@ from pokeuraou.pool import load_pool
 from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
 from pokeuraou.search import parse_rank_fill, rank_fill_covers
 
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 
 
 @pytest.fixture(scope="module")
@@ -227,7 +227,7 @@ def test_a_served_q_answers_what_the_worker_would_compute(pool, pos) -> None:  #
 
 
 def _arm(fill: str, solver) -> PoolArm:  # noqa: ANN001
-    return PoolArm(name="arm", evaluate=_stub, solver=solver, limit=2, rank_by_leaf=True,
+    return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=2, rank_by_leaf=True,
                    rank_fill=fill)
 
 

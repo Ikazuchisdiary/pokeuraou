@@ -174,12 +174,13 @@ jobs:
       #              server (tests/test_rust_inference_server.py, which skips as a module
       #              for torch in this job: one more torch skip, 36). IKA-460 removed M-B and
       #              the open game, and their tests with three torch skips, and added one
-      #              (tests/test_play_roads.py): 34.
+      #              (tests/test_play_roads.py): 34; stage 4 removed that file (its one torch
+      #              skip) with the Python roads' tests: 33.
       - name: what the suite skipped, and whether it was allowed to
         if: always()
         run: >
           uv run python tools/ci_skip_audit.py --junit reports/pytest.xml
-          --absent standings=9 --absent torch=34 --absent cuda=0
+          --absent standings=9 --absent torch=33 --absent cuda=0
 
       - uses: actions/upload-artifact@v4
         if: always()

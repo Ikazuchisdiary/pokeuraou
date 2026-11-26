@@ -26,7 +26,7 @@ from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
 from pokeuraou.provenance import LEGACY_RANK_FILL, agent_name, provenance
 from pokeuraou.search import DEFAULT_RANK_FILL, DEFAULT_REFERENCES, parse_rank_fill
 
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 
 
 @pytest.fixture(scope="module")
@@ -97,7 +97,7 @@ def test_the_menus_rank_with_the_fill_they_are_given(pool, monkeypatch) -> None:
 
 
 def _arm(pool, fill: str, solver) -> PoolArm:  # noqa: ANN001
-    return PoolArm(name="arm", evaluate=_stub, solver=solver, limit=2, rank_by_leaf=True,
+    return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=2, rank_by_leaf=True,
                    rank_fill=fill)
 
 

@@ -46,7 +46,7 @@ from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
 from .test_beliefnode import _Leaf
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 
 
 def _games(seed: int, count: int, size: int, grid: float):  # noqa: ANN202
@@ -167,7 +167,7 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
 
 
 def _arm(label: str, solver) -> PoolArm:  # noqa: ANN001
-    return PoolArm(name="arm", evaluate=_stub, solver=solver, limit=3, rank_by_leaf=False,
+    return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=3, rank_by_leaf=False,
                    eq_select=label)
 
 

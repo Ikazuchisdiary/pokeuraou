@@ -53,7 +53,7 @@ from pokeuraou.search import (
 from pokeuraou.teams import load_roster
 
 from ._port import Budget
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 from .test_search import LEAF, _played
 
 
@@ -390,7 +390,7 @@ def test_the_budget_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN
     solver = SolvedSelections(pool.reg, pool.teams, _stub)
 
     def arm(label: str) -> PoolArm:
-        return PoolArm(name="arm", evaluate=_stub, solver=solver, limit=2,
+        return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=2,
                        rank_by_leaf=False, deepen=label)
 
     tested, other = arm("r30"), arm("none")
@@ -755,7 +755,7 @@ def test_the_oracle_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN
     solver = SolvedSelections(pool.reg, pool.teams, _stub)
 
     def arm(label: str) -> PoolArm:
-        return PoolArm(name="arm", evaluate=_stub, solver=solver, limit=2,
+        return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=2,
                        rank_by_leaf=False, deepen=label)
 
     tested, other = arm("m30oall"), arm("m30")

@@ -41,7 +41,7 @@ from pokeuraou.teams import load_roster
 
 from .test_deepen import _Act, _grown_by_oracle, _hidden_game, _payload, pool, setup  # noqa: F401
 from .test_hidden_depth2 import LEAF, _played
-from .test_poolplay import _stub
+from .test_poolplay import _served_stub, _stub
 
 
 @pytest.fixture(scope="module")
@@ -473,7 +473,7 @@ def test_the_hidden_deepening_follows_its_arm_into_either_seat(pool) -> None:  #
     solver = SolvedSelections(pool.reg, pool.teams, _stub)
 
     def arm(label: str) -> PoolArm:
-        return PoolArm(name="arm", evaluate=_stub, solver=solver, limit=2,
+        return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=2,
                        rank_by_leaf=False, deepen=label)
 
     tested, other = arm("m30sallh"), arm("none")

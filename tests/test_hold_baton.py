@@ -42,7 +42,7 @@ from pokeuraou.position import Effect, MoveSlot, Pokemon, Position, Side
 from pokeuraou.selfplay import GameRecord
 
 from .test_pool_match import _recorder
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 
 MOVES = ["batonpass", "calmmind", "protect", "moonblast"]
 
@@ -143,7 +143,7 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
 def _arms(pool, *, hold: bool, back=None):  # noqa: ANN001, ANN202
     def arm(name: str, on: bool) -> PoolArm:
         return PoolArm(
-            name=name, evaluate=_stub,
+            name=name, evaluate=_served_stub,
             solver=SolvedSelections(pool.reg, pool.teams, _stub, tag=name),
             limit=2, rank_by_leaf=True, rank_fill="refs2", hold_baton=on,
             line1=back is not None, line1_back=back,

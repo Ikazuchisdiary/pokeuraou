@@ -31,7 +31,7 @@ from pokeuraou.poolplay import PoolArm, SolvedSelections, check_line1, draw_line
 from pokeuraou.selfplay import GameRecord, _forced_mega_choice
 
 from .test_pool_match import _recorder
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 
 SIX = ["raichu", "espathra", "archaludon", "whimsicott", "politoed", "charizard"]
 
@@ -173,7 +173,7 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
 def _arms(pool, *, line1: bool):  # noqa: ANN001, ANN202
     def arm(name: str, flag: bool) -> PoolArm:
         return PoolArm(
-            name=name, evaluate=_stub,
+            name=name, evaluate=_served_stub,
             solver=SolvedSelections(pool.reg, pool.teams, _stub, tag=name),
             limit=2, rank_by_leaf=True, rank_fill="refs2", line1=flag,
         )

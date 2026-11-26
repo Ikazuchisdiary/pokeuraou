@@ -282,7 +282,7 @@ def belief_payoffs(
     from .encode import rules_of
 
     leaf = served_leaf(evaluate)
-    rules = rules_of(evaluate)
+    rules = rules_of(leaf)
     if rules.patch_shares_side:
         raise UnservedLeaf(
             "the pre-IKA-119 patch (`patch_shares_side`) is not the port's: the node's leaves "

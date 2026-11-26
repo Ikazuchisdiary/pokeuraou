@@ -21,7 +21,7 @@ from pokeuraou.pool import load_pool
 from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
 from pokeuraou.regulation import to_id
 
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _stub, _variants, _write_pool
 
 
 @pytest.fixture(scope="module")
@@ -34,7 +34,7 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
 
 def _arm(pool, *, oracle: bool) -> PoolArm:  # noqa: ANN001
     return PoolArm(
-        name="a", evaluate=_stub, solver=SolvedSelections(pool.reg, pool.teams, _stub),
+        name="a", evaluate=_served_stub, solver=SolvedSelections(pool.reg, pool.teams, _stub),
         limit=4, rank_by_leaf=True, rank_fill="refs2", bench_oracle=oracle,
     )
 
@@ -88,5 +88,5 @@ def test_the_oracle_believes_the_drawn_four_and_draws_as_before(pool, monkeypatc
 
 
 def test_a_default_arm_has_no_oracle(pool) -> None:  # noqa: ANN001
-    arm = PoolArm(name="a", evaluate=_stub, solver=None, limit=4, rank_by_leaf=False)
+    arm = PoolArm(name="a", evaluate=_served_stub, solver=None, limit=4, rank_by_leaf=False)
     assert arm.bench_oracle is False

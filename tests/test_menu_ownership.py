@@ -61,10 +61,14 @@ def test_the_hidden_bench_path_rebuilds_the_other_side() -> None:
 
 
 def test_the_replacement_node_solves_each_side_with_its_own_leaf() -> None:
-    body = source_of("_do_replacement_node")
-    # Each side's game is built from its own leaf (the open game's one-matrix branch, which
-    # read leaves[0] for both, was removed in IKA-460).
-    assert "leaf = leaves[side]" in body, (
+    import inspect
+
+    from pokeuraou import replacenode
+
+    body = inspect.getsource(replacenode.solve)
+    # Each side's game is built from its own leaf (the port's `replacementNode` request takes
+    # the server each side's leaf is, IKA-460).
+    assert "served_leaf(leaves[side]" in body, (
         "the column player's replacement is still chosen by the row player's evaluator"
     )
 

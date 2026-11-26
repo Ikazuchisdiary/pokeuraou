@@ -17,10 +17,13 @@ from __future__ import annotations
 import pytest
 
 from pokeuraou.damage import register_mega_stones
+from pokeuraou.encode import Encoder
 from pokeuraou.hidden import completions, seen_slots
 from pokeuraou.regulation import load_regulation
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
+
+from ._served import leaf_of
 
 
 @pytest.fixture(scope="module")
@@ -427,25 +430,38 @@ def _uturn_start(reg, own, foe):  # noqa: ANN001, ANN202
     return start
 
 
-def _reads_their_back_two(positions):  # noqa: ANN001, ANN202
-    """A leaf whose best switch-in depends on who is on side 1's bench.
+class _ReadsTheirBackTwo:
+    """A leaf whose best switch-in depends on who is on side 1's bench (served from the
+    encoding, as the port asks it: `tests/_served.py`).
 
     Garchomp in our slot 0 is worth +0.1 if side 1 brought Toxapex or Incineroar and -0.1
     if not; Sylveon the reverse. So with their true back two Garchomp + Sylveon the right
     answer is Sylveon, with Toxapex + Incineroar it is Garchomp, and over the six equally
     likely completions -- five of which hold one of the two -- it is Garchomp either way.
     """
-    import numpy as np
 
-    out = []
-    for position in positions:
-        ours = position.sides[0]
-        active = ours.active[0]
-        front = ours.pokemon[active].species if active is not None else ""
-        theirs = {mon.species for mon in position.sides[1].pokemon}
-        wants = bool(theirs & {"toxapex", "incineroar"})
-        out.append(0.5 + (0.1 if (front == "garchomp") == wants else -0.1))
-    return np.asarray(out, dtype=np.float64)
+    def __init__(self, encoder) -> None:  # noqa: ANN001
+        self.garchomp = encoder.vocab.species["garchomp"]
+        self.wanted = [encoder.vocab.species[name] for name in ("toxapex", "incineroar")]
+        self.active = encoder.mon_names.index("active_slot_0")
+
+    def from_encoded(self, encoded):  # noqa: ANN001, ANN201
+        import numpy as np
+
+        n = len(encoded.species)
+        out = np.empty(n, dtype=np.float64)
+        for row in range(n):
+            front = [
+                int(encoded.species[row, 0, slot]) for slot in range(encoded.species.shape[2])
+                if encoded.mask[row, 0, slot] > 0 and encoded.mon[row, 0, slot, self.active] > 0
+            ]
+            theirs = {
+                int(encoded.species[row, 1, slot]) for slot in range(encoded.species.shape[2])
+                if encoded.mask[row, 1, slot] > 0
+            }
+            wants = bool(theirs & set(self.wanted))
+            out[row] = 0.5 + (0.1 if (bool(front) and front[0] == self.garchomp) == wants else -0.1)
+        return out
 
 
 def _self_switch_pick(reg, sheet, foe, monkeypatch, *, hidden, prior=None):  # noqa: ANN001, ANN202
@@ -467,7 +483,7 @@ def _self_switch_pick(reg, sheet, foe, monkeypatch, *, hidden, prior=None):  # n
     record = selfplay.play_game(
         reg, np.random.default_rng(0), sheet[:4], foe, "test",
         start=_uturn_start(reg, sheet[:4], foe),
-        evaluate=_reads_their_back_two,
+        evaluate=leaf_of(_ReadsTheirBackTwo(Encoder(reg)), Encoder(reg)),
         sheets=(sheet, sheet),
         bench_prior=prior,
         max_turns=1,

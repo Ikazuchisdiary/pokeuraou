@@ -192,10 +192,14 @@ def test_worker_processes_expand_to_the_serial_deepening(roster, kind, deeper) -
 
 _MANY_DEEPENINGS = """
 import sys
-from pokeuraou import deepen
+from pokeuraou import beliefnode, deepen
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.teams import load_roster
+from tests._served import hp_share_leaf
 from tests.test_deepen_ahead import _belief
+
+# `tests/conftest.py` does this for a test's own process: hp-share is the tests' served leaf.
+beliefnode.served_leaf = lambda evaluate, what="": hp_share_leaf()
 from tests.test_hidden_depth2 import LEAF, _played
 
 roster = load_roster("rizabanadohido")

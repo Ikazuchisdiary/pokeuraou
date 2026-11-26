@@ -192,7 +192,9 @@ def test_the_served_leaf_substitutes_too(game) -> None:
 
 def test_the_hidden_node_keeps_the_end_through_its_stacking(game) -> None:
     """`beliefnode` builds one batch from row subsets and stacked parts; the flag survives."""
-    from pokeuraou.beliefnode import _stacked, _subset
+    from pokeuraou.beliefnode import _stacked
+
+    from ._served import subset as _subset
 
     reg, pos, _encoder, _net, _leaf, row, col = game
     filled = port.ask(
