@@ -264,6 +264,10 @@ LEAF_ALIASES = {
     # trained from nothing) before the files were shipped as value-mc5 / value-mc5-s1.
     "value-mc5scr": "value-mc5",
     "value-mc5scrx2": "value-mc5x2",
+    # IKA-451: the gen-7w pair was boarded as value-mc7wx2 (files value-mc7w / value-mc7w-s1)
+    # before the same bytes were shipped as value-mc7 / value-mc7-s1.
+    "value-mc7w": "value-mc7",
+    "value-mc7wx2": "value-mc7x2",
 }
 
 
