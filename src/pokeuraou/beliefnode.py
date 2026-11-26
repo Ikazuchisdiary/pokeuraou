@@ -273,7 +273,12 @@ def belief_payoffs(
         # Per decision, by whether any bench here is hidden (IKA-98's per-decision table).
         timing.refine("hidden" if any(hidden.values()) else "exact")
         timing.count("completions", sum(len(items) for items in spreads.values()))
-    if not any(hidden.values()):
+    from . import portlp
+
+    # IKA-457 stage 2.1: a node with nothing hidden is the whole-node request's too (the
+    # completions are the position itself, `exact` and `root`), where `portlp.EXACT` is on.
+    exact_node = not any(hidden.values())
+    if exact_node and not (portlp.EXACT[0] and portlp.NODE[0]):
         with timing.region("belief.exact"):
             return _per_completion(reg, row, col, evaluate, budget, spreads)
 
@@ -293,23 +298,24 @@ def belief_payoffs(
     leaf = _stack_leaf(owner, rules)
     tickets: Iterator[int] | None = _TICKETS if leaf is not None else None
     ref_ticket = next(tickets) if tickets is not None else None
-    if leaf is not None:
-        from . import portlp
-
-        if portlp.NODE[0]:
-            try:
-                done = _node_in_port(
-                    reg, leaf, position, row, col, budget, rules, hidden, spreads, solve,
-                    scorer, encoder,
-                )
-            except portlp.PortFault as fault:
-                # The port could not plan the node: Python does, down the road below (IKA-455).
-                portlp.faulted("beliefNode", fault)
-                done = None
-            if done is _NOT_ON_THIS_BINARY:
-                return _per_completion(reg, row, col, evaluate, budget, spreads)
-            if done is not None:
-                return done
+    if leaf is not None and portlp.NODE[0]:
+        try:
+            done = _node_in_port(
+                reg, leaf, position, row, col, budget, rules, hidden, spreads, solve,
+                scorer, encoder,
+            )
+        except portlp.PortFault as fault:
+            # The port could not plan the node: Python does, down the road below (IKA-455).
+            portlp.faulted("beliefNode", fault)
+            done = None
+        if done is _NOT_ON_THIS_BINARY:
+            return _per_completion(reg, row, col, evaluate, budget, spreads)
+        if done is not None:
+            return done
+    if exact_node:
+        # Not the port's (no server's leaf, a fault, an old binary): the definition.
+        with timing.region("belief.exact"):
+            return _per_completion(reg, row, col, evaluate, budget, spreads)
 
     with timing.region("belief.ref"):
         filled = port.ask(
@@ -979,6 +985,8 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     timing.count("serve.requests", requests)
     portlp.COUNTS["stacked"] += 1
     portlp.COUNTS["nodes"] += 1
+    if not any(hidden.values()):
+        portlp.COUNTS["exact"] += 1
     if hasattr(encoder, "note"):
         for rows in answer["patched"]:
             encoder.note("patched side=rebuilt", int(rows))

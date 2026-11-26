@@ -66,7 +66,9 @@ ON = [os.environ.get(ENV, "0").strip() == "1"]
 #: sub-games folded in the port and given whole, and the LPs the port reports it solved (the
 #: positive control).
 COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps": 0, "stacked": 0,
-          "nodes": 0, "faults": 0}
+          "nodes": 0, "faults": 0,
+          # IKA-457 stage 2.1: the whole-node requests of a node with nothing hidden.
+          "exact": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -145,6 +147,24 @@ def set_node(on: bool) -> None:
 
 set_node(NODE[0])
 
+EXACT_ENV = "POKEURAOU_GEN_PORT_EXACT"
+#: IKA-457 stage 2.1: whether a node with nothing hidden (`move.exact`) is the whole-node
+#: request's too -- the one position's fill, the stack, the server's values, the fold and the
+#: games -- where `_per_completion` filled in the port, scored in Python and solved the games
+#: in another crossing. Off by default, and off in `default_on_for_generation`. On includes
+#: `NODE` (and so `STACK`, `FOLD` and `GEN`).
+EXACT = [os.environ.get(EXACT_ENV, "0").strip() == "1"]
+
+
+def set_exact(on: bool) -> None:
+    """Turn stage 2.1 on or off in this process; on turns `NODE` on too."""
+    EXACT[0] = bool(on)
+    if on:
+        set_node(True)
+
+
+set_exact(EXACT[0])
+
 
 def default_on_for_generation() -> None:
     """Generation's, and its board's, default: stage 1.4's whole-node road, unless
@@ -166,7 +186,8 @@ def echo() -> str:
     word = {True: "on", False: "off"}
     return (
         f"port roads: lp {word[GEN[0]]}, fold {word[FOLD[0]]}, stack {word[STACK[0]]}, "
-        f"node {word[NODE[0]]} (POKEURAOU_GEN_PORT_NODE={os.environ.get(NODE_ENV, '(unset)')}); "
+        f"node {word[NODE[0]]} (POKEURAOU_GEN_PORT_NODE={os.environ.get(NODE_ENV, '(unset)')}), "
+        f"exact {word[EXACT[0]]} ({EXACT_ENV}={os.environ.get(EXACT_ENV, '(unset)')}); "
         f"faults solved in Python: {COUNTS['faults']}; {counts()}"
     )
 
@@ -390,8 +411,8 @@ def counts() -> dict[str, int]:
     return dict(COUNTS)
 
 
-__all__ = ["COUNTS", "ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "NODE", "NODE_ENV", "ON",
-           "PortFault", "STACK", "STACK_ENV", "bayesian_answer", "counts",
-           "default_on_for_generation", "echo", "faulted", "set_fold",
+__all__ = ["COUNTS", "ENV", "EXACT", "EXACT_ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "NODE",
+           "NODE_ENV", "ON", "PortFault", "STACK", "STACK_ENV", "bayesian_answer", "counts",
+           "default_on_for_generation", "echo", "faulted", "set_exact", "set_fold",
            "set_gen", "set_node", "set_on", "set_stack", "solve_bayesian_many",
            "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]
