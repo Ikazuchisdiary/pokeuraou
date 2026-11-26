@@ -146,6 +146,31 @@ def weights(reg: Regulation, pos: Position, actions: Sequence[SideAction], budge
     return ask(reg, call)
 
 
+def advance(
+    reg: Regulation,
+    pos: Position,
+    actions: Sequence[SideAction],
+    budget: Budget,
+    rng: Any,  # noqa: ANN401 - numpy.random.Generator
+) -> rustnode.AdvancedTurn:
+    """IKA-458 stage 3.1: `weights`, the draw among them from `rng` (numpy's `choice`, done over
+    there from its PCG64 state, which is set to the state after) and `branch`, in one request."""
+
+    def call(node: RustNode) -> rustnode.AdvancedTurn | str:
+        answer = node.advance_turn(pos, list(actions), budget, rng)
+        if answer is None:
+            raise _refused(node, "a turn")
+        return answer
+
+    answer = ask(reg, call)
+    if isinstance(answer, str):
+        # Not a failure of the process (`ask` would restart it): the caller does the turn itself.
+        from .portlp import PortFault
+
+        raise PortFault(answer)
+    return answer
+
+
 def branch(
     reg: Regulation, pos: Position, actions: Sequence[SideAction], budget: Budget, index: int
 ) -> Position:
@@ -363,6 +388,11 @@ def turn_expectation(
 
 
 def replacements_needed(reg: Regulation, pos: Position) -> tuple[tuple[bool, ...], ...]:
+    # The port said so along with the turn that landed here (IKA-458 stage 3.1).
+    said = rustnode.take_needed(pos)
+    if said is not None:
+        return said
+
     def call(node: RustNode) -> tuple[tuple[bool, ...], ...]:
         answer = node.replacements_needed(pos)
         if answer is None:

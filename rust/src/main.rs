@@ -16,6 +16,7 @@
 #[macro_use]
 mod events;
 mod ability_notes;
+mod advance;
 mod airborne;
 mod battler;
 mod beliefnode;

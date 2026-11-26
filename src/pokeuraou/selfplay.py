@@ -2151,14 +2151,38 @@ def _advance_turn(
     continuation (IKA-209: it used to be resolved again in Python, whose continuation
     could not cross the process boundary).
     """
-    weights = port.weights(reg, pos, chosen, Budget.exact())
-    record.unmodelled.extend(weights.unmodelled)
-    counts = np.array(weights.branches + weights.suspended, dtype=np.float64)
-    if not counts.size or float(counts.sum()) <= 0:
-        return None
-    index = _sample_index(rng, counts)
+    from . import portlp
+
+    advanced = None
+    # IKA-458 stage 3.1: the weights, the draw and the drawn branch in one request, the draw
+    # being numpy's own from the generator's PCG64 state.
+    if portlp.ADVANCE[0] and type(rng.bit_generator).__name__ == "PCG64":
+        try:
+            advanced = port.advance(reg, pos, chosen, Budget.exact(), rng)
+        except portlp.PortFault as fault:
+            portlp.faulted("advanceTurn", fault)
+    if advanced is not None:
+        portlp.COUNTS["advanced"] += 1
+        weights = advanced
+        record.unmodelled.extend(weights.unmodelled)
+        counts = np.array(weights.branches + weights.suspended, dtype=np.float64)
+        if advanced.index is None:
+            return None
+        index = advanced.index
+        landed = advanced.position
+    else:
+        weights = port.weights(reg, pos, chosen, Budget.exact())
+        record.unmodelled.extend(weights.unmodelled)
+        counts = np.array(weights.branches + weights.suspended, dtype=np.float64)
+        if not counts.size or float(counts.sum()) <= 0:
+            return None
+        index = _sample_index(rng, counts)
+        landed = (
+            port.branch(reg, pos, chosen, Budget.exact(), index)
+            if index < len(weights.branches)
+            else None
+        )
     if index < len(weights.branches):
-        landed = port.branch(reg, pos, chosen, Budget.exact(), index)
         luck.saw_turn(reg, pos, chosen, counts, index, landed)
         return landed
     luck.saw_turn(reg, pos, chosen, counts, index)

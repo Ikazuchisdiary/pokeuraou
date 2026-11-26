@@ -444,6 +444,32 @@ class ResolvedTurn:
 
 
 @dataclass
+class AdvancedTurn:
+    """`ResolvedTurn` with the draw made over there (IKA-458 stage 3.1): `index` is the drawn
+    outcome among the branches then the pauses (None when there was nothing to draw from),
+    `position` the branch's, None for a pause."""
+
+    branches: list[float]
+    suspended: list[float]
+    exact: bool
+    unmodelled: tuple[str, ...]
+    index: int | None
+    position: Position | None
+
+
+#: The landed position of the last `advance_turn` and the replacements it owes, which the port
+#: answered along with it: `take_needed` hands them to the very next `replacements_needed` of
+#: that same object and forgets them.
+_NEEDED: list[tuple[Position, tuple[tuple[bool, ...], ...]] | None] = [None]
+
+
+def take_needed(pos: Position) -> tuple[tuple[bool, ...], ...] | None:
+    """What `advance_turn` said `pos` owes, if `pos` is the position it landed; one use."""
+    held, _NEEDED[0] = _NEEDED[0], None
+    return held[1] if held is not None and held[0] is pos else None
+
+
+@dataclass
 class NodeResult:
     """One matrix per objective, plus what the port declined to fill."""
 
@@ -897,6 +923,59 @@ class RustNode:
             exact=bool(response["exact"]),
             unmodelled=tuple(response["unmodelled"]),
             position=Position.from_json(raw) if raw else None,
+        )
+
+    @timing.timed("rust.resolve")
+    def advance_turn(
+        self, pos: Position, actions: list[SideAction], budget: Budget, rng: Any  # noqa: ANN401
+    ) -> AdvancedTurn | str | None:
+        """IKA-458 stage 3.1: `resolve`'s weights, the draw among them with `rng`'s PCG64 state
+        and the drawn branch, in one request (`advanceTurn`). `rng` is set to the state after
+        the draw, and only once the answer is in: a refusal, a fault or a failed crossing leaves
+        it as it was. None when the port declines the turn, the port's words (a `str`) when it
+        answers a fault."""
+        before = rng.bit_generator.state
+        request = {
+            "kind": "advanceTurn",
+            "position": _position(pos),
+            "actions": _candidates(actions),
+            "budget": dump_budget(budget),
+            "rng": {
+                "state": format(before["state"]["state"], "x"),
+                "inc": format(before["state"]["inc"], "x"),
+            },
+        }
+        response = self._exchange(request)
+        if response.get("refused"):
+            self.refusal = str(response["refused"])
+            return None
+        if "fault" in response:
+            # Said by the caller (`port.advance`), outside the restart loop: the port is well.
+            return str(response["fault"])
+        if "rng" not in response:
+            raise RuntimeError("the port did not answer `advanceTurn`; the binary predates it -- rebuild it")
+        index = response["index"]
+        if index is not None:
+            after = dict(before)
+            after["state"] = {
+                "state": int(response["rng"]["state"], 16),
+                "inc": int(response["rng"]["inc"], 16),
+            }
+            rng.bit_generator.state = after
+        raw = response.get("position")
+        landed = Position.from_json(raw) if raw else None
+        if landed is not None:
+            _NEEDED[0] = (
+                landed,
+                tuple(tuple(bool(flag) for flag in side) for side in response["needed"]),
+            )
+        return AdvancedTurn(
+            branches=list(response["branches"]),
+            suspended=list(response.get("suspended", [])),
+            exact=bool(response["exact"]),
+            unmodelled=tuple(response["unmodelled"]),
+            index=None if index is None else int(index),
+            position=landed,
         )
 
     @timing.timed("rust.lp")

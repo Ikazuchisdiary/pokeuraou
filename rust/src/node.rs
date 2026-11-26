@@ -304,13 +304,13 @@ pub fn resolve_one(reg: &Reg, value: &Value) -> Value {
 
 /// A resolved turn as `resolve_one` answers from it: the weights, and the branches'
 /// positions for the `select` that follows.
-struct KeptTurn {
+pub(crate) struct KeptTurn {
     key: String,
-    weights: Vec<f64>,
-    paused: Vec<f64>,
-    exact: bool,
-    unmodelled: Vec<String>,
-    positions: Vec<Position>,
+    pub(crate) weights: Vec<f64>,
+    pub(crate) paused: Vec<f64>,
+    pub(crate) exact: bool,
+    pub(crate) unmodelled: Vec<String>,
+    pub(crate) positions: Vec<Position>,
 }
 
 thread_local! {
@@ -325,7 +325,7 @@ fn resolve_key(value: &Value) -> String {
     format!("{}\u{1}{}\u{1}{}", value["position"], value["actions"], value["budget"])
 }
 
-fn resolve_fresh(reg: &Reg, value: &Value, key: String) -> Result<KeptTurn, Value> {
+pub(crate) fn resolve_fresh(reg: &Reg, value: &Value, key: String) -> Result<KeptTurn, Value> {
     let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
         return Err(json!({ "refused": "position is for another regulation" }));
@@ -1220,6 +1220,10 @@ fn answer<R: BufRead, W: Write>(
         // IKA-457 stage 2.2: a replacement node's fills, scores, folds and games in one request.
         Ok(value) if value["kind"].as_str() == Some("replacementNode") => {
             crate::replacenode::replacement_node(reg, encoder, &value)
+        }
+        // IKA-458 stage 3.1: a turn's weights, the draw and the drawn branch in one request.
+        Ok(value) if value["kind"].as_str() == Some("advanceTurn") => {
+            crate::advance::advance_turn(reg, &value)
         }
         Ok(value) if value["kind"].as_str() == Some("beliefServed") => {
             crate::beliefnode::belief_served(&encoder.widths, &value)

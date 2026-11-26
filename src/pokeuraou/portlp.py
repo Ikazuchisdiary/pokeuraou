@@ -74,7 +74,9 @@ COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps"
           # IKA-457 stage 2.3: the move nodes whose menus the port built.
           "menus": 0,
           # IKA-457 stage 2.4: the move nodes whose menus and node were one request.
-          "decided": 0}
+          "decided": 0,
+          # IKA-458 stage 3.1: the turns whose weights, draw and drawn branch were one request.
+          "advanced": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -222,6 +224,24 @@ def set_decide(on: bool) -> None:
 
 set_decide(DECIDE[0])
 
+ADVANCE_ENV = "POKEURAOU_GEN_PORT_ADVANCE"
+#: IKA-458 stage 3.1: whether a turn's weights, the draw among them (numpy's PCG64 state goes to
+#: the port and comes back) and the drawn branch's position are one request
+#: (`selfplay._advance_turn`, `rust/src/advance.rs` `advanceTurn`), the replacements the next
+#: position owes riding along. Off by default, and off in `default_on_for_generation`. On includes
+#: `DECIDE` (and so the stages below it).
+ADVANCE = [os.environ.get(ADVANCE_ENV, "0").strip() == "1"]
+
+
+def set_advance(on: bool) -> None:
+    """Turn stage 3.1 on or off in this process; on turns `DECIDE` on too."""
+    ADVANCE[0] = bool(on)
+    if on:
+        set_decide(True)
+
+
+set_advance(ADVANCE[0])
+
 
 def default_on_for_generation() -> None:
     """Generation's, and its board's, default: stage 1.4's whole-node road, unless
@@ -247,7 +267,8 @@ def echo() -> str:
         f"exact {word[EXACT[0]]} ({EXACT_ENV}={os.environ.get(EXACT_ENV, '(unset)')}), "
         f"replace {word[REPLACE[0]]} ({REPLACE_ENV}={os.environ.get(REPLACE_ENV, '(unset)')}), "
         f"menus {word[MENUS[0]]} ({MENUS_ENV}={os.environ.get(MENUS_ENV, '(unset)')}), "
-        f"decide {word[DECIDE[0]]} ({DECIDE_ENV}={os.environ.get(DECIDE_ENV, '(unset)')}); "
+        f"decide {word[DECIDE[0]]} ({DECIDE_ENV}={os.environ.get(DECIDE_ENV, '(unset)')}), "
+        f"advance {word[ADVANCE[0]]} ({ADVANCE_ENV}={os.environ.get(ADVANCE_ENV, '(unset)')}); "
         f"faults solved in Python: {COUNTS['faults']}; {counts()}"
     )
 
@@ -471,9 +492,11 @@ def counts() -> dict[str, int]:
     return dict(COUNTS)
 
 
-__all__ = ["COUNTS", "DECIDE", "DECIDE_ENV", "ENV", "EXACT", "EXACT_ENV", "FOLD", "FOLD_ENV",
+__all__ = ["ADVANCE", "ADVANCE_ENV", "COUNTS", "DECIDE", "DECIDE_ENV", "ENV", "EXACT",
+           "EXACT_ENV", "FOLD", "FOLD_ENV",
            "GEN", "GEN_ENV", "NODE", "NODE_ENV", "MENUS", "MENUS_ENV", "ON", "REPLACE",
            "REPLACE_ENV", "PortFault", "STACK", "STACK_ENV", "bayesian_answer", "counts",
-           "default_on_for_generation", "echo", "faulted", "set_decide", "set_exact", "set_fold",
+           "default_on_for_generation", "echo", "faulted", "set_advance", "set_decide",
+           "set_exact", "set_fold",
            "set_gen", "set_menus", "set_node", "set_on", "set_replace", "set_stack",
            "solve_bayesian_many", "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]
