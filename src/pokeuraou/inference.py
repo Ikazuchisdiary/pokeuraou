@@ -555,23 +555,39 @@ def start_server(
     log: Path,
     device: str = "cuda",
     env: dict[str, str] | None = None,
+    python: bool = False,
 ) -> tuple[Any, str]:
-    """Start `tools/inference_server.py` as a child process: (the process, its address).
+    """Start an inference server as a child process: (the process, its address).
 
-    For a tool that wants one server for its own processes (IKA-363: `time_match --served`,
-    `position_set --served`). The address is the server's first line of stdout; its log is
-    ``log``. Stop it with ``process.terminate()``.
+    Since IKA-461 it is `pokeuraou-damage inference-server` (`rustnet.server_command`: the
+    nets exported as `.rnet` files beside ``log``, run on the card by cudarc) whenever the
+    format is named (``regulation``) and the device is CUDA; ``python=True`` starts
+    `tools/inference_server.py` instead, as every server was before, and so does a call with no
+    format or on the CPU. For a tool that wants one server for its own processes (IKA-363:
+    `time_match --served`, `position_set --served`). The address is the server's first line of
+    stdout; its log is ``log``. Stop it with ``process.terminate()``.
     """
+    import os
     import subprocess
 
     from .regulation import repo_root
 
-    command = [sys.executable, str(repo_root() / "tools" / "inference_server.py"),
-               "--device", device, *(["--regulation", regulation] if regulation else [])]
-    for name, files in arms.items():
-        command += ["--arm", name, *(str(f) for f in files)]
-    for name, file in (q_arms or {}).items():
-        command += ["--q-arm", name, str(file)]
+    # The way back for every tool that starts its server here: POKEURAOU_PYTHON_SERVER=1.
+    python = python or bool(os.environ.get("POKEURAOU_PYTHON_SERVER"))
+    if not python and regulation is not None and device == "cuda":
+        from .rustnet import server_command
+
+        command = server_command(
+            regulation, {name: list(files) for name, files in arms.items()},
+            {name: file for name, file in (q_arms or {}).items()}, log.parent,
+        )
+    else:
+        command = [sys.executable, str(repo_root() / "tools" / "inference_server.py"),
+                   "--device", device, *(["--regulation", regulation] if regulation else [])]
+        for name, files in arms.items():
+            command += ["--arm", name, *(str(f) for f in files)]
+        for name, file in (q_arms or {}).items():
+            command += ["--q-arm", name, str(file)]
     log.parent.mkdir(parents=True, exist_ok=True)
     errors = log.open("w", encoding="utf-8")
     process = subprocess.Popen(  # noqa: S603

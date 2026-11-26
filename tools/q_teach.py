@@ -488,33 +488,15 @@ def run_fill(args: argparse.Namespace) -> None:
     env["PYTHONPATH"] = str(ROOT / "src")
     servers: list[subprocess.Popen] = []
     addresses: list[str] = []
+    from pokeuraou.inference import start_server
+
     for s in range(args.served):
-        log = (out / f"inference{s}.log").open("w", encoding="utf-8")
-        process = subprocess.Popen(  # noqa: S603
-            [
-                sys.executable,
-                str(ROOT / "tools" / "inference_server.py"),
-                "--device",
-                "cuda",
-                "--regulation",
-                args.regulation,
-                "--report-every",
-                "0",
-                "--arm",
-                "value",
-                *args.value,
-            ],
+        # IKA-461: the Rust server unless POKEURAOU_PYTHON_SERVER=1.
+        process, address = start_server(
+            {"value": args.value}, regulation=args.regulation, log=out / f"inference{s}.log",
             env=env,
-            cwd=str(ROOT),
-            stdout=subprocess.PIPE,
-            stderr=log,
-            text=True,
         )
         servers.append(process)
-        assert process.stdout is not None
-        address = process.stdout.readline().strip()
-        if not address:
-            raise SystemExit(f"inference server {s} named no address")
         addresses.append(address)
     started = time.perf_counter()
     base = [

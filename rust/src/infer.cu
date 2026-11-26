@@ -163,3 +163,167 @@ extern "C" __global__ void finalize(int r, int nets, const float* logits, double
     float mean = nets > 1 ? s / (float)nets : s;
     out[i] = (double)(1.0f / (1.0f + expf(-mean)));
 }
+
+// ---------------------------------------------------------------------------------------
+// The Q net (`qhead.build_net`): the leaf's trunk, the move properties, attention over the
+// Pokemon rows, an encoding of each action and a pair head. The trunk reuses the kernels above.
+
+extern "C" __global__ void add_bias(float* x, const float* bias, int n, int total) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < total) x[i] += bias[i % n];
+}
+
+// The mean of the properties of a Pokemon's moves (`move_props[moves] * mask`, summed over the four
+// moves and divided by their count, at least 1): out (tokens, pd).
+extern "C" __global__ void props_pool(const int* moves, const float* props, int pd, int nmv, float* out) {
+    int t = blockIdx.x;
+    float count = 0.0f;
+    for (int k = 0; k < 4; ++k) if (moves[t * 4 + k] > 0) count += 1.0f;
+    float denom = count < 1.0f ? 1.0f : count;
+    for (int c = threadIdx.x; c < pd; c += blockDim.x) {
+        float s = 0.0f;
+        for (int k = 0; k < 4; ++k) {
+            int m = moves[t * 4 + k];
+            s += props[safe_index(m, nmv) * pd + c] * (m > 0 ? 1.0f : 0.0f);
+        }
+        out[(size_t)t * pd + c] = s / denom;
+    }
+}
+
+// Self-attention over a position's tokens (`nn.MultiheadAttention`, batch_first, a key padding
+// mask): qkv (tokens, 3 * d) from the input projection, out (tokens, d) before the output
+// projection. One block per query token; threads = d. A query with no key to read gets zeros
+// (torch gives NaN, and the net applies `nan_to_num`).
+extern "C" __global__ void attend(const float* qkv, const float* mask, int tokens, int heads,
+                                  int hd, float* out) {
+    __shared__ float prob[4][32];
+    int q = blockIdx.x;
+    int b = q / tokens;
+    int d = heads * hd;
+    const float* qrow = qkv + (size_t)q * 3 * d;
+    int c = threadIdx.x;
+    if (c < heads * tokens) {
+        int h = c / tokens, k = c % tokens;
+        const float* krow = qkv + ((size_t)b * tokens + k) * 3 * d + d;
+        float s = 0.0f;
+        for (int i = 0; i < hd; ++i) s += qrow[h * hd + i] * krow[h * hd + i];
+        prob[h][k] = mask[b * tokens + k] > 0.0f ? s * rsqrtf((float)hd) : __int_as_float(0xff800000);
+    }
+    __syncthreads();
+    if (c < heads) {
+        float top = __int_as_float(0xff800000);
+        for (int k = 0; k < tokens; ++k) top = fmaxf(top, prob[c][k]);
+        float sum = 0.0f;
+        for (int k = 0; k < tokens; ++k) {
+            float e = top > __int_as_float(0xff800000) ? expf(prob[c][k] - top) : 0.0f;
+            prob[c][k] = e;
+            sum += e;
+        }
+        for (int k = 0; k < tokens; ++k) prob[c][k] = sum > 0.0f ? prob[c][k] / sum : 0.0f;
+    }
+    __syncthreads();
+    if (c < d) {
+        int h = c / hd;
+        float s = 0.0f;
+        for (int k = 0; k < tokens; ++k)
+            s += prob[h][k] * qkv[((size_t)b * tokens + k) * 3 * d + 2 * d + c];
+        out[(size_t)q * d + c] = s;
+    }
+}
+
+// out = layer_norm(x + nan_to_num(y)) over n <= 256 columns (no activation).
+extern "C" __global__ void ln_residual(const float* x, const float* y, const float* gamma,
+                                       const float* beta, float* out, int n) {
+    __shared__ float shared[32];
+    size_t base = (size_t)blockIdx.x * n;
+    int c = threadIdx.x;
+    float v = 0.0f;
+    if (c < n) {
+        float add = y[base + c];
+        v = x[base + c] + (isnan(add) ? 0.0f : add);
+    }
+    float mean = block_sum(v, shared) / (float)n;
+    float d = c < n ? v - mean : 0.0f;
+    float var = block_sum(d * d, shared) / (float)n;
+    float rstd = rsqrtf(var + EPS);
+    if (c < n) out[base + c] = d * rstd * gamma[c] + beta[c];
+}
+
+__device__ __forceinline__ float row_of(const float* table, int rows, int idx, int c, int hd) {
+    return (idx < 0 || idx >= rows) ? 0.0f : table[(size_t)idx * hd + c];
+}
+
+// The input of `slot_mlp` for each (action, slot) (`QNet.encode_actions`): the kind, the actor's
+// row, the move's embedding and properties, the mega flag, the target's kind, the row it
+// names, and the row switched to. h: this position's rows (2 * m, hd), side `side` first.
+extern "C" __global__ void action_input(
+    const int* acts, const float* h, int side, int m, int hd, const float* kind_w,
+    const float* target_w, const float* move_w, int md, const float* props, int pd, int nmv,
+    float* out) {
+    int r = blockIdx.x;  // action * 2 + slot
+    const int* a = acts + (size_t)r * 7;
+    const float* own = h + (size_t)side * m * hd;
+    const float* foe = h + (size_t)(1 - side) * m * hd;
+    int kind = min(max(a[0], 0), 2), move = safe_index(max(a[2], 0), nmv);
+    int tkind = min(max(a[4], 0), 2), trow = a[5];
+    int width = 16 + hd + md + pd + 1 + 8 + hd + hd;
+    for (int c = threadIdx.x; c < width; c += blockDim.x) {
+        float v;
+        int o = c;
+        if (o < 16) v = kind_w[kind * 16 + o];
+        else if ((o -= 16) < hd) v = row_of(own, m, a[1], o, hd);
+        else if ((o -= hd) < md) v = move_w[(size_t)move * md + o];
+        else if ((o -= md) < pd) v = props[(size_t)move * pd + o];
+        else if ((o -= pd) < 1) v = (float)max(a[3], 0);
+        else if ((o -= 1) < 8) v = target_w[tkind * 8 + o];
+        else if ((o -= 8) < hd) {
+            v = row_of(foe, m, tkind == 1 ? trow : -1, o, hd) + row_of(own, m, tkind == 2 ? trow : -1, o, hd);
+        } else v = row_of(own, m, a[6], o - hd, hd);
+        out[(size_t)r * width + c] = v;
+    }
+}
+
+// The input of `act_mlp` for each action: the two slots' vectors added (with the slot_mlp's last
+// bias and the slot's position), the context, and the port's features.
+extern "C" __global__ void slot_sum(const float* y, const float* bias, const float* pos,
+                                    const float* ctx, const float* feats, int ad, int nf, float* out) {
+    int n = blockIdx.x;
+    int width = 2 * ad + nf;
+    for (int c = threadIdx.x; c < width; c += blockDim.x) {
+        float v;
+        if (c < ad) {
+            v = (y[(size_t)(n * 2) * ad + c] + bias[c] + pos[c]) + (y[(size_t)(n * 2 + 1) * ad + c] + bias[c] + pos[ad + c]);
+        } else if (c < 2 * ad) v = ctx[c - ad];
+        else v = feats[(size_t)n * nf + (c - 2 * ad)];
+        out[(size_t)n * width + c] = v;
+    }
+}
+
+__device__ __forceinline__ float gelu_(float x) { return 0.5f * x * (1.0f + erff(x * 0.70710678118654752f)); }
+
+// The N0 x N1 matrix of side 0's win probability: g(u_i, v_j) - g(v_j, u_i), each g the additive
+// head plus the low-rank product. fp*/sp* are `first_pair` (with its bias) and `second_pair`
+// of an action's vector; fl*/sl* are `first_low` and `second_low` (with their biases).
+extern "C" __global__ void pair_matrix(
+    int n0, int n1, int pd, int rank, const float* fpu, const float* spu, const float* flu,
+    const float* slu, const float* fpv, const float* spv, const float* flv, const float* slv,
+    const float* w, const float* bias, double* out) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = blockIdx.y;
+    if (j >= n1) return;
+    float uv = 0.0f, vu = 0.0f;
+    for (int k = 0; k < pd; ++k) {
+        uv += w[k] * gelu_(fpu[(size_t)i * pd + k] + spv[(size_t)j * pd + k]);
+        vu += w[k] * gelu_(fpv[(size_t)j * pd + k] + spu[(size_t)i * pd + k]);
+    }
+    float lowuv = 0.0f, lowvu = 0.0f;
+    for (int k = 0; k < rank; ++k) {
+        lowuv += flu[(size_t)i * rank + k] * slv[(size_t)j * rank + k];
+        lowvu += flv[(size_t)j * rank + k] * slu[(size_t)i * rank + k];
+    }
+    float scale = rsqrtf((float)rank);
+    float guv = (uv + bias[0]) + lowuv * scale;
+    float gvu = (vu + bias[0]) + lowvu * scale;
+    float logit = guv - gvu;
+    out[(size_t)i * n1 + j] = (double)(1.0f / (1.0f + expf(-logit)));
+}

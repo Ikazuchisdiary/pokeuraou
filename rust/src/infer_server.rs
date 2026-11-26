@@ -12,7 +12,7 @@
 //! into the slot's pinned memory, replays a CUDA Graph and sleeps until the card is done.
 
 use crate::encode::Encoder;
-use crate::infer_gpu::{self, Geometry, Gpu, Net, Slot, MAX_ROWS};
+use crate::infer_gpu::{self, Geometry, Gpu, Net, QItem, QNet, QSlot, Slot, MAX_ROWS, Q_ARRAYS};
 use crate::reg::Reg;
 use crate::rnet;
 use crate::shm::Shared;
@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -43,11 +44,23 @@ struct Stats {
     copy_ns: AtomicU64,
     gpu_ns: AtomicU64,
     q_forwarded: AtomicU64,
+    /// Items answered by a Q arm of this server.
+    q_served: AtomicU64,
+}
+
+struct QArm {
+    name: String,
+    file: String,
+    net: QNet,
 }
 
 struct Server {
     gpu: Gpu,
     arms: Vec<Arm>,
+    q_arms: Vec<QArm>,
+    q_slots: Mutex<Vec<QSlot>>,
+    q_free: Condvar,
+    geometry: Geometry,
     slots: Mutex<Vec<Slot>>,
     free: Condvar,
     q_forward: Option<String>,
@@ -69,6 +82,129 @@ impl Server {
         self.slots.lock().unwrap().push(slot);
         self.free.notify_one();
     }
+
+    fn take_q_slot(&self) -> QSlot {
+        let mut slots = self.q_slots.lock().unwrap();
+        loop {
+            if let Some(slot) = slots.pop() {
+                return slot;
+            }
+            slots = self.q_free.wait(slots).unwrap();
+        }
+    }
+
+    fn give_q_slot(&self, slot: QSlot) {
+        self.q_slots.lock().unwrap().push(slot);
+        self.q_free.notify_one();
+    }
+}
+
+/// A Q request's items (`q`: the request itself; `q_many`, `q_batch`: its `items`): their
+/// arrays staged into the slot, and where each answer goes.
+fn stage_q(
+    slot: &mut QSlot,
+    shared: &mut Shared,
+    geom: Geometry,
+    items: &[&Value],
+) -> Result<(Vec<QItem>, Vec<usize>, usize, usize), String> {
+    let row_bytes = geom.row_bytes();
+    let mut staged = Vec::new();
+    let mut result_offsets = Vec::new();
+    let (mut at, mut cells) = (0usize, 0usize);
+    for item in items {
+        let layout = item["layout"].as_array().ok_or("a Q item without `layout`")?;
+        let mut offsets = [0usize; 12];
+        let mut counts = [0usize; 12];
+        for (k, name) in Q_ARRAYS.iter().enumerate() {
+            let entry = layout
+                .iter()
+                .find(|e| e["name"].as_str() == Some(name))
+                .ok_or(format!("a Q item without `{name}`"))?;
+            let shape: Vec<usize> =
+                entry["shape"].as_array().ok_or("layout `shape`")?.iter().map(|n| n.as_u64().unwrap_or(0) as usize).collect();
+            let count: usize = shape.iter().product();
+            let dtype = entry["dtype"].as_str().unwrap_or("");
+            let src = entry["offset"].as_u64().ok_or("layout `offset`")? as usize;
+            let ints = k < 4 || (8..10).contains(&k);
+            at = (at + 63) & !63;
+            let dst = slot.stage_mut(at, count * 4)?;
+            match (ints, dtype) {
+                (true, "<i4") | (false, "<f4") => shared.read_at(src, dst).map_err(|e| e.to_string())?,
+                (true, "<i8") => {
+                    let mut raw = vec![0u8; count * 8];
+                    shared.read_at(src, &mut raw).map_err(|e| e.to_string())?;
+                    for (d, s) in dst.chunks_exact_mut(4).zip(raw.chunks_exact(8)) {
+                        let v = i64::from_le_bytes(s.try_into().unwrap());
+                        d.copy_from_slice(&(v as i32).to_le_bytes());
+                    }
+                }
+                _ => return Err(format!("`{name}` has dtype {dtype}")),
+            }
+            if k < 8 && (shape[0] != 1 || count * 4 != row_bytes[k]) {
+                return Err(format!("`{name}` is not one row of this server's encoder"));
+            }
+            offsets[k] = at;
+            counts[k] = shape[0];
+            at += count * 4;
+        }
+        let (n0, n1) = (counts[8], counts[9]);
+        let asked = item["shape"].as_array().map(|s| (s[0].as_u64().unwrap_or(0) as usize, s[1].as_u64().unwrap_or(0) as usize));
+        if asked != Some((n0, n1)) || counts[10] != n0 || counts[11] != n1 {
+            return Err(format!("a Q item's pools are {n0} x {n1} and its shape says {asked:?}"));
+        }
+        staged.push(QItem { offsets, n0, n1, cells_at: cells });
+        result_offsets.push(item["result_offset"].as_u64().ok_or("`result_offset` is missing")? as usize);
+        cells += n0 * n1;
+    }
+    Ok((staged, result_offsets, at, cells))
+}
+
+fn q_request(server: &Server, req: &Value, attached: &mut HashMap<String, Shared>) -> Result<Value, String> {
+    let name = req["model"].as_str().ok_or("`model` is missing")?;
+    let arm = server
+        .q_arms
+        .iter()
+        .find(|a| a.name == name)
+        .ok_or(format!("no Q arm named {name:?}; have {:?}", server.q_arms.iter().map(|a| &a.name).collect::<Vec<_>>()))?;
+    if req["op"].as_str() == Some("describe_q") {
+        return Ok(json!({
+            "ok": true, "files": [arm.file], "fingerprint": arm.net.fingerprint,
+            "properties": arm.net.properties, "sha256": [arm.net.sha256],
+        }));
+    }
+    let items: Vec<&Value> = match req["items"].as_array() {
+        Some(list) => list.iter().collect(),
+        None => vec![req],
+    };
+    let mut needed = 0usize;
+    for item in &items {
+        let rows = item["shape"].as_array().map(|s| s[0].as_u64().unwrap_or(0) * s[1].as_u64().unwrap_or(0)).unwrap_or(0);
+        needed = needed.max(item["result_offset"].as_u64().unwrap_or(0) as usize + rows as usize * 8);
+        for e in item["layout"].as_array().into_iter().flatten() {
+            needed = needed.max(e["offset"].as_u64().unwrap_or(0) as usize + e["nbytes"].as_u64().unwrap_or(0) as usize);
+        }
+    }
+    let shared = attach(attached, req["shm"].as_str().ok_or("`shm` is missing")?, needed)?;
+    let geom = server.geometry;
+    let mut slot = server.take_q_slot();
+    let result = (|| -> Result<(), String> {
+        let started = Instant::now();
+        let (staged, result_offsets, used, cells) = stage_q(&mut slot, shared, geom, &items)?;
+        server.stats.copy_ns.fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        let on_card = Instant::now();
+        let values = slot.matrices(&server.gpu, &arm.net, &staged, used, cells)?;
+        server.stats.gpu_ns.fetch_add(on_card.elapsed().as_nanos() as u64, Relaxed);
+        for (item, at) in staged.iter().zip(&result_offsets) {
+            let bytes: Vec<u8> =
+                values[item.cells_at..item.cells_at + item.n0 * item.n1].iter().flat_map(|v| v.to_le_bytes()).collect();
+            shared.write_at(*at, &bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    server.give_q_slot(slot);
+    result?;
+    server.stats.q_served.fetch_add(items.len() as u64, Relaxed);
+    Ok(json!({ "ok": true }))
 }
 
 fn error_reply(message: impl std::fmt::Display) -> Value {
@@ -265,6 +401,9 @@ fn handle(server: Arc<Server>, stream: TcpStream) {
             }
             "score" | "score_segments" => score(&server, &request, &mut attached),
             "stages" => stages(&server, &request, &mut attached),
+            "q" | "q_many" | "q_batch" | "describe_q" if !server.q_arms.is_empty() => {
+                q_request(&server, &request, &mut attached)
+            }
             "q" | "q_many" | "q_batch" | "describe_q" => forward_q(&server, &mut q, line.trim_end()),
             other => Err(format!("unknown op {other:?}")),
         };
@@ -354,6 +493,7 @@ pub fn main(args: &[String]) {
     let (mut host, mut port, mut slots, mut report) =
         ("127.0.0.1".to_string(), 0u16, 4usize, every.unwrap_or(60.0f64));
     let mut q_forward = None;
+    let mut q_specs: Vec<(String, String)> = Vec::new();
     let mut dll_dir = None;
     let mut i = 0;
     let value = |i: usize| args.get(i + 1).cloned().unwrap_or_else(|| usage());
@@ -379,6 +519,11 @@ pub fn main(args: &[String]) {
             "--q-forward" => {
                 q_forward = Some(value(i));
                 i += 2;
+            }
+            "--q-arm" => {
+                let file = args.get(i + 2).cloned().unwrap_or_else(|| usage());
+                q_specs.push((value(i), file));
+                i += 3;
             }
             "--host" => {
                 host = value(i);
@@ -496,9 +641,39 @@ pub fn main(args: &[String]) {
         }
         pool.push(slot);
     }
+    // Q arms (--q-arm NAME FILE.rnet): the net on the card, and slots of their own.
+    let mut q_arms: Vec<QArm> = Vec::new();
+    for (name, file) in &q_specs {
+        let net = rnet::read(file).and_then(|r| QNet::upload(&stream, &r)).unwrap_or_else(|e| {
+            eprintln!("Q arm {name}: {e}");
+            std::process::exit(1);
+        });
+        let shown = Path::new(file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        q_arms.push(QArm { name: name.clone(), file: shown, net });
+    }
+    stream.synchronize().expect("Q weights uploaded");
+    let mut q_pool = Vec::new();
+    if let Some(first) = q_arms.first() {
+        for _ in 0..slots {
+            q_pool.push(QSlot::new(&gpu, geom, &first.net).unwrap_or_else(|e| {
+                eprintln!("Q slot: {e}");
+                std::process::exit(1);
+            }));
+        }
+        for arm in &q_arms {
+            if arm.net.widths() != first.net.widths() {
+                eprintln!("Q arms {} and {} differ in width; one server holds Q arms of one shape", first.name, arm.name);
+                std::process::exit(1);
+            }
+        }
+    }
     let server = Arc::new(Server {
         gpu,
         arms,
+        q_arms,
+        q_slots: Mutex::new(q_pool),
+        q_free: Condvar::new(),
+        geometry: geom,
         slots: Mutex::new(pool),
         free: Condvar::new(),
         q_forward,
@@ -520,12 +695,19 @@ pub fn main(args: &[String]) {
             if arm.nets.len() > 1 { " (ensemble, logits averaged)" } else { "" }
         );
     }
+    for arm in &server.q_arms {
+        eprintln!("  Q arm {}: {} (sha256 {})", arm.name, arm.file, &arm.net.sha256.chars().take(12).collect::<String>());
+    }
     eprintln!(
         "  {} slots x {} graphs a net-set, ready in {:.1} s; Q requests {}",
         slots,
         infer_gpu::BUCKETS,
         started.elapsed().as_secs_f64(),
-        server.q_forward.as_deref().map(|a| format!("forwarded to {a}")).unwrap_or("refused".into())
+        if !server.q_arms.is_empty() {
+            "answered here".to_string()
+        } else {
+            server.q_forward.as_deref().map(|a| format!("forwarded to {a}")).unwrap_or("refused".into())
+        }
     );
     if report > 0.0 {
         let server = server.clone();
@@ -539,14 +721,14 @@ pub fn main(args: &[String]) {
                 let per = |ns: &AtomicU64| ns.load(Relaxed) as f64 / 1e6 / req.max(1) as f64;
                 eprintln!(
                     "  {req} requests, {rows} rows ({} since the last line); per request {:.2} ms in all, \
-                     {:.2} ms waiting for a slot, {:.2} ms copying, {:.2} ms on the card; Q forwarded {}; \
+                     {:.2} ms waiting for a slot, {:.2} ms copying, {:.2} ms on the card; Q items {}; \
                      process CPU {:.1} s (+{:.1})",
                     req - last.0,
                     per(&s.handled_ns),
                     per(&s.slot_wait_ns),
                     per(&s.copy_ns),
                     per(&s.gpu_ns),
-                    s.q_forwarded.load(Relaxed),
+                    s.q_forwarded.load(Relaxed) + s.q_served.load(Relaxed),
                     cpu,
                     cpu - last.2
                 );

@@ -16,6 +16,7 @@ card, with the reason `tools/ci_skip_audit.py` counts as `cuda`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import subprocess
@@ -105,7 +106,13 @@ def _fuzz(encoded: Encoded, net, encoder, rows: int, seed: int) -> Encoded:
 
 
 class RustServer:
-    def __init__(self, arms: dict[str, list[Path]], tmp_path: Path, slots: int = 2) -> None:
+    def __init__(
+        self,
+        arms: dict[str, list[Path]],
+        tmp_path: Path,
+        slots: int = 2,
+        q_arms: dict[str, Path] | None = None,
+    ) -> None:
         exe = rustnode.binary_path()
         assert exe.exists(), f"{exe} is not built: cd rust && cargo build --release"
         dlls = Path(torch.__file__).parent / "lib"
@@ -115,6 +122,8 @@ class RustServer:
         ]
         for name, files in arms.items():
             command += ["--arm", name, *map(str, files)]
+        for name, file in (q_arms or {}).items():
+            command += ["--q-arm", name, str(file)]
         self.log = (tmp_path / "server.log").open("w")
         self.process = subprocess.Popen(  # noqa: S603
             command, stdout=subprocess.PIPE, stderr=self.log, text=True
@@ -338,3 +347,170 @@ def test_the_server_prints_the_library_versions(served):
     log = Path(server.log.name).read_text()
     assert "NVRTC 12." in log and "cuBLAS 12." in log, log
     assert sys.platform  # the line is for the record
+
+
+# ---------------------------------------------------------------------------------------
+# The Q arm (IKA-461 stage 4)
+
+
+def _q_net(encoder, reg, seed: int):
+    from pokeuraou import qhead
+
+    torch.manual_seed(seed)
+    config = qhead.QConfig(properties=True, attend=True, state_inputs=True, bind_inputs=True)
+    net = qhead.build_net(encoder, config, qhead.move_table(reg, encoder.vocab)).eval()
+    params = dict(net.named_parameters())
+    with torch.no_grad():
+        for module in net.modules():
+            if isinstance(module, torch.nn.LayerNorm):
+                module.weight.add_(0.3 * torch.randn_like(module.weight))
+                module.bias.add_(0.3 * torch.randn_like(module.bias))
+        # The properties branch and the attention's output start at zero (an identity): move
+        # them, or a kernel that ignored either would still agree with torch.
+        for name in ("mon_props.weight", "mon_props.bias", "attend.out_proj.weight", "attend.out_proj.bias"):
+            params[name].add_(0.2 * torch.randn_like(params[name]))
+    net.vocab_fingerprint = encoder.vocab.fingerprint()
+    return net
+
+
+@pytest.fixture(scope="module")
+def q_served(reg, encoder, tmp_path_factory):
+    from pokeuraou.rustnet import write_q
+
+    tmp = tmp_path_factory.mktemp("rust-q")
+    value = _write(_net(encoder, CONFIGS["bind"], seed=11), encoder, tmp / "v.rnet", "v.pt")
+    net = _q_net(encoder, reg, seed=5)
+    other = _q_net(encoder, reg, seed=6)
+    write_q(net, encoder, tmp / "q.rnet", source="q-test.pt", sha256="abc")
+    write_q(other, encoder, tmp / "q2.rnet", source="q2-test.pt", sha256="def")
+    server = RustServer({"value": [value]}, tmp, q_arms={"q": tmp / "q.rnet", "q2": tmp / "q2.rnet"})
+    yield server, net, other
+    server.close()
+
+
+def _asks(reg, encoder, count: int):
+    """(position, pools, arrays) of the roster's positions, the arrays as `RemoteQ` lays them."""
+    from pokeuraou import qhead, qrank
+
+    out = []
+    for pos in _positions(reg, count):
+        pools = (qhead.legal_pool(reg, pos, 0), qhead.legal_pool(reg, pos, 1))
+        arrays = qrank._pool_arrays(reg, encoder, pos, pools, True)  # noqa: SLF001
+        out.append((pos, pools, arrays))
+    return out
+
+
+def _torch_q(net, arrays) -> np.ndarray:
+    from pokeuraou import qhead
+
+    device = torch.device("cuda")
+    try:
+        return qhead.q_matrix(net.to(device), arrays, device)
+    finally:
+        net.cpu()
+
+
+def test_a_q_arm_answers_the_matrix_torch_answers(reg, encoder, q_served):
+    from pokeuraou import qrank
+
+    server, net, _ = q_served
+    asks = _asks(reg, encoder, 12)
+    pairs = [(pos, pools) for pos, pools, _ in asks]
+    with contextlib.closing(qrank.RemoteQ(server.address, "q", encoder)) as remote:
+        got = remote.matrices(reg, pairs[:1]) + remote.matrices(reg, pairs[1:])
+        batched = remote.batched(reg, pairs)
+    worst, sizes = 0.0, []
+    for (_pos, _pools, arrays), one, many in zip(asks, got, batched, strict=True):
+        want = _torch_q(net, arrays)
+        assert one.shape == want.shape == many.shape
+        worst = max(worst, float(np.abs(one - want).max()), float(np.abs(many - want).max()))
+        sizes.append(want.shape)
+        assert want.std() > 1e-3
+    print(f"Q: max |rust - torch| {worst:.3e} over {len(asks)} positions, pools {sizes[:4]}...")
+    assert worst < 5e-6, worst
+
+
+def test_the_q_comparison_can_fail(reg, encoder, q_served):
+    """The other Q's matrix is far from this one's, and the arm named q2 is the other net."""
+    from pokeuraou import qrank
+
+    server, net, other = q_served
+    pos, pools, arrays = _asks(reg, encoder, 1)[0]
+    with contextlib.closing(qrank.RemoteQ(server.address, "q", encoder)) as remote:
+        got = remote.matrix(reg, pos, pools)
+    assert np.abs(got - _torch_q(other, arrays)).max() > 1e-2
+    with contextlib.closing(qrank.RemoteQ(server.address, "q2", encoder)) as remote:
+        assert np.abs(remote.matrix(reg, pos, pools) - _torch_q(other, arrays)).max() < 5e-6
+
+
+def test_a_q_arm_on_fuzzed_positions(reg, encoder, q_served):
+    from pokeuraou.qrank import _plan_named
+
+    server, net, _ = q_served
+    worst = 0.0
+    for index, (_pos, _pools, arrays) in enumerate(_asks(reg, encoder, 6)):
+        encoded = Encoded(**{name: arrays[name] for name in ARRAYS}, unknown_volatiles={})
+        fuzzed = _fuzz(encoded, net.trunk, encoder, rows=1, seed=40 + index)
+        arrays = {**arrays, **{name: np.ascontiguousarray(getattr(fuzzed, name)) for name in ARRAYS}}
+        want = _torch_q(net, arrays)
+        layout, used = _plan_named(arrays)
+        result_offset = (used + 63) & ~63
+        block = shared_memory.SharedMemory(create=True, size=result_offset + want.size * 8 + 64)
+        try:
+            for item in layout:
+                array = np.ascontiguousarray(arrays[item["name"]])
+                view = np.frombuffer(block.buf, dtype=array.dtype, count=array.size, offset=item["offset"])
+                view[:] = array.reshape(-1)
+                del view
+            reply = _ask(server.address, {
+                "op": "q", "model": "q", "shm": block.name, "layout": layout,
+                "shape": list(want.shape), "result_offset": result_offset,
+            })
+            assert reply["ok"], reply
+            view = np.frombuffer(block.buf, dtype=np.float64, count=want.size, offset=result_offset)
+            got = view.copy()
+            del view
+        finally:
+            block.close()
+            block.unlink()
+        worst = max(worst, float(np.abs(got.reshape(want.shape) - want).max()))
+    print(f"Q fuzzed: max |rust - torch| {worst:.3e}")
+    assert worst < 5e-6, worst
+
+
+def test_start_server_is_the_rust_server_unless_asked_for_python(encoder, tmp_path, monkeypatch):
+    """IKA-461: the default of every tool that starts a server is the Rust one; `python=True`
+    and POKEURAOU_PYTHON_SERVER=1 are the ways back."""
+    from pokeuraou.inference import start_server
+    from pokeuraou.value import save_model
+
+    net = _net(encoder, CONFIGS["bind"], seed=3)
+    pt = tmp_path / "v.pt"
+    save_model(pt, net, net.state_dict(), encoder.vocab, CONFIGS["bind"], {})
+    started = []
+    try:
+        for python, env in ((False, None), (True, None), (False, "1")):
+            if env:
+                monkeypatch.setenv("POKEURAOU_PYTHON_SERVER", env)
+            process, address = start_server(
+                {"value": [pt]}, regulation=FORMAT_ID, log=tmp_path / f"log{len(started)}" / "s.log",
+                python=python,
+            )
+            started.append(process)
+            args = " ".join(str(a) for a in process.args)
+            assert ("inference_server.py" in args) == (python or bool(env)), args
+            assert ("inference-server" in args) == (not python and not env), args
+            assert _ask(address, {"op": "ping"})["models"] == ["value"]
+            process.terminate()
+    finally:
+        for process in started:
+            process.terminate()
+
+
+def test_describe_q_and_a_missing_q_arm(q_served):
+    server, _, _ = q_served
+    about = _ask(server.address, {"op": "describe_q", "model": "q"})
+    assert about["ok"] and about["files"] == ["q.rnet"] and about["properties"] is True
+    assert about["sha256"] == ["abc"]
+    missing = _ask(server.address, {"op": "describe_q", "model": "nope"})
+    assert not missing["ok"] and "nope" in missing["error"]

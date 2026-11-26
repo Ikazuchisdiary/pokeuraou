@@ -281,14 +281,14 @@ def _value(args: argparse.Namespace) -> int:
     reg = str(_pool_data(args.pool)["regulation"])
     env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
     servers, addrs = [], []
+    from pokeuraou.inference import start_server
+
     for i in range(args.servers):
-        log = open(out / f"server{i}.log", "w", encoding="utf-8")  # noqa: SIM115
-        p = subprocess.Popen(
-            [sys.executable, str(ROOT / "tools/inference_server.py"), "--device", "cuda",
-             "--regulation", reg, "--arm", "value", *args.model],
-            env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=log, text=True)
+        # IKA-461: the Rust server unless POKEURAOU_PYTHON_SERVER=1.
+        p, address = start_server(
+            {"value": args.model}, regulation=reg, log=out / f"server{i}.log", env=env)
         servers.append(p)
-        addrs.append(p.stdout.readline().strip())
+        addrs.append(address)
     name = "+".join(Path(m).stem for m in args.model)
     kids = [
         subprocess.Popen(

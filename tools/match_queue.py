@@ -166,6 +166,25 @@ def main() -> None:
         "--servers, which decides whether this is faster or slower than not using it.",
     )
     ap.add_argument(
+        "--python-server",
+        action="store_true",
+        help="with --served, the servers are tools/inference_server.py (Python, torch). Without "
+        "it (IKA-461) an M-C pool match (--pool, CUDA) has every value arm and Q arm answered by "
+        "`pokeuraou-damage inference-server` (the nets exported as .rnet files): 2,040 against "
+        "1,372 games/min in generation's shape, and SPRT(-10, 0) H1 against the Python server on "
+        "this board. A match without --pool has no format to export for and is Python's.",
+    )
+    for flag in ("--tested-server", "--baseline-server"):
+        ap.add_argument(
+            flag,
+            choices=("python", "rust"),
+            default=None,
+            help="IKA-461: the kind of the inference server this arm (the tested one, or the "
+            "baseline) is on, each arm on servers of its own (--servers of each). The baseline arm "
+            "then ranks by its own Q, `base`: pass --baseline-rank-fill q-nocover.base after `--`. "
+            "Needs --served, --baseline and --q-model.",
+        )
+    ap.add_argument(
         "--servers",
         type=int,
         default=2,
@@ -393,31 +412,42 @@ def main() -> None:
         env["POKEURAOU_PORT_THREADS"] = str(args.port_threads)
 
     servers: list[subprocess.Popen] = []
+    server_logs: list[Path] = []
     served_at: list[str] = []
-    if args.served:
+    #: With --tested-server / --baseline-server: the baseline arm's own servers (IKA-461).
+    baseline_at: list[str] = []
+
+    def launch(kind: str, arms: dict[str, list[str]], qs: dict[str, str], tag: str, count: int) -> list[str]:
+        """`count` inference servers of `kind` ("python" or "rust") holding `arms` and the Qs
+        `qs`; their addresses (each server's first line of stdout)."""
         server_log = out_dir / "logs"
         server_log.mkdir(parents=True, exist_ok=True)
-        for index in range(args.servers):
-            command = [
-                sys.executable, str(ROOT / "tools" / "inference_server.py"),
-                "--device", args.device,
-                *(["--regulation", pool_regulation] if pool_regulation else []),
-                "--arm", "value", *args.value,
-            ]
-            if args.baseline:
-                command += ["--arm", "baseline", *args.baseline]
-            if args.q_model is not None:
-                command += ["--q-arm", "q", str(args.q_model)]
-            for name, model in args.q_model_named:
-                if name == "q" and args.q_model is not None:
-                    raise SystemExit("--q-model-named q collides with --q-model's server arm q")
-                command += ["--q-arm", name, model]
-            errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
+        found: list[str] = []
+        for index in range(count):
+            if kind == "rust":
+                # IKA-461: every arm and every Q in the Rust server.
+                from pokeuraou.rustnet import server_command
+
+                if pool_regulation is None:
+                    raise SystemExit("a Rust inference server is for an M-C pool match (--pool)")
+                command = server_command(pool_regulation, arms, qs, out_dir)
+            else:
+                command = [
+                    sys.executable, str(ROOT / "tools" / "inference_server.py"),
+                    "--device", args.device,
+                    *(["--regulation", pool_regulation] if pool_regulation else []),
+                ]
+                for name, files in arms.items():
+                    command += ["--arm", name, *files]
+                for name, model in qs.items():
+                    command += ["--q-arm", name, model]
+            log = server_log / f"inference{tag}{index}.log"
             process = subprocess.Popen(  # noqa: S603
-                command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors,
-                text=True,
+                command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE,
+                stderr=log.open("w", encoding="utf-8"), text=True,
             )
             servers.append(process)
+            server_logs.append(log)
             # The address is the server's first line of stdout, read before any worker
             # starts: a worker that starts first has nothing to connect to, and that
             # failure reads as the run dying for a reason of its own.
@@ -426,13 +456,36 @@ def main() -> None:
             if not address:
                 for other in servers:
                     other.terminate()
-                raise SystemExit(
-                    f"inference server {index} exited before naming an address; see "
-                    f"{server_log / f'inference{index}.log'}"
-                )
-            served_at.append(address)
-        print(f"  inference: {', '.join(served_at)} (workers hold no model)",
-              file=sys.stderr, flush=True)
+                raise SystemExit(f"inference server {tag}{index} exited before naming an address; see {log}")
+            found.append(address)
+        return found
+
+    if args.served:
+        for name, _model in args.q_model_named:
+            if name == "q" and args.q_model is not None:
+                raise SystemExit("--q-model-named q collides with --q-model's server arm q")
+        if args.tested_server is not None or args.baseline_server is not None:
+            # IKA-461: the two arms on servers of their own, each of the kind named (a Rust
+            # server for one arm and a Python one for the other). The baseline arm ranks by its
+            # own copy of the Q, named `base` (--baseline-rank-fill q-nocover.base after `--`).
+            if not args.baseline or args.q_model is None:
+                raise SystemExit("--tested-server / --baseline-server need --baseline and --q-model")
+            served_at = launch(args.tested_server or "python", {"value": list(args.value)},
+                               {"q": str(args.q_model)}, "t", args.servers)
+            baseline_at = launch(args.baseline_server or "python", {"baseline": list(args.baseline)},
+                                 {"base": str(args.q_model)}, "b", args.servers)
+        else:
+            arms = {"value": list(args.value)}
+            if args.baseline:
+                arms["baseline"] = list(args.baseline)
+            qs = {name: model for name, model in args.q_model_named}
+            if args.q_model is not None:
+                qs["q"] = str(args.q_model)
+            rust = not args.python_server and pool_regulation is not None and args.device == "cuda"
+            served_at = launch("rust" if rust else "python", arms, qs, "", args.servers)
+        print(f"  inference: {', '.join(served_at)}"
+              + (f"; baseline arm: {', '.join(baseline_at)}" if baseline_at else "")
+              + " (workers hold no model)", file=sys.stderr, flush=True)
 
     def build(worker: int, address: str) -> list[str]:
         program = "pool_match.py" if args.pool is not None else "generation_match.py"
@@ -455,6 +508,11 @@ def main() -> None:
                         "--inference-arm", "value"]
             if args.baseline:
                 command += ["--baseline-inference-arm", "baseline"]
+            if baseline_at:
+                # The baseline arm and its Q (named `base`) are on the baseline servers.
+                other = baseline_at[worker % len(baseline_at)]
+                command += ["--baseline-inference", other, "--q-arm-named", "base", "base",
+                            "--q-inference-named", "base", other]
         else:
             command += ["--value", *args.value]
             if args.baseline:
@@ -490,7 +548,7 @@ def main() -> None:
             workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
             label="match", counts=written, monitor=monitor,
             max_failures=None if args.max_worker_failures < 0 else args.max_worker_failures,
-            server_logs=[out_dir / "logs" / f"inference{i}.log" for i in range(len(servers))],
+            server_logs=server_logs,
             outcome=outcome,
         )
         if outcome.get("stoppedForFailures"):

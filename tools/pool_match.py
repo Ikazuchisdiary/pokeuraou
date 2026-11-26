@@ -117,11 +117,14 @@ def build_leaves(
         value = RemoteValue(args.inference, args.inference_arm, encoder, merge=args.inference_merge)
         baseline = None
         if args.baseline_inference_arm:
+            # IKA-461: the baseline arm may be on another server (`--baseline-inference`).
+            other = args.baseline_inference or args.inference
             baseline = (
                 value
                 if args.baseline_inference_arm == args.inference_arm
                 and other_encoder is encoder
-                else RemoteValue(args.inference, args.baseline_inference_arm, other_encoder,
+                and other == args.inference
+                else RemoteValue(other, args.baseline_inference_arm, other_encoder,
                                   merge=args.inference_merge)
             )
         # Asked of the server: a worker is told an arm's name, never what it holds.
@@ -274,6 +277,8 @@ def main(argv: list[str] | None = None) -> None:
                     "one this worker would compute itself")
     ap.add_argument("--baseline-inference-arm", default=None,
                     help="the server's name for the other arm")
+    ap.add_argument("--baseline-inference", default=None, metavar="HOST:PORT",
+                    help="IKA-461: the other arm's own inference server, when it is not --inference")
     ap.add_argument("--baseline-hp-share", action="store_true",
                     help="the other arm has no leaf: hp-share, the M-C origin, and you mean "
                     "it. Leaving the other arm's leaf out used to mean this silently, and a "

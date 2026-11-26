@@ -68,6 +68,9 @@ def test_process_role_reads_the_command_line(tool: Any) -> None:
     assert tool.process_role("python.exe", ["python", "/x/tools/selfplay.py", "--queue"]) \
         == "selfplay.py"
     assert tool.process_role("pokeuraou-damage.exe", []) == "pokeuraou-damage.exe"
+    # IKA-461: the same exe as the inference server is its own role.
+    assert tool.process_role("pokeuraou-damage.exe", ["x/pokeuraou-damage.exe", "inference-server"]) \
+        == "rust-inference-server"
     assert tool.process_role("python.exe", ["python", "-c", "pass"]) == "python.exe"
 
 

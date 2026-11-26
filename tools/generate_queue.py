@@ -52,42 +52,6 @@ from pokeuraou.benchflags import add_bench_flags, bench_argv, require_bench  # n
 from pokeuraou.workqueue import run_workers  # noqa: E402
 
 
-def _rust_server_command(args: argparse.Namespace, pool_regulation: str | None, out_dir: Path) -> list[str]:
-    """IKA-461: the command of one `pokeuraou-damage inference-server` for the value arm.
-
-    The net is exported to an .rnet in the run's directory (a file whose source hash is
-    already there is reused); the CUDA 12 DLLs are the `.venv`'s torch's unless the Toolkit's
-    are named by the server's own search (`POKEURAOU_CUDA_DLLS`, `CUDA_PATH_V12_*`).
-    """
-    import importlib.util
-
-    from pokeuraou.regulation import regulation_dir, repo_root
-    from pokeuraou.rustnet import ensure_exported
-    from pokeuraou.teams import load_roster
-
-    if "," in str(args.value):
-        raise SystemExit("--rust-server takes one --value file; an ensemble arm is not wired here yet")
-    regulation = pool_regulation or load_roster(args.roster).reg.format_id
-    rnet = ensure_exported(args.value, regulation, out_dir / "rnet")
-    # Not `rustnode`: importing it makes this launcher write a timing report of its own.
-    exe = Path(os.environ.get("POKEURAOU_RUST_NODE_BIN") or
-               repo_root() / "rust" / "target" / "release"
-               / ("pokeuraou-damage.exe" if sys.platform == "win32" else "pokeuraou-damage"))
-    if not exe.exists():
-        raise SystemExit(f"{exe} is not built: cd rust && cargo build --release")
-    command = [
-        str(exe), "inference-server",
-        "--regulation", str(regulation_dir() / f"{regulation}.json"),
-        "--arm", "value", str(rnet),
-    ]
-    spec = importlib.util.find_spec("torch")
-    if spec and spec.origin and not os.environ.get("POKEURAOU_CUDA_DLLS"):
-        lib = Path(spec.origin).parent / "lib"
-        if lib.is_dir() and not any(k.startswith("CUDA_PATH_V12") for k in os.environ):
-            command += ["--dll-dir", str(lib)]
-    return command
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, required=True, help="directory for the games")
@@ -198,13 +162,15 @@ def main() -> None:
         "configuration that loses to not serving at all.",
     )
     ap.add_argument(
-        "--rust-server",
+        "--python-server",
         action="store_true",
-        help="IKA-461, off by default: the value arm is answered by `pokeuraou-damage "
-        "inference-server` (the net exported as an .rnet, run on the card by cudarc) instead of "
-        "tools/inference_server.py. The Q arm is still Python's: each Rust server passes its Q "
-        "requests on to a Python server started beside it (--q-forward). Needs --served and "
-        "one --value file; the answers differ from torch's by float32 noise (about 3e-7).",
+        help="with --served, the servers are tools/inference_server.py (Python, torch). Without "
+        "it (IKA-461) the value arm and the Q arm are answered by `pokeuraou-damage "
+        "inference-server` (the nets exported as .rnet files, run on the card by cudarc): 2,040 "
+        "against 1,372 games/min in 16 ABBA runs, the answers within float32 noise of torch's "
+        "(about 3e-7), and SPRT(-10, 0) H1 on the board. The Rust server takes one --value file "
+        "and a CUDA device; a net it does not implement (attention, move properties) stops the "
+        "launcher and asks for this flag.",
     )
     ap.add_argument(
         "--selection-book",
@@ -373,44 +339,33 @@ def main() -> None:
     env["PYTHONPATH"] = str(ROOT / "src")
 
     servers: list[subprocess.Popen] = []
-    #: With --rust-server: the Python servers that hold the Q arm beside the Rust ones.
-    helpers: list[subprocess.Popen] = []
     served_at: list[str] = []
     if args.served:
         if not args.value:
             raise SystemExit("--served needs --value: the servers hold the leaf")
         server_log = out_dir / "logs"
         server_log.mkdir(parents=True, exist_ok=True)
-        rust_command: list[str] = []
-        if args.rust_server:
-            rust_command = _rust_server_command(args, pool_regulation, out_dir)
         for index in range(args.servers):
             errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
-            python_server = [
-                sys.executable, str(ROOT / "tools" / "inference_server.py"),
-                "--device", args.device,
-                *(["--regulation", pool_regulation] if pool_regulation else []),
-                "--arm", "value", args.value,
-                *(["--q-arm", "q", args.q_model] if args.q_model else []),
-            ]
-            command = python_server
-            if rust_command:
-                command = list(rust_command)
-                if args.q_model:
-                    # The Q arm stays Python's for now: a Python server holds it, and the Rust
-                    # server passes every Q request on to it line for line.
-                    q_errors = (server_log / f"inference-q{index}.log").open("w", encoding="utf-8")
-                    q_process = subprocess.Popen(  # noqa: S603
-                        python_server, env=env, cwd=str(ROOT),
-                        stdout=subprocess.PIPE, stderr=q_errors, text=True,
-                    )
-                    helpers.append(q_process)
-                    assert q_process.stdout is not None
-                    q_address = q_process.stdout.readline().strip()
-                    if not q_address:
-                        raise SystemExit(f"the Q server {index} exited before naming an address; "
-                                         f"see {server_log / f'inference-q{index}.log'}")
-                    command += ["--q-forward", q_address]
+            if not args.python_server and args.device == "cuda":
+                # IKA-461: the value arm and the Q arm both in the Rust server.
+                from pokeuraou.rustnet import server_command
+                from pokeuraou.teams import load_roster
+
+                command = server_command(
+                    pool_regulation or load_roster(args.roster).reg.format_id,
+                    {"value": [args.value]},
+                    {"q": args.q_model} if args.q_model else {},
+                    out_dir,
+                )
+            else:
+                command = [
+                    sys.executable, str(ROOT / "tools" / "inference_server.py"),
+                    "--device", args.device,
+                    *(["--regulation", pool_regulation] if pool_regulation else []),
+                    "--arm", "value", args.value,
+                    *(["--q-arm", "q", args.q_model] if args.q_model else []),
+                ]
             process = subprocess.Popen(  # noqa: S603
                 command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors, text=True,
             )
@@ -497,7 +452,7 @@ def main() -> None:
         # However the run ended. A leftover server holds VRAM and answers the next run's
         # questions with the previous run's model, so ending it is not conditional on
         # anything having gone well.
-        for process in [*servers, *helpers]:
+        for process in servers:
             process.terminate()
             try:
                 process.wait(timeout=30)

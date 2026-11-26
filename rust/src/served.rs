@@ -81,10 +81,10 @@ pub struct Client {
 
 thread_local! {
     /// One connection and one attachment, kept while the caller names the same ones.
-    static CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) };
+    static CLIENT: RefCell<Vec<Client>> = const { RefCell::new(Vec::new()) };
     /// IKA-389: the same for the Q's block (`qrank.RemoteQ._block`), a connection of its own
     /// so the leaf's and the Q's do not replace each other.
-    static Q_CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) };
+    static Q_CLIENT: RefCell<Vec<Client>> = const { RefCell::new(Vec::new()) };
 }
 
 fn connect(server: &Server) -> Result<Client, Failed> {
@@ -195,24 +195,35 @@ pub fn ask(client: &mut Client, request: &Value, stats: &mut Stats) -> Result<Va
     Ok(reply)
 }
 
+/// The connections a thread keeps, one per (server, block): a game of two arms on two servers
+/// (IKA-461) asks both in turn, and one slot reconnected on every change -- a connection a
+/// call, until the ephemeral ports ran out (os error 10048).
+const KEPT_CLIENTS: usize = 8;
+
 fn with_client_of<T>(
-    key: &'static std::thread::LocalKey<RefCell<Option<Client>>>,
+    key: &'static std::thread::LocalKey<RefCell<Vec<Client>>>,
     server: &Server,
     call: impl FnOnce(&mut Client) -> Result<T, Failed>,
 ) -> Result<T, Failed> {
     key.with(|cell| {
         let mut held = cell.borrow_mut();
-        let stale = held.as_ref().is_none_or(|c| {
-            c.address != server.address || c.shm != server.shm || c.capacity != server.capacity
-        });
-        if stale {
-            *held = None;
-            *held = Some(connect(server)?);
-        }
-        let answered = call(held.as_mut().expect("connected just above"));
+        let at = match held
+            .iter()
+            .position(|c| c.address == server.address && c.shm == server.shm && c.capacity == server.capacity)
+        {
+            Some(at) => at,
+            None => {
+                if held.len() >= KEPT_CLIENTS {
+                    held.remove(0);
+                }
+                held.push(connect(server)?);
+                held.len() - 1
+            }
+        };
+        let answered = call(&mut held[at]);
         if let Err(Failed::Broken(_)) = &answered {
             // A connection in an unknown state is not used again.
-            *held = None;
+            held.remove(at);
         }
         answered
     })
