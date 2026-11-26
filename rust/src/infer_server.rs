@@ -1,0 +1,535 @@
+//! IKA-461: the inference server in Rust (`pokeuraou-damage inference-server`).
+//!
+//! It answers the protocol of `tools/inference_server.py` / `src/pokeuraou/inference.py`:
+//! one JSON line per request over a socket, the arrays and the answers in a named shared
+//! block (`RemoteValue._block`, `served.rs`). The ops it knows are `ping`, `describe`,
+//! `score` (and `score_segments`, scored as one block: the rows are the same and the order
+//! is the same), and `stages` (for the tests: every step of the first net's forward pass).
+//! A Q arm's ops (`q`, `q_many`, `q_batch`, `describe_q`) are passed on, line for line, to
+//! the Python server named by `--q-forward` until the Q arm is moved here.
+//!
+//! One thread a connection. A request takes a free slot (`infer_gpu::Slot`), copies its rows
+//! into the slot's pinned memory, replays a CUDA Graph and sleeps until the card is done.
+
+use crate::encode::Encoder;
+use crate::infer_gpu::{self, Geometry, Gpu, Net, Slot, MAX_ROWS};
+use crate::reg::Reg;
+use crate::rnet;
+use crate::shm::Shared;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+const ARRAYS: [&str; 8] = ["species", "ability", "item", "moves", "mon", "mask", "side", "field"];
+
+struct Arm {
+    name: String,
+    files: Vec<String>,
+    nets: Vec<Net>,
+}
+
+#[derive(Default)]
+struct Stats {
+    requests: AtomicU64,
+    rows: AtomicU64,
+    /// Nanoseconds: in `score` altogether, waiting for a slot, in the copy into pinned memory,
+    /// in the graph launch and the wait for the card.
+    handled_ns: AtomicU64,
+    slot_wait_ns: AtomicU64,
+    copy_ns: AtomicU64,
+    gpu_ns: AtomicU64,
+    q_forwarded: AtomicU64,
+}
+
+struct Server {
+    gpu: Gpu,
+    arms: Vec<Arm>,
+    slots: Mutex<Vec<Slot>>,
+    free: Condvar,
+    q_forward: Option<String>,
+    stats: Stats,
+}
+
+impl Server {
+    fn take_slot(&self) -> Slot {
+        let mut slots = self.slots.lock().unwrap();
+        loop {
+            if let Some(slot) = slots.pop() {
+                return slot;
+            }
+            slots = self.free.wait(slots).unwrap();
+        }
+    }
+
+    fn give_slot(&self, slot: Slot) {
+        self.slots.lock().unwrap().push(slot);
+        self.free.notify_one();
+    }
+}
+
+fn error_reply(message: impl std::fmt::Display) -> Value {
+    json!({ "ok": false, "error": message.to_string() })
+}
+
+struct Item {
+    offset: usize,
+    dtype: String,
+    shape: Vec<usize>,
+}
+
+fn layout_of(req: &Value) -> Result<(Vec<Item>, usize), String> {
+    let layout = req["layout"].as_array().ok_or("`layout` is missing")?;
+    let mut items: Vec<Option<Item>> = (0..8).map(|_| None).collect();
+    let mut needed = 0usize;
+    for entry in layout {
+        let name = entry["name"].as_str().ok_or("a layout entry without a name")?;
+        let Some(k) = ARRAYS.iter().position(|a| *a == name) else { continue };
+        let offset = entry["offset"].as_u64().ok_or("layout `offset`")? as usize;
+        let nbytes = entry["nbytes"].as_u64().ok_or("layout `nbytes`")? as usize;
+        let shape = entry["shape"]
+            .as_array()
+            .ok_or("layout `shape`")?
+            .iter()
+            .map(|n| n.as_u64().unwrap_or(0) as usize)
+            .collect();
+        let dtype = entry["dtype"].as_str().ok_or("layout `dtype`")?.to_string();
+        needed = needed.max(offset + nbytes);
+        items[k] = Some(Item { offset, dtype, shape });
+    }
+    let items = items
+        .into_iter()
+        .enumerate()
+        .map(|(k, i)| i.ok_or(format!("the layout has no `{}`", ARRAYS[k])))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((items, needed))
+}
+
+/// Rows [first, first + n) of every array into the slot's pinned inputs.
+fn fill(slot: &mut Slot, shared: &mut Shared, items: &[Item], first: usize, n: usize) -> Result<(), String> {
+    let geom = slot.geometry();
+    let row_bytes = geom.row_bytes();
+    for (k, item) in items.iter().enumerate() {
+        let ints = k < 4;
+        let wide = match (ints, item.dtype.as_str()) {
+            (true, "<i4") | (false, "<f4") => false,
+            (true, "<i8") => true,
+            (_, other) => return Err(format!("`{}` has dtype {other}", ARRAYS[k])),
+        };
+        let per_row: usize = item.shape.iter().skip(1).product();
+        let elem = if wide { 8 } else { 4 };
+        if per_row * 4 != row_bytes[k] {
+            return Err(format!(
+                "`{}` has rows of {per_row} values; this server's encoder has {}",
+                ARRAYS[k],
+                row_bytes[k] / 4
+            ));
+        }
+        let at = item.offset + first * per_row * elem;
+        if wide {
+            let mut raw = vec![0u8; n * per_row * 8];
+            shared.read_at(at, &mut raw).map_err(|e| e.to_string())?;
+            let out = slot.input(k, 0, n);
+            for (dst, src) in out.chunks_exact_mut(4).zip(raw.chunks_exact(8)) {
+                let v = i64::from_le_bytes(src.try_into().unwrap());
+                dst.copy_from_slice(&(v as i32).to_le_bytes());
+            }
+        } else {
+            shared.read_at(at, slot.input(k, 0, n)).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn attach<'a>(
+    attached: &'a mut HashMap<String, Shared>,
+    name: &str,
+    needed: usize,
+) -> Result<&'a mut Shared, String> {
+    let stale = attached.get(name).is_none_or(|s| s.capacity() < needed);
+    if stale {
+        attached.remove(name);
+        let block = Shared::attach(name, needed).ok_or(format!("no shared block named {name}"))?;
+        attached.insert(name.to_string(), block);
+    }
+    Ok(attached.get_mut(name).unwrap())
+}
+
+fn score(server: &Server, req: &Value, attached: &mut HashMap<String, Shared>) -> Result<Value, String> {
+    let started = Instant::now();
+    let name = req["model"].as_str().ok_or("`model` is missing")?;
+    let arm = server
+        .arms
+        .iter()
+        .position(|a| a.name == name)
+        .ok_or(format!("no model named {name:?}; have {:?}", server.arms.iter().map(|a| &a.name).collect::<Vec<_>>()))?;
+    let rows = req["rows"].as_u64().ok_or("`rows` is missing")? as usize;
+    let result_offset = req["result_offset"].as_u64().ok_or("`result_offset` is missing")? as usize;
+    let (items, needed) = layout_of(req)?;
+    let needed = needed.max(result_offset + rows * 8);
+    let shared = attach(attached, req["shm"].as_str().ok_or("`shm` is missing")?, needed)?;
+    if rows == 0 {
+        return Ok(json!({ "ok": true, "rows": 0 }));
+    }
+    let waiting = Instant::now();
+    let mut slot = server.take_slot();
+    server.stats.slot_wait_ns.fetch_add(waiting.elapsed().as_nanos() as u64, Relaxed);
+    let done = (|| -> Result<(), String> {
+        let mut first = 0;
+        while first < rows {
+            let n = (rows - first).min(MAX_ROWS);
+            let copied = Instant::now();
+            fill(&mut slot, shared, &items, first, n)?;
+            server.stats.copy_ns.fetch_add(copied.elapsed().as_nanos() as u64, Relaxed);
+            let on_card = Instant::now();
+            let values = slot.score(arm, n)?;
+            server.stats.gpu_ns.fetch_add(on_card.elapsed().as_nanos() as u64, Relaxed);
+            let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            shared.write_at(result_offset + first * 8, &bytes).map_err(|e| e.to_string())?;
+            first += n;
+        }
+        Ok(())
+    })();
+    server.give_slot(slot);
+    done?;
+    server.stats.requests.fetch_add(1, Relaxed);
+    server.stats.rows.fetch_add(rows as u64, Relaxed);
+    server.stats.handled_ns.fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+    Ok(json!({ "ok": true, "rows": rows }))
+}
+
+/// Op "stages": the same request as `score` (at most MAX_ROWS rows) plus `stage_offset`;
+/// the first net's every step is written there as float32, each at a 64-byte boundary.
+fn stages(server: &Server, req: &Value, attached: &mut HashMap<String, Shared>) -> Result<Value, String> {
+    let name = req["model"].as_str().ok_or("`model` is missing")?;
+    let arm = server.arms.iter().find(|a| a.name == name).ok_or(format!("no model named {name:?}"))?;
+    let rows = req["rows"].as_u64().ok_or("`rows` is missing")? as usize;
+    if rows == 0 || rows > MAX_ROWS {
+        return Err(format!("stages takes 1..={MAX_ROWS} rows"));
+    }
+    let mut at = req["stage_offset"].as_u64().ok_or("`stage_offset` is missing")? as usize;
+    let (items, needed) = layout_of(req)?;
+    let capacity = req["stage_bytes"].as_u64().unwrap_or(0) as usize;
+    let shared = attach(attached, req["shm"].as_str().ok_or("`shm` is missing")?, needed.max(at + capacity))?;
+    let mut slot = server.take_slot();
+    let result = (|| {
+        fill(&mut slot, shared, &items, 0, rows)?;
+        slot.stages(&server.gpu, &arm.nets, rows)
+    })();
+    server.give_slot(slot);
+    let mut listed = Vec::new();
+    for (stage, width, values) in result? {
+        at = (at + 63) & !63;
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        shared.write_at(at, &bytes).map_err(|e| e.to_string())?;
+        listed.push(json!({ "name": stage, "width": width, "offset": at, "count": values.len() }));
+        at += bytes.len();
+    }
+    Ok(json!({ "ok": true, "stages": listed }))
+}
+
+fn handle(server: Arc<Server>, stream: TcpStream) {
+    let _ = stream.set_nodelay(true);
+    let Ok(writer_half) = stream.try_clone() else { return };
+    let mut reader = BufReader::new(stream);
+    let mut writer = writer_half;
+    let mut attached: HashMap<String, Shared> = HashMap::new();
+    let mut q: Option<(BufReader<TcpStream>, TcpStream)> = None;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let request: Value = match serde_json::from_str(line.trim()) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = writeln!(writer, "{}", error_reply(format!("bad request: {e}")));
+                continue;
+            }
+        };
+        let op = request["op"].as_str().unwrap_or("").to_string();
+        let reply = match op.as_str() {
+            "ping" => Ok(json!({ "ok": true, "models": server.arms.iter().map(|a| a.name.clone()).collect::<Vec<_>>() })),
+            "describe" => {
+                let arms: serde_json::Map<String, Value> =
+                    server.arms.iter().map(|a| (a.name.clone(), json!(a.files))).collect();
+                Ok(json!({ "ok": true, "arms": arms }))
+            }
+            "score" | "score_segments" => score(&server, &request, &mut attached),
+            "stages" => stages(&server, &request, &mut attached),
+            "q" | "q_many" | "q_batch" | "describe_q" => forward_q(&server, &mut q, line.trim_end()),
+            other => Err(format!("unknown op {other:?}")),
+        };
+        let reply = reply.unwrap_or_else(error_reply);
+        let mut text = reply.to_string();
+        text.push('\n');
+        if writer.write_all(text.as_bytes()).and_then(|_| writer.flush()).is_err() {
+            break;
+        }
+    }
+}
+
+/// A Q request, line for line, to the Python server and its answer back.
+fn forward_q(
+    server: &Server,
+    link: &mut Option<(BufReader<TcpStream>, TcpStream)>,
+    line: &str,
+) -> Result<Value, String> {
+    let Some(address) = &server.q_forward else {
+        return Err("this server has no Q arm (start it with --q-forward ADDRESS)".into());
+    };
+    if link.is_none() {
+        let stream = TcpStream::connect(address).map_err(|e| format!("Q server at {address}: {e}"))?;
+        let _ = stream.set_nodelay(true);
+        let writer = stream.try_clone().map_err(|e| e.to_string())?;
+        *link = Some((BufReader::new(stream), writer));
+    }
+    let (reader, writer) = link.as_mut().unwrap();
+    let outcome = (|| {
+        writer.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        writer.write_all(b"\n").map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+        let mut reply = String::new();
+        if reader.read_line(&mut reply).map_err(|e| e.to_string())? == 0 {
+            return Err("the Q server closed the connection".to_string());
+        }
+        serde_json::from_str::<Value>(reply.trim()).map_err(|e| e.to_string())
+    })();
+    if outcome.is_err() {
+        *link = None;
+    } else {
+        server.stats.q_forwarded.fetch_add(1, Relaxed);
+    }
+    outcome
+}
+
+#[cfg(windows)]
+fn process_cpu_seconds() -> f64 {
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn GetProcessTimes(p: *mut std::ffi::c_void, c: *mut FileTime, e: *mut FileTime, k: *mut FileTime, u: *mut FileTime) -> i32;
+    }
+    let (mut c, mut e, mut k, mut u) = (FileTime::default(), FileTime::default(), FileTime::default(), FileTime::default());
+    // SAFETY: the pseudo-handle is always valid and the four structs are ours.
+    unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
+    let ticks = |t: &FileTime| ((t.high as u64) << 32 | t.low as u64) as f64 * 1e-7;
+    ticks(&k) + ticks(&u)
+}
+
+#[cfg(not(windows))]
+fn process_cpu_seconds() -> f64 {
+    0.0
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "usage: inference-server --regulation <regulation.json> --arm NAME FILE.rnet [FILE.rnet ...] \
+         [--arm ...] [--q-forward HOST:PORT] [--host H] [--port P] [--slots N] [--dll-dir DIR] \
+         [--report-every SECONDS]"
+    );
+    std::process::exit(2);
+}
+
+pub fn main(args: &[String]) {
+    let mut regulation = None;
+    let mut arm_specs: Vec<(String, Vec<String>)> = Vec::new();
+    let (mut host, mut port, mut slots, mut report) = ("127.0.0.1".to_string(), 0u16, 4usize, 60.0f64);
+    let mut q_forward = None;
+    let mut dll_dir = None;
+    let mut i = 0;
+    let value = |i: usize| args.get(i + 1).cloned().unwrap_or_else(|| usage());
+    while i < args.len() {
+        match args[i].as_str() {
+            "--regulation" => {
+                regulation = Some(value(i));
+                i += 2;
+            }
+            "--arm" => {
+                let name = value(i);
+                let mut files = Vec::new();
+                i += 2;
+                while i < args.len() && !args[i].starts_with("--") {
+                    files.push(args[i].clone());
+                    i += 1;
+                }
+                if files.is_empty() {
+                    usage();
+                }
+                arm_specs.push((name, files));
+            }
+            "--q-forward" => {
+                q_forward = Some(value(i));
+                i += 2;
+            }
+            "--host" => {
+                host = value(i);
+                i += 2;
+            }
+            "--port" => {
+                port = value(i).parse().unwrap_or_else(|_| usage());
+                i += 2;
+            }
+            "--slots" => {
+                slots = value(i).parse().unwrap_or_else(|_| usage());
+                i += 2;
+            }
+            "--dll-dir" => {
+                dll_dir = Some(value(i));
+                i += 2;
+            }
+            "--report-every" => {
+                report = value(i).parse().unwrap_or_else(|_| usage());
+                i += 2;
+            }
+            _ => usage(),
+        }
+    }
+    let (Some(regulation), false) = (regulation, arm_specs.is_empty()) else { usage() };
+    // Where CUDA 12's DLLs are: --dll-dir, else POKEURAOU_CUDA_DLLS, else the bin folder of an
+    // installed CUDA 12 Toolkit (`CUDA_PATH_V12_*`), else whatever PATH already holds.
+    let toolkit = || {
+        std::env::vars()
+            .filter(|(k, _)| k.starts_with("CUDA_PATH_V12"))
+            .map(|(_, v)| format!("{v}{}bin", std::path::MAIN_SEPARATOR))
+            .next()
+    };
+    if let Some(dir) = dll_dir.or_else(|| std::env::var("POKEURAOU_CUDA_DLLS").ok()).or_else(toolkit) {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        std::env::set_var("PATH", format!("{dir}{sep}{path}"));
+    }
+    let started = Instant::now();
+    let reg = Reg::load(&regulation).unwrap_or_else(|e| {
+        eprintln!("regulation: {e}");
+        std::process::exit(1);
+    });
+    let widths = Encoder::new(&reg).widths;
+    let geom = Geometry { m: widths.mons_per_side, wm: widths.mon, ws: widths.side, wf: widths.field };
+    let gpu = Gpu::new(0).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    let v = &gpu.versions;
+    eprintln!(
+        "  GPU {} (compute {}.{}), driver {}.{}, NVRTC {}.{}, cuBLAS {}.{}.{}",
+        v.device,
+        v.capability.0,
+        v.capability.1,
+        v.driver / 1000,
+        (v.driver % 1000) / 10,
+        v.nvrtc.0,
+        v.nvrtc.1,
+        v.cublas / 10000,
+        (v.cublas % 10000) / 100,
+        v.cublas % 100
+    );
+    let stream = gpu.ctx.new_stream().expect("a stream");
+    let mut arms = Vec::new();
+    let mut widest = (0usize, 0usize, 0usize);
+    for (name, files) in &arm_specs {
+        let mut nets = Vec::new();
+        for file in files {
+            let net = rnet::read(file).and_then(|r| Net::upload(&stream, &r)).unwrap_or_else(|e| {
+                eprintln!("arm {name}: {e}");
+                std::process::exit(1);
+            });
+            let w = Slot::widths_of(&net);
+            widest = (widest.0.max(w.0), widest.1.max(w.1), widest.2.max(w.2));
+            nets.push(net);
+        }
+        let sources = nets.iter().map(|n| n.source.clone()).collect();
+        arms.push(Arm { name: name.clone(), files: sources, nets });
+    }
+    stream.synchronize().expect("weights uploaded");
+    let mut pool = Vec::new();
+    for _ in 0..slots {
+        let mut slot = Slot::new(&gpu, geom, arms.len(), widest).unwrap_or_else(|e| {
+            eprintln!("slot: {e}");
+            std::process::exit(1);
+        });
+        for arm in &arms {
+            slot.capture_arm(&gpu, &arm.nets).unwrap_or_else(|e| {
+                eprintln!("capture: {e}");
+                std::process::exit(1);
+            });
+        }
+        pool.push(slot);
+    }
+    let server = Arc::new(Server {
+        gpu,
+        arms,
+        slots: Mutex::new(pool),
+        free: Condvar::new(),
+        q_forward,
+        stats: Stats::default(),
+    });
+    let listener = TcpListener::bind((host.as_str(), port)).unwrap_or_else(|e| {
+        eprintln!("bind: {e}");
+        std::process::exit(1);
+    });
+    let address = listener.local_addr().expect("address");
+    // First line of stdout, as the Python server does.
+    println!("{address}");
+    let _ = std::io::stdout().flush();
+    for arm in &server.arms {
+        eprintln!(
+            "  arm {}: {}{}",
+            arm.name,
+            arm.files.join(", "),
+            if arm.nets.len() > 1 { " (ensemble, logits averaged)" } else { "" }
+        );
+    }
+    eprintln!(
+        "  {} slots x {} graphs a net-set, ready in {:.1} s; Q requests {}",
+        slots,
+        infer_gpu::BUCKETS,
+        started.elapsed().as_secs_f64(),
+        server.q_forward.as_deref().map(|a| format!("forwarded to {a}")).unwrap_or("refused".into())
+    );
+    if report > 0.0 {
+        let server = server.clone();
+        std::thread::spawn(move || {
+            let mut last = (0u64, 0u64, 0.0f64);
+            loop {
+                std::thread::sleep(Duration::from_secs_f64(report));
+                let s = &server.stats;
+                let (req, rows) = (s.requests.load(Relaxed), s.rows.load(Relaxed));
+                let cpu = process_cpu_seconds();
+                let per = |ns: &AtomicU64| ns.load(Relaxed) as f64 / 1e6 / req.max(1) as f64;
+                eprintln!(
+                    "  {req} requests, {rows} rows ({} since the last line); per request {:.2} ms in all, \
+                     {:.2} ms waiting for a slot, {:.2} ms copying, {:.2} ms on the card; Q forwarded {}; \
+                     process CPU {:.1} s (+{:.1})",
+                    req - last.0,
+                    per(&s.handled_ns),
+                    per(&s.slot_wait_ns),
+                    per(&s.copy_ns),
+                    per(&s.gpu_ns),
+                    s.q_forwarded.load(Relaxed),
+                    cpu,
+                    cpu - last.2
+                );
+                last = (req, rows, cpu);
+            }
+        });
+    }
+    for stream in listener.incoming().flatten() {
+        let server = server.clone();
+        std::thread::spawn(move || handle(server, stream));
+    }
+}

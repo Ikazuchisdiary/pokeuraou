@@ -35,6 +35,8 @@ mod fixedpoint;
 mod held;
 mod hiddenbench;
 mod id;
+mod infer_gpu;
+mod infer_server;
 mod inert;
 mod legal;
 mod level_struggle;
@@ -50,6 +52,7 @@ mod par;
 mod position;
 mod prep;
 mod reg;
+mod rnet;
 mod residual;
 mod playgame;
 mod replacenode;
@@ -88,6 +91,7 @@ fn main() {
         Some("clones") => clones_main(&args[2..]),
         Some("bind-bench") => bind_bench_main(&args[2..]),
         Some("residual-features") => residual::main(&args[2..]),
+        Some("inference-server") => infer_server::main(&args[2..]),
         _ => {
             eprintln!(
                 "usage:\n  {0} damage <regulation.json> <cases.json> [repeats]\n  \
