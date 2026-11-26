@@ -112,6 +112,7 @@ class RustServer:
         tmp_path: Path,
         slots: int = 2,
         q_arms: dict[str, Path] | None = None,
+        hp_arms: tuple[str, ...] = (),
     ) -> None:
         exe = rustnode.binary_path()
         assert exe.exists(), f"{exe} is not built: cd rust && cargo build --release"
@@ -124,6 +125,8 @@ class RustServer:
             command += ["--arm", name, *map(str, files)]
         for name, file in (q_arms or {}).items():
             command += ["--q-arm", name, str(file)]
+        for name in hp_arms:
+            command += ["--hp-share-arm", name]
         self.log = (tmp_path / "server.log").open("w")
         self.process = subprocess.Popen(  # noqa: S603
             command, stdout=subprocess.PIPE, stderr=self.log, text=True
@@ -503,3 +506,50 @@ def test_describe_q_and_a_missing_q_arm(q_served):
     assert about["sha256"] == ["abc"]
     missing = _ask(server.address, {"op": "describe_q", "model": "nope"})
     assert not missing["ok"] and "nope" in missing["error"]
+
+
+# ------------------------------------------------------------------ the hp-share arm
+
+
+@pytest.fixture(scope="module")
+def hp_served(tmp_path_factory):
+    """A server of one hp-share arm and no net (IKA-460 step 4)."""
+    server = RustServer({}, tmp_path_factory.mktemp("rust-hp"), hp_arms=("hp-share",))
+    yield server
+    server.close()
+
+
+def _hp_share(server, encoder, encoded: Encoded) -> np.ndarray:
+    with RemoteValue(server.address, "hp-share", encoder, buffer_bytes=32 << 20) as remote:
+        return remote.from_encoded(encoded)
+
+
+def test_the_hp_share_arm_is_the_python_hp_share(reg, encoder, hp_served):
+    """The arm reads `payoff.HP_SHARE` off the encoding: the same numbers as the objective's own
+    on real positions (some with damage and a faint), and as the numpy stand-in that the tests
+    serve on fuzzed rows (random HP, max HP and fainted flags)."""
+    from pokeuraou.payoff import HP_SHARE
+
+    from ._served import hp_share_model
+
+    positions = _positions(reg, 40)
+    for index, pos in enumerate(positions):
+        for side in (0, 1):
+            mons = pos.sides[side].pokemon
+            for k in range(min(index % 4, len(mons))):
+                mons[k].hp = max(0, mons[k].maxhp * (k + 1) // 5)
+                mons[k].fainted = mons[k].hp == 0
+    encoded = encoder.encode_positions(positions)
+    got = _hp_share(hp_served, encoder, encoded)
+    assert np.array_equal(got, hp_share_model(encoder)(encoded))
+    assert np.abs(got - np.array([HP_SHARE.batch([p])[0] for p in positions])).max() < 1e-12
+    # A control that can fail: the damaged positions are not all at 1/2.
+    assert len(set(np.round(got, 6).tolist())) > 3
+    net = _net(encoder, CONFIGS["bind"], seed=3)
+    fuzzed = _fuzz(encoded, net, encoder, rows=300, seed=5)
+    assert np.array_equal(_hp_share(hp_served, encoder, fuzzed), hp_share_model(encoder)(fuzzed))
+
+
+def test_the_hp_share_arm_is_named_by_ping_and_describe(hp_served):
+    assert _ask(hp_served.address, {"op": "ping"})["models"] == ["hp-share"]
+    assert _ask(hp_served.address, {"op": "describe"})["arms"] == {"hp-share": ["hp-share"]}

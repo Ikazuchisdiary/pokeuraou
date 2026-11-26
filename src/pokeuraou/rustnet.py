@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -206,11 +207,14 @@ def server_command(
     arms: dict[str, list[str | Path]],
     q_arms: dict[str, str | Path],
     out_dir: str | Path,
+    hp_arms: Sequence[str] = (),
 ) -> list[str]:
     """The command of one `pokeuraou-damage inference-server`, the nets exported first.
 
     `arms` maps an arm's name to its `.pt` files (several: an ensemble, logits averaged);
-    `q_arms` maps a Q arm's name to its `.pt`. The `.rnet` files go to `out_dir` (reused when
+    `q_arms` maps a Q arm's name to its `.pt`; `hp_arms` names arms with no net, which answer
+    `payoff.HP_SHARE` read off the encoding (IKA-460 step 4, the M-C origin's leaf). The
+    `.rnet` files go to `out_dir` (reused when
     their source hash is unchanged). The CUDA 12 DLLs are the server's own search
     (`--dll-dir`, `POKEURAOU_CUDA_DLLS`, `CUDA_PATH_V12*`, the Toolkit's folder); the `.venv`'s
     torch's are passed only when none of those is set.
@@ -230,6 +234,8 @@ def server_command(
     if not exe.exists():
         raise SystemExit(f"{exe} is not built: cd rust && cargo build --release")
     command = [str(exe), "inference-server", "--regulation", str(regulation_dir() / f"{regulation}.json")]
+    for name in hp_arms:
+        command += ["--hp-share-arm", name]
     try:
         for name, files in arms.items():
             rnets = [ensure_exported(f, regulation, Path(out_dir) / "rnet") for f in files]

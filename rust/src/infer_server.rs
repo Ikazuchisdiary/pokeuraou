@@ -58,6 +58,8 @@ struct Server {
     gpu: Gpu,
     arms: Vec<Arm>,
     q_arms: Vec<QArm>,
+    /// Arms with no net (`--hp-share-arm NAME`): `payoff.HP_SHARE` read off the encoding.
+    hp_arms: Vec<String>,
     q_slots: Mutex<Vec<QSlot>>,
     q_free: Condvar,
     geometry: Geometry,
@@ -294,9 +296,84 @@ fn attach<'a>(
     Ok(attached.get_mut(name).unwrap())
 }
 
+/// `payoff.HP_SHARE` of one row, from the encoding (IKA-460 step 4): each side's remaining HP
+/// (the live members' HP, each rounded as `encode.py` rounds it) over its total, side 0's share
+/// of the two; 1/2 when neither has any. `mon` is the row's `[2][m][wm]` floats, `mask` its
+/// `[2][m]`.
+fn hp_share_row(mon: &[f32], mask: &[f32], m: usize, wm: usize) -> f64 {
+    use crate::encode::{MON_FAINTED, MON_HP_FRACTION, MON_HP_SCALE, MON_MAXHP_SCALED};
+    let mut remaining = [0.0f64; 2];
+    for (side, share) in remaining.iter_mut().enumerate() {
+        let (mut live, mut total) = (0.0f64, 0.0f64);
+        for k in 0..m {
+            if mask[side * m + k] <= 0.0 {
+                continue;
+            }
+            let row = &mon[(side * m + k) * wm..(side * m + k + 1) * wm];
+            let maxhp = (row[MON_MAXHP_SCALED] as f64 * MON_HP_SCALE).round_ties_even();
+            let hp = (row[MON_HP_FRACTION] as f64 * maxhp).round_ties_even();
+            total += maxhp;
+            if row[MON_FAINTED] <= 0.0 {
+                live += hp;
+            }
+        }
+        *share = if total > 0.0 { live / total } else { 0.0 };
+    }
+    let both = remaining[0] + remaining[1];
+    if both > 0.0 { remaining[0] / both } else { 0.5 }
+}
+
+/// Op `score` on an hp-share arm: no net, the answer is read off the shared block's `mon` and
+/// `mask` arrays (rows of `<f4`), on the CPU.
+fn score_hp_share(
+    server: &Server,
+    req: &Value,
+    attached: &mut HashMap<String, Shared>,
+) -> Result<Value, String> {
+    let rows = req["rows"].as_u64().ok_or("`rows` is missing")? as usize;
+    let result_offset = req["result_offset"].as_u64().ok_or("`result_offset` is missing")? as usize;
+    let (items, needed) = layout_of(req)?;
+    let needed = needed.max(result_offset + rows * 8);
+    let shared = attach(attached, req["shm"].as_str().ok_or("`shm` is missing")?, needed)?;
+    let (m, wm) = (server.geometry.m, server.geometry.wm);
+    let (mon_item, mask_item) = (&items[4], &items[5]);
+    if mon_item.dtype != "<f4" || mask_item.dtype != "<f4" {
+        return Err(format!("hp-share reads `<f4` mon and mask, not {} and {}", mon_item.dtype, mask_item.dtype));
+    }
+    if mon_item.shape.iter().skip(1).product::<usize>() != 2 * m * wm {
+        return Err(format!("`mon` has rows of {} values; this server's encoder has {}",
+                           mon_item.shape.iter().skip(1).product::<usize>(), 2 * m * wm));
+    }
+    let mut mon_bytes = vec![0u8; rows * 2 * m * wm * 4];
+    let mut mask_bytes = vec![0u8; rows * 2 * m * 4];
+    shared.read_at(mon_item.offset, &mut mon_bytes).map_err(|e| e.to_string())?;
+    shared.read_at(mask_item.offset, &mut mask_bytes).map_err(|e| e.to_string())?;
+    let floats = |bytes: &[u8]| -> Vec<f32> {
+        bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
+    };
+    let (mon, mask) = (floats(&mon_bytes), floats(&mask_bytes));
+    let mut out = Vec::with_capacity(rows * 8);
+    for r in 0..rows {
+        let value = hp_share_row(
+            &mon[r * 2 * m * wm..(r + 1) * 2 * m * wm],
+            &mask[r * 2 * m..(r + 1) * 2 * m],
+            m,
+            wm,
+        );
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    shared.write_at(result_offset, &out).map_err(|e| e.to_string())?;
+    server.stats.requests.fetch_add(1, Relaxed);
+    server.stats.rows.fetch_add(rows as u64, Relaxed);
+    Ok(json!({ "ok": true, "rows": rows }))
+}
+
 fn score(server: &Server, req: &Value, attached: &mut HashMap<String, Shared>) -> Result<Value, String> {
     let started = Instant::now();
     let name = req["model"].as_str().ok_or("`model` is missing")?;
+    if server.hp_arms.iter().any(|a| a == name) {
+        return score_hp_share(server, req, attached);
+    }
     let arm = server
         .arms
         .iter()
@@ -393,10 +470,14 @@ fn handle(server: Arc<Server>, stream: TcpStream) {
         };
         let op = request["op"].as_str().unwrap_or("").to_string();
         let reply = match op.as_str() {
-            "ping" => Ok(json!({ "ok": true, "models": server.arms.iter().map(|a| a.name.clone()).collect::<Vec<_>>() })),
+            "ping" => Ok(json!({ "ok": true, "models": server.arms.iter().map(|a| a.name.clone())
+                .chain(server.hp_arms.iter().cloned()).collect::<Vec<_>>() })),
             "describe" => {
-                let arms: serde_json::Map<String, Value> =
+                let mut arms: serde_json::Map<String, Value> =
                     server.arms.iter().map(|a| (a.name.clone(), json!(a.files))).collect();
+                for name in &server.hp_arms {
+                    arms.insert(name.clone(), json!(["hp-share"]));
+                }
                 Ok(json!({ "ok": true, "arms": arms }))
             }
             "score" | "score_segments" => score(&server, &request, &mut attached),
@@ -478,7 +559,7 @@ fn process_cpu_seconds() -> f64 {
 fn usage() -> ! {
     eprintln!(
         "usage: inference-server --regulation <regulation.json> --arm NAME FILE.rnet [FILE.rnet ...] \
-         [--arm ...] [--q-forward HOST:PORT] [--host H] [--port P] [--slots N] [--dll-dir DIR] \
+         [--arm ...] [--hp-share-arm NAME] [--q-forward HOST:PORT] [--host H] [--port P] [--slots N] [--dll-dir DIR] \
          [--report-every SECONDS]"
     );
     std::process::exit(2);
@@ -487,6 +568,7 @@ fn usage() -> ! {
 pub fn main(args: &[String]) {
     let mut regulation = None;
     let mut arm_specs: Vec<(String, Vec<String>)> = Vec::new();
+    let mut hp_specs: Vec<String> = Vec::new();
     // POKEURAOU_RUST_SERVER_REPORT: seconds between the report lines, for a run that is shorter
     // than a minute (a launcher does not pass --report-every).
     let every = std::env::var("POKEURAOU_RUST_SERVER_REPORT").ok().and_then(|s| s.parse().ok());
@@ -515,6 +597,10 @@ pub fn main(args: &[String]) {
                     usage();
                 }
                 arm_specs.push((name, files));
+            }
+            "--hp-share-arm" => {
+                hp_specs.push(value(i));
+                i += 2;
             }
             "--q-forward" => {
                 q_forward = Some(value(i));
@@ -548,7 +634,7 @@ pub fn main(args: &[String]) {
             _ => usage(),
         }
     }
-    let (Some(regulation), false) = (regulation, arm_specs.is_empty()) else { usage() };
+    let (Some(regulation), false) = (regulation, arm_specs.is_empty() && hp_specs.is_empty()) else { usage() };
     // Where CUDA 12's DLLs are: --dll-dir, else POKEURAOU_CUDA_DLLS, else the bin folder of an
     // installed CUDA 12 Toolkit (`CUDA_PATH_V12_*`), else whatever PATH already holds.
     let toolkit = || {
@@ -628,7 +714,8 @@ pub fn main(args: &[String]) {
     }
     stream.synchronize().expect("weights uploaded");
     let mut pool = Vec::new();
-    for _ in 0..slots {
+    // A server of hp-share arms alone has no net to score on the card: no slots.
+    for _ in 0..(if arms.is_empty() { 0 } else { slots }) {
         let mut slot = Slot::new(&gpu, geom, arms.len(), widest).unwrap_or_else(|e| {
             eprintln!("slot: {e}");
             std::process::exit(1);
@@ -671,6 +758,7 @@ pub fn main(args: &[String]) {
         gpu,
         arms,
         q_arms,
+        hp_arms: hp_specs,
         q_slots: Mutex::new(q_pool),
         q_free: Condvar::new(),
         geometry: geom,
@@ -694,6 +782,9 @@ pub fn main(args: &[String]) {
             arm.files.join(", "),
             if arm.nets.len() > 1 { " (ensemble, logits averaged)" } else { "" }
         );
+    }
+    for name in &server.hp_arms {
+        eprintln!("  arm {name}: hp-share (read off the encoding, no net)");
     }
     for arm in &server.q_arms {
         eprintln!("  Q arm {}: {} (sha256 {})", arm.name, arm.file, &arm.net.sha256.chars().take(12).collect::<String>());
@@ -739,5 +830,52 @@ pub fn main(args: &[String]) {
     for stream in listener.incoming().flatten() {
         let server = server.clone();
         std::thread::spawn(move || handle(server, stream));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hp_share_row;
+    use crate::encode::{MON_FAINTED, MON_HP_FRACTION, MON_HP_SCALE, MON_MAXHP_SCALED};
+
+    const WM: usize = MON_FAINTED + 2;
+
+    /// One row of `m` members a side: `(hp fraction, max HP, fainted)` per member.
+    fn row(sides: [&[(f32, f64, bool)]; 2], m: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut mon = vec![0.0f32; 2 * m * WM];
+        let mut mask = vec![0.0f32; 2 * m];
+        for (s, members) in sides.iter().enumerate() {
+            for (k, (fraction, maxhp, fainted)) in members.iter().enumerate() {
+                let at = (s * m + k) * WM;
+                mon[at + MON_HP_FRACTION] = *fraction;
+                mon[at + MON_MAXHP_SCALED] = (*maxhp / MON_HP_SCALE) as f32;
+                mon[at + MON_FAINTED] = if *fainted { 1.0 } else { 0.0 };
+                mask[s * m + k] = 1.0;
+            }
+        }
+        (mon, mask)
+    }
+
+    #[test]
+    fn the_share_is_the_live_hp_over_the_total_hp_of_each_side() {
+        // Side 0: 100 of 100 and a fainted 200; side 1: half of 200 and 100 of 100.
+        let (mon, mask) = row(
+            [&[(1.0, 100.0, false), (0.0, 200.0, true)], &[(0.5, 200.0, false), (1.0, 100.0, false)]],
+            4,
+        );
+        let got = hp_share_row(&mon, &mask, 4, WM);
+        let (a, b) = (100.0 / 300.0, 200.0 / 300.0);
+        assert!((got - a / (a + b)).abs() < 1e-12, "{got}");
+        // The control that can fail: the fainted member's HP does not count, a live one's does.
+        let (mon, mask) = row([&[(1.0, 100.0, false)], &[(1.0, 100.0, false)]], 4);
+        assert_eq!(hp_share_row(&mon, &mask, 4, WM), 0.5);
+        let (mon, mask) = row([&[(0.5, 100.0, false)], &[(1.0, 100.0, false)]], 4);
+        assert!(hp_share_row(&mon, &mask, 4, WM) < 0.5);
+    }
+
+    #[test]
+    fn nothing_alive_on_either_side_is_one_half() {
+        let (mon, mask) = row([&[(0.0, 100.0, true)], &[(0.0, 100.0, true)]], 4);
+        assert_eq!(hp_share_row(&mon, &mask, 4, WM), 0.5);
     }
 }

@@ -54,6 +54,15 @@ pub const VOLATILES: [&str; 28] = [
 
 pub const STATUSES: [&str; 6] = ["brn", "par", "slp", "frz", "psn", "tox"];
 
+/// The columns of a Pokemon's row that `payoff.HP_SHARE` reads (IKA-460 step 4): the HP
+/// fraction, the max HP over `HP_SCALE`, and the fainted flag (after the two, the stats, the
+/// SP, the boosts, the status block and the three active flags, as `encode_mon` lays them).
+pub const MON_HP_FRACTION: usize = 0;
+pub const MON_MAXHP_SCALED: usize = 1;
+pub const MON_FAINTED: usize = 2 + 6 + 6 + BOOST_IDS.len() + 1 + STATUSES.len() + 3;
+/// `encode.py`'s `HP_SCALE`, which the max HP column is divided by.
+pub const MON_HP_SCALE: f64 = HP_SCALE;
+
 pub const WEATHERS: [&str; 8] = [
     "sunnyday",
     "raindance",

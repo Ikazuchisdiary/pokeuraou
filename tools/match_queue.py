@@ -67,11 +67,10 @@ def check_other_arm(args: argparse.Namespace, extra: list[str]) -> None:
             "--baseline-hp-share contradicts the baseline leaf also given; one of them is "
             "not what you meant."
         )
-    if args.baseline_hp_share:
+    if args.baseline_hp_share and not args.served:
         raise SystemExit(
-            "--baseline-hp-share cannot be used now: a game's nodes are scored by the port on "
-            "the inference server, and the hp-share leaf is to come back as an arm of the Rust "
-            "inference server in IKA-460 step 4 (until then there is no hp-share leaf to serve)"
+            "--baseline-hp-share is the inference server's hp-share arm: it needs --served "
+            "(IKA-460 step 4)"
         )
     if not args.baseline_hp_share and not named:
         raise SystemExit(
@@ -314,7 +313,8 @@ def main() -> None:
     server_logs: list[Path] = []
     served_at: list[str] = []
 
-    def launch(arms: dict[str, list[str]], qs: dict[str, str], tag: str, count: int) -> list[str]:
+    def launch(arms: dict[str, list[str]], qs: dict[str, str], tag: str, count: int,
+               hp_arms: tuple[str, ...] = ()) -> list[str]:
         """`count` Rust inference servers holding `arms` and the Qs `qs`; their addresses (each
         server's first line of stdout)."""
         server_log = out_dir / "logs"
@@ -324,7 +324,7 @@ def main() -> None:
             # IKA-461: every arm and every Q in the Rust server.
             from pokeuraou.rustnet import server_command
 
-            command = server_command(pool_regulation, arms, qs, out_dir)
+            command = server_command(pool_regulation, arms, qs, out_dir, hp_arms)
             log = server_log / f"inference{tag}{index}.log"
             process = subprocess.Popen(  # noqa: S603
                 command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE,
@@ -357,7 +357,8 @@ def main() -> None:
         if pool_regulation is None or args.device != "cuda":
             raise SystemExit("the inference server is the Rust one: an M-C pool match (--pool) "
                              "on CUDA (IKA-460)")
-        served_at = launch(arms, qs, "", args.servers)
+        served_at = launch(arms, qs, "", args.servers,
+                           ("hp-share",) if args.baseline_hp_share else ())
         print(f"  inference: {', '.join(served_at)} (workers hold no model)",
               file=sys.stderr, flush=True)
 

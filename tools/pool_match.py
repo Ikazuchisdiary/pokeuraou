@@ -199,12 +199,10 @@ def _q_delta(before: dict[str, dict[str, int]], label: str) -> tuple[int, int]:
             now.get("cells", 0) - was.get("cells", 0))
 
 
-#: What `--baseline-hp-share` says until the hp-share arm is back on the Rust inference server.
-HP_SHARE_STOPPED = (
-    "--baseline-hp-share cannot be used now: a game's nodes are scored by the port on the "
-    "inference server, and the hp-share leaf is to come back as an arm of the Rust inference "
-    "server in IKA-460 step 4 (until then there is no hp-share leaf to serve)"
-)
+#: The inference server's arm that answers `payoff.HP_SHARE` (`inference-server --hp-share-arm`,
+#: IKA-460 step 4). A game's nodes are scored by the port on the server, so hp-share is a served
+#: leaf like any other.
+HP_SHARE_ARM = "hp-share"
 
 
 def check_other_arm(args: argparse.Namespace, error: Callable[[str], object]) -> None:
@@ -221,7 +219,12 @@ def check_other_arm(args: argparse.Namespace, error: Callable[[str], object]) ->
               f"{args.baseline_inference_arm or [str(p) for p in args.baseline]}: "
               "one of them is not what you meant")
     if args.baseline_hp_share:
-        error(HP_SHARE_STOPPED)
+        if args.inference is None:
+            error("--baseline-hp-share is the server's arm "
+                  f"{HP_SHARE_ARM!r}: it needs --inference (the server started with "
+                  "--hp-share-arm)")
+        else:
+            args.baseline_inference_arm = HP_SHARE_ARM
     if not args.baseline_hp_share and not named:
         error("the other arm's leaf is not named: pass --baseline (loaded here) or "
               "--baseline-inference-arm (on a server), or --baseline-hp-share to play "
@@ -517,8 +520,10 @@ def main(argv: list[str] | None = None) -> None:
         bench_oracle=args.bench_oracle,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
-    if baseline is None:
-        other = PoolArm(name=HP_SHARE.name, evaluate=None, solver=None,
+    if args.baseline_hp_share or baseline is None:
+        # The M-C origin: no leaf of its own to solve a selection with, so the selection is
+        # drawn; its nodes are scored by the server's hp-share arm.
+        other = PoolArm(name=HP_SHARE.name, evaluate=baseline, solver=None,
                         limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
                         rank_fill=args.baseline_rank_fill,
                         bench_drop=args.baseline_bench_drop,

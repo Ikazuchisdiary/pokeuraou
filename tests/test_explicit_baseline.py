@@ -66,15 +66,22 @@ def test_the_worker_refuses_hp_share_beside_a_leaf(tmp_path, monkeypatch, capsys
     assert "contradicts" in capsys.readouterr().err
 
 
-def test_the_worker_stops_at_hp_share_until_it_is_a_served_arm(tmp_path, monkeypatch, capsys) -> None:  # noqa: ANN001
-    """`--baseline-hp-share` says why it cannot be used now (IKA-460: the hp-share leaf is to
-    come back as an arm of the Rust inference server) and plays nothing."""
+def test_the_worker_takes_hp_share_from_the_servers_arm(tmp_path, monkeypatch, capsys) -> None:  # noqa: ANN001
+    """IKA-460 step 4: `--baseline-hp-share` is the inference server's hp-share arm, so a worker
+    without `--inference` stops and says so; with one, the other arm is that server arm."""
     tool, argv, out = _worker(tmp_path, monkeypatch)
     with pytest.raises(SystemExit) as stopped:
         tool.main([*argv, "--baseline-hp-share"])
     assert stopped.value.code == 2
-    assert "IKA-460 step 4" in capsys.readouterr().err
+    assert "--inference" in capsys.readouterr().err
     assert not out.exists()
+    # With a server named, the check names the arm the baseline is read from.
+    args = tool.argparse.Namespace(
+        baseline=None, baseline_inference_arm=None, baseline_hp_share=True,
+        inference="127.0.0.1:1",
+    )
+    tool.check_other_arm(args, lambda text: pytest.fail(text))
+    assert args.baseline_inference_arm == tool.HP_SHARE_ARM == "hp-share"
 
 
 # ------------------------------------------------------------------ the queue driver
@@ -109,11 +116,32 @@ def test_the_driver_refuses_an_unnamed_other_arm(tmp_path, monkeypatch, pool_fil
     assert "--baseline" in code
 
 
-def test_the_driver_stops_at_hp_share(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
+def test_the_driver_gives_the_servers_an_hp_share_arm(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
+    """`--baseline-hp-share` needs `--served`; with it every server is started with an hp-share
+    arm and the worker is told `--baseline-hp-share` (the control: no flag, no arm)."""
+    from pokeuraou import rustnet
+
     code, command = _driver(tmp_path, monkeypatch,
                             ["--pool", pool_file, "--hide-bench", "--baseline-hp-share"])
     assert command is None
-    assert isinstance(code, str) and "IKA-460 step 4" in code
+    assert isinstance(code, str) and "--served" in code
+    seen: list[tuple[str, ...]] = []
+
+    def fake_server_command(regulation, arms, qs, out_dir, hp_arms=()):  # noqa: ANN001, ANN202
+        seen.append(tuple(hp_arms))
+        return [sys.executable, "-c", "print('127.0.0.1:1', flush=True)"]
+
+    monkeypatch.setattr(rustnet, "server_command", fake_server_command)
+    code, command = _driver(
+        tmp_path, monkeypatch, ["--pool", pool_file, "--hide-bench", "--served", "--servers", "1",
+                                "--baseline-hp-share"])
+    assert code == 0 and seen == [("hp-share",)]
+    assert "--baseline-hp-share" in command and "--inference" in command
+    seen.clear()
+    code, command = _driver(
+        tmp_path, monkeypatch, ["--pool", pool_file, "--hide-bench", "--served", "--servers", "1",
+                                "--baseline", "b.pt"])
+    assert code == 0 and seen == [()] and "--baseline-hp-share" not in command
 
 
 def test_an_explicit_baseline_is_passed_as_before(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
