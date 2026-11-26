@@ -408,7 +408,7 @@ fn switch_target<'p>(side: &'p crate::position::Side, queued: &QueuedAction) -> 
 /// Pokemon took no part in the turn up to the interrupt, so nothing else in the continuation
 /// refers to it except a queued switch into its slot, which names its target by species
 /// first -- and the true species would find nobody.
-fn paused_in<'a>(paused: Suspended<'a>, position: Position, side: usize) -> Suspended<'a> {
+pub(crate) fn paused_in<'a>(paused: Suspended<'a>, position: Position, side: usize) -> Suspended<'a> {
     let Suspended { probability, mut turn, remaining } = paused;
     let before = turn.pos.sides[side].clone();
     let after = position.sides[side].clone();
@@ -536,7 +536,7 @@ fn turn_command(reg: &Reg, value: &Value) -> Result<Value, String> {
     Ok(out)
 }
 
-fn slot_action_json(action: &SlotAction) -> Value {
+pub(crate) fn slot_action_json(action: &SlotAction) -> Value {
     match action {
         SlotAction::Move { slot, move_id, target, mega } => json!({
             "kind": "move", "slot": slot, "moveId": move_id.as_str(), "target": target, "mega": mega,
@@ -963,29 +963,67 @@ fn alternatives_of<'a>(
     reg: &'a Reg,
     paused: &Suspended<'a>,
 ) -> Result<Option<(usize, Vec<(Vec<SlotAction>, TurnResult<'a>)>)>, String> {
-    let owed = self_switches_needed(&paused.turn.pos);
-    let sides: Vec<usize> = (0..2).filter(|i| owed[*i].iter().any(|f| *f)).collect();
-    let Some(&chooser) = sides.first() else {
+    alternatives_wanted(reg, paused, None)
+}
+
+/// `alternatives_of` resuming only the options in `wanted` (None: all), the others left out
+/// of the list as `None` so the indices stay the options' own (IKA-458 stage 3.2).
+pub(crate) fn alternatives_wanted<'a>(
+    reg: &'a Reg,
+    paused: &Suspended<'a>,
+    wanted: Option<&[usize]>,
+) -> Result<Option<(usize, Vec<(Vec<SlotAction>, TurnResult<'a>)>)>, String> {
+    let Some((chooser, options)) = replacement_choices(&paused.turn.pos) else {
         return Ok(None);
     };
+    let mut out = Vec::new();
+    for (k, option) in options.into_iter().enumerate() {
+        if wanted.is_some_and(|w| !w.contains(&k)) {
+            // Not resumed: an empty result keeps the option's place.
+            out.push((option, TurnResult {
+                branches: Vec::new(),
+                exact: true,
+                suspended: Vec::new(),
+                unmodelled: Default::default(),
+            }));
+            continue;
+        }
+        let resumed = resume_choice(reg, paused, chooser, &option)?;
+        out.push((option, resumed));
+    }
+    Ok(Some((chooser, out)))
+}
+
+/// Who owes the replacement at a pause and every option they could send in.
+pub(crate) fn replacement_choices(pos: &Position) -> Option<(usize, Vec<Vec<SlotAction>>)> {
+    let owed = self_switches_needed(pos);
+    let chooser = (0..2).find(|i| owed[*i].iter().any(|f| *f))?;
+    Some((chooser, replacement_options(pos, chooser, owed[chooser])))
+}
+
+/// The rest of the turn when `chooser` sends in `option` and the other side passes.
+pub(crate) fn resume_choice<'a>(
+    reg: &'a Reg,
+    paused: &Suspended<'a>,
+    chooser: usize,
+    option: &[SlotAction],
+) -> Result<TurnResult<'a>, String> {
+    let owed = self_switches_needed(&paused.turn.pos);
+    let both = (0..2).filter(|i| owed[*i].iter().any(|f| *f)).count() > 1;
     let other = 1 - chooser;
     let passes: Vec<SlotAction> = (0..paused.turn.pos.sides[other].active.len())
         .map(|slot| SlotAction::Pass { slot })
         .collect();
-    let mut out = Vec::new();
-    for option in replacement_options(&paused.turn.pos, chooser, owed[chooser]) {
-        let choices = if chooser == 0 {
-            [option.clone(), passes.clone()]
-        } else {
-            [passes.clone(), option.clone()]
-        };
-        let mut resumed = resume_turn(reg, paused, &choices)?;
-        if sides.len() > 1 {
-            resumed.unmodelled.insert("simultaneous mid-turn replacements".into());
-        }
-        out.push((option, resumed));
+    let choices = if chooser == 0 {
+        [option.to_vec(), passes]
+    } else {
+        [passes, option.to_vec()]
+    };
+    let mut resumed = resume_turn(reg, paused, &choices)?;
+    if both {
+        resumed.unmodelled.insert("simultaneous mid-turn replacements".into());
     }
-    Ok(Some((chooser, out)))
+    Ok(resumed)
 }
 
 /// Python's `port.turn_leaves` over the port's own turn: every leaf in the same order (no

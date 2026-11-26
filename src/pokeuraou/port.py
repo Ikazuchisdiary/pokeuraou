@@ -152,12 +152,14 @@ def advance(
     actions: Sequence[SideAction],
     budget: Budget,
     rng: Any,  # noqa: ANN401 - numpy.random.Generator
+    self_switch: dict[str, Any] | None = None,
 ) -> rustnode.AdvancedTurn:
     """IKA-458 stage 3.1: `weights`, the draw among them from `rng` (numpy's `choice`, done over
-    there from its PCG64 state, which is set to the state after) and `branch`, in one request."""
+    there from its PCG64 state, which is set to the state after) and `branch`, in one request.
+    With `self_switch` (stage 3.2) a drawn pause is carried on over there to the turn's end."""
 
     def call(node: RustNode) -> rustnode.AdvancedTurn | str:
-        answer = node.advance_turn(pos, list(actions), budget, rng)
+        answer = node.advance_turn(pos, list(actions), budget, rng, self_switch)
         if answer is None:
             raise _refused(node, "a turn")
         return answer

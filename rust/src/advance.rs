@@ -109,7 +109,7 @@ impl Pcg64 {
         m >> 32
     }
 
-    fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         json!({ "state": format!("{:x}", self.state), "inc": format!("{:x}", self.inc) })
     }
 
@@ -191,7 +191,7 @@ fn seed_sequence_state(entropy: &[u64]) -> [u64; 4] {
 
 /// numpy's `Generator.choice(len(counts), p=counts / counts.sum())`: the index, or why numpy
 /// would have raised. The caller has checked that the total is positive.
-fn choice(counts: &[f64], rng: &mut Pcg64) -> Result<usize, String> {
+pub(crate) fn choice(counts: &[f64], rng: &mut Pcg64) -> Result<usize, String> {
     let total = numpy_sum(counts);
     let p: Vec<f64> = counts.iter().map(|c| c / total).collect();
     choose_p(&p, rng)
@@ -221,21 +221,32 @@ pub(crate) fn choose_p(p: &[f64], rng: &mut Pcg64) -> Result<usize, String> {
     Ok(cdf.partition_point(|c| *c <= u).min(cdf.len() - 1))
 }
 
-pub fn advance_turn(reg: &Reg, value: &Value) -> Value {
+pub fn advance_turn(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Value {
     let Some(mut rng) = Pcg64::from_json(&value["rng"]) else {
         return json!({ "fault": "advanceTurn without a PCG64 state" });
     };
-    let turn = match crate::node::resolve_fresh(reg, value, String::new()) {
-        Err(refused) => return refused,
-        Ok(turn) => turn,
+    // IKA-458 stage 3.2: with `selfSwitch` a drawn pause is carried on here, node by node,
+    // to the turn's end (`selfswitch.rs`).
+    let context = match value.get("selfSwitch").filter(|c| !c.is_null()) {
+        None => None,
+        Some(c) => match crate::selfswitch::Context::from_json(c) {
+            Ok(context) => Some(context),
+            Err(why) => return json!({ "fault": why }),
+        },
     };
-    let branches = turn.weights.len();
-    let counts: Vec<f64> = turn.weights.iter().chain(turn.paused.iter()).copied().collect();
+    let mut result = match crate::node::resolve_raw(reg, value) {
+        Err(refused) => return refused,
+        Ok(result) => result,
+    };
+    let weights: Vec<f64> = result.branches.iter().map(|b| b.probability).collect();
+    let paused: Vec<f64> = result.suspended.iter().map(|s| s.probability).collect();
+    let branches = weights.len();
+    let counts: Vec<f64> = weights.iter().chain(paused.iter()).copied().collect();
     let mut answer = json!({
-        "branches": turn.weights,
-        "suspended": turn.paused,
-        "exact": turn.exact,
-        "unmodelled": turn.unmodelled,
+        "branches": weights,
+        "suspended": paused,
+        "exact": result.exact,
+        "unmodelled": result.unmodelled.iter().cloned().collect::<Vec<_>>(),
         "index": Value::Null,
         "position": Value::Null,
     });
@@ -252,9 +263,23 @@ pub fn advance_turn(reg: &Reg, value: &Value) -> Value {
     answer["index"] = json!(index);
     answer["rng"] = rng.to_json();
     if index < branches {
-        let landed = &turn.positions[index];
+        let landed = &result.branches[index].position;
         answer["needed"] = json!(crate::resolve::commands::replacements_needed(landed));
         answer["position"] = landed.to_json();
+    } else if let Some(context) = context {
+        let first = result.suspended.swap_remove(index - branches);
+        match crate::selfswitch::run(reg, encoder, &context, first, &mut rng) {
+            Err(crate::selfswitch::Failure::Fault(why)) => return json!({ "fault": why }),
+            Err(crate::selfswitch::Failure::Answer(refusal)) => return refusal,
+            Ok(chain) => {
+                answer["rng"] = rng.to_json();
+                if let Some(landed) = &chain.position {
+                    answer["needed"] = json!(crate::resolve::commands::replacements_needed(landed));
+                    answer["position"] = landed.to_json();
+                }
+                answer["chain"] = chain.to_json();
+            }
+        }
     }
     answer
 }

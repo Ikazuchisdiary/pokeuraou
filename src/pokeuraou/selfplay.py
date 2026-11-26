@@ -2147,7 +2147,10 @@ def play_game(
             hidden=(
                 None
                 if sheets is None
-                else _HiddenBench(sheets, list(seen), bench_prior, list(leads), dex_bases)
+                else _HiddenBench(
+                    sheets, list(seen), bench_prior, list(leads), dex_bases,
+                    hidden_game.number if stepped is not None and hidden_game is not None else None,
+                )
             ),
         )
         if advanced is None:
@@ -2184,11 +2187,18 @@ def _advance_turn(
     from . import portlp
 
     advanced = None
+    ready = None
     # IKA-458 stage 3.1: the weights, the draw and the drawn branch in one request, the draw
     # being numpy's own from the generator's PCG64 state.
     if portlp.ADVANCE[0] and type(rng.bit_generator).__name__ == "PCG64":
+        # IKA-458 stage 3.2: a drawn pause is carried on there too, where the leaves are the
+        # inference server's.
+        ready = _self_switch_request(leaves, hidden)
         try:
-            advanced = port.advance(reg, pos, chosen, Budget.exact(), rng)
+            advanced = port.advance(
+                reg, pos, chosen, Budget.exact(), rng,
+                None if ready is None else ready[0],
+            )
         except portlp.PortFault as fault:
             portlp.faulted("advanceTurn", fault)
     if advanced is not None:
@@ -2200,6 +2210,8 @@ def _advance_turn(
             return None
         index = advanced.index
         landed = advanced.position
+        if advanced.chain is not None:
+            return _apply_chain(record, advanced, ready[1])
     else:
         weights = port.weights(reg, pos, chosen, Budget.exact())
         record.unmodelled.extend(weights.unmodelled)
@@ -2224,6 +2236,103 @@ def _advance_turn(
     )
 
 
+def _self_switch_request(
+    leaves: tuple[LeafEvaluator | None, LeafEvaluator | None], hidden: _HiddenBench | None
+) -> tuple[dict[str, Any], list[Any]] | None:
+    """IKA-458 stage 3.2: what the port needs to choose a self-switch and play the turn on --
+    the inference server each side's leaf is, and where a hidden bench's completions are read
+    from -- and the leaves it names; None where this road does not go (Python plays the pause)."""
+    from . import portlp
+
+    if not portlp.SELFSWITCH[0] or luck.active() or timing.DUPES:
+        return None
+    if hidden is not None and (hidden.game is None or any(hidden.dex_base)):
+        return None
+    from .encode import rules_of
+    from .inference import RemoteValue
+
+    owners: list[Any] = []
+    leaf: list[int] = []
+    for evaluate in leaves:
+        owner = getattr(evaluate, "__self__", evaluate)
+        if evaluate is None or type(owner) is not RemoteValue:
+            return None
+        if not any(owner is seen for seen in owners):
+            owners.append(owner)
+        leaf.append(next(k for k, seen in enumerate(owners) if seen is owner))
+    servers = []
+    for owner in owners:
+        one: dict[str, Any] = {
+            "address": owner.address,
+            "model": owner.model,
+            "shm": owner._block.name,  # noqa: SLF001 - the leaf's own block, idle while the port asks
+            "bytes": int(owner._block.size),  # noqa: SLF001
+            "batch": int(owner.batch_size),
+            "merge": bool(owner.merge),
+            "netScoresEnds": bool(owner.encoder.rules.net_scores_ends),
+        }
+        rules = rules_of(owner)
+        if rules.mega_from_slots:
+            one["encoding"] = rules.to_request()
+        servers.append(one)
+    request: dict[str, Any] = {
+        "servers": servers,
+        "leaf": leaf,
+        "hidden": None
+        if hidden is None
+        else {
+            "game": hidden.game,
+            "seen": [sorted(s) for s in hidden.seen],
+            "leads": [None if lead is None else sorted(lead) for lead in hidden.leads],
+        },
+    }
+    return request, owners
+
+
+def _apply_chain(record: GameRecord, advanced: Any, owners: list[Any]) -> Position | None:  # noqa: ANN401
+    """The self-switch nodes the port played (`advanceTurn`'s `chain`) as `_record_self_switch`
+    writes them, the server's work booked on the leaves; the turn's end, None if it had none."""
+    from . import portlp
+
+    chain = advanced.chain
+    record.unmodelled.extend(chain["notes"])
+    for owner, served in zip(owners, chain["served"], strict=True):
+        waited = float(served.get("waitUs", 0.0)) / 1e6
+        rustnode.PORT_WAITED[0] -= waited
+        requests, rows = int(served.get("requests", 0)), int(served.get("rows", 0))
+        owner.waited += waited
+        owner.copied += float(served.get("copyUs", 0.0)) / 1e6
+        owner.calls += requests
+        owner.evaluated += rows
+        owner.ended += int(served.get("ended", 0))
+        timing.count("leaves", rows)
+        timing.count("forward.passes", requests)
+        timing.count("serve.requests", requests)
+    waiting = ["pass"]
+    for node in chain["nodes"]:
+        chooser, options, best = int(node["chooser"]), list(node["options"]), int(node["best"])
+        policy = [0.0] * len(options)
+        policy[best] = 1.0
+        record.decisions.append(
+            Decision(
+                turn=int(node["turn"]),
+                kind="selfswitch",
+                position=Position.from_json(node["position"]).to_json(),
+                own_actions=options if chooser == 0 else waiting,
+                own_policy=policy if chooser == 0 else [1.0],
+                foe_actions=waiting if chooser == 0 else options,
+                foe_policy=[1.0] if chooser == 0 else policy,
+                search_value=float(node["value"]),
+                own_chosen=options[best] if chooser == 0 else waiting[0],
+                foe_chosen=waiting[0] if chooser == 0 else options[best],
+                shown=[list(ids) for ids in node["shown"]],
+            )
+        )
+        timing.decided("selfswitch")
+        portlp.COUNTS["selfswitched"] += 1
+    return advanced.position
+
+
 @dataclass(frozen=True)
 class _HiddenBench:
     """What a mid-turn decision needs to price the opponent's bench it has not seen.
@@ -2240,6 +2349,9 @@ class _HiddenBench:
     #: Per side, whether its belief keeps the pre-IKA-411 rule (`play_game`'s
     #: ``dex_base_belief``).
     dex_base: tuple[bool, bool] = (False, False)
+    #: IKA-458 stage 3.4: this game's number in the port (`hiddenstep.Game`), or None where the
+    #: port does not hold the game (stage 3.2's road then leaves a pause to Python).
+    game: int | None = None
 
 
 def _advance(

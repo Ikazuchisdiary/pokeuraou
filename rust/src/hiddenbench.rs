@@ -245,6 +245,17 @@ fn strings(value: &Value) -> Vec<String> {
     value.as_array().map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default()
 }
 
+/// One completion of a side's unseen slots: the species and slots filled, its weight and the
+/// completed position (None for the exact one, where nothing is hidden).
+pub(crate) struct Item {
+    pub(crate) exact: bool,
+    pub(crate) species: Vec<String>,
+    pub(crate) slots: Vec<usize>,
+    pub(crate) weight: f64,
+    pub(crate) position: Option<Position>,
+    pub(crate) pk: Vec<Value>,
+}
+
 /// One side's completions as `hidden.completions` lists them, or why it cannot.
 fn side_completions(
     reg: &Reg,
@@ -253,11 +264,18 @@ fn side_completions(
     side: usize,
     shown: &BTreeSet<usize>,
     weights: Option<&Vec<(Vec<String>, f64)>>,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Item>, String> {
     let party = &position.sides[side].pokemon;
     let hidden: Vec<usize> = party.iter().map(|m| m.slot).filter(|s| !shown.contains(s)).collect();
     if hidden.is_empty() {
-        return Ok(vec![json!({ "exact": true, "species": [], "slots": [], "weight": 1.0, "held": Value::Null })]);
+        return Ok(vec![Item {
+            exact: true,
+            species: Vec::new(),
+            slots: Vec::new(),
+            weight: 1.0,
+            position: None,
+            pk: Vec::new(),
+        }]);
     }
     let on_board = shown_species(position, side, shown);
     let candidates: Vec<usize> = (0..game.sheets[side].len())
@@ -336,15 +354,14 @@ fn side_completions(
             .iter()
             .map(|m| json!([to_id(m.species.as_str()), to_id(m.base_species.as_str()), m.slot]))
             .collect();
-        let held = crate::held::keep(&completed);
-        out.push(json!({
-            "exact": false,
-            "species": picked.iter().map(|k| game.sheets[side][*k].species.clone()).collect::<Vec<_>>(),
-            "slots": hidden,
-            "weight": share,
-            "held": held,
-            "pk": pk,
-        }));
+        out.push(Item {
+            exact: false,
+            species: picked.iter().map(|k| game.sheets[side][*k].species.clone()).collect(),
+            slots: hidden.clone(),
+            weight: share,
+            position: Some(completed),
+            pk,
+        });
     }
     Ok(out)
 }
@@ -354,18 +371,78 @@ pub fn hidden_step(reg: &Reg, value: &Value) -> Value {
         return json!({ "fault": "hiddenStep without a game" });
     };
     let position = crate::held::position(&value["position"]);
+    let seen_in = [strings(&value["seen"][0]), strings(&value["seen"][1])];
+    let leads = [0, 1].map(|side| {
+        if value["leads"][side].is_null() {
+            None
+        } else {
+            Some(strings(&value["leads"][side]))
+        }
+    });
+    let Some(step) = step_of(reg, id, &position, &seen_in, &leads, None) else {
+        return json!({ "fault": format!("hiddenStep: no game {id} is defined") });
+    };
+    let sides: Vec<Value> = step
+        .sides
+        .iter()
+        .map(|side| match side {
+            None => Value::Null,
+            Some(Err(why)) => json!({ "error": why }),
+            Some(Ok(items)) => json!({
+                "items": items
+                    .iter()
+                    .map(|item| {
+                        // The completed position stays in this process under a number.
+                        let held = item.position.as_ref().map(crate::held::keep);
+                        if item.exact {
+                            json!({ "exact": true, "species": [], "slots": [], "weight": 1.0, "held": Value::Null })
+                        } else {
+                            json!({
+                                "exact": false,
+                                "species": item.species,
+                                "slots": item.slots,
+                                "weight": item.weight,
+                                "held": held,
+                                "pk": item.pk,
+                            })
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            }),
+        })
+        .collect();
+    json!({ "seen": step.seen, "shown": step.shown, "sides": sides, "notes": step.notes })
+}
+
+/// What `hidden_step` works out: the identities and slots seen, and per side its completions
+/// (None for a side not asked for or not reached, `Err` where its sheet cannot explain the board).
+pub(crate) struct Step {
+    pub(crate) seen: Vec<Vec<String>>,
+    pub(crate) shown: Vec<Vec<usize>>,
+    pub(crate) sides: Vec<Option<Result<Vec<Item>, String>>>,
+    pub(crate) notes: Vec<String>,
+}
+
+/// `hidden_step`'s work for game `id`, or None when this process holds no such game. `only`
+/// asks for one side's completions alone (a self-switch reads the other side's).
+pub(crate) fn step_of(
+    reg: &Reg,
+    id: u64,
+    position: &Position,
+    seen_in: &[Vec<String>; 2],
+    leads: &[Option<Vec<String>>; 2],
+    only: Option<usize>,
+) -> Option<Step> {
     GAMES.with(|games| {
         let mut games = games.borrow_mut();
-        let Some(game) = games.get_mut(&id) else {
-            return json!({ "fault": format!("hiddenStep: no game {id} is defined") });
-        };
+        let game = games.get_mut(&id)?;
         let mut notes: Vec<String> = Vec::new();
-        let mut sides = Vec::new();
+        let mut sides: Vec<Option<Result<Vec<Item>, String>>> = Vec::new();
         let mut seen_out = Vec::new();
         let mut shown_out = Vec::new();
         let mut shown_sets = Vec::new();
         for side in 0..2 {
-            let mut seen: BTreeSet<String> = strings(&value["seen"][side]).into_iter().collect();
+            let mut seen: BTreeSet<String> = seen_in[side].iter().cloned().collect();
             for mon in &position.sides[side].pokemon {
                 if shows_itself(mon) {
                     seen.insert(identity(mon));
@@ -383,18 +460,17 @@ pub fn hidden_step(reg: &Reg, value: &Value) -> Value {
         }
         let mut failed = false;
         for side in 0..2 {
-            if failed {
-                sides.push(Value::Null);
+            if failed || only.is_some_and(|o| o != side) {
+                sides.push(None);
                 continue;
             }
             let shown = &shown_sets[side];
-            let leads = if value["leads"][side].is_null() { None } else { Some(strings(&value["leads"][side])) };
             let weights = match &game.priors[side] {
                 None => None,
                 Some(prior) => {
-                    match bench_weights(prior, &shown_species(&position, side, shown), leads.as_deref()) {
+                    match bench_weights(prior, &shown_species(position, side, shown), leads[side].as_deref()) {
                         Err(why) => {
-                            sides.push(json!({ "error": why }));
+                            sides.push(Some(Err(why)));
                             failed = true;
                             continue;
                         }
@@ -408,15 +484,15 @@ pub fn hidden_step(reg: &Reg, value: &Value) -> Value {
                     }
                 }
             };
-            match side_completions(reg, game, &position, side, shown, weights.as_ref()) {
-                Ok(items) => sides.push(json!({ "items": items })),
+            match side_completions(reg, game, position, side, shown, weights.as_ref()) {
+                Ok(items) => sides.push(Some(Ok(items))),
                 Err(why) => {
-                    sides.push(json!({ "error": why }));
+                    sides.push(Some(Err(why)));
                     failed = true;
                 }
             }
         }
-        json!({ "seen": seen_out, "shown": shown_out, "sides": sides, "notes": notes })
+        Some(Step { seen: seen_out, shown: shown_out, sides, notes })
     })
 }
 

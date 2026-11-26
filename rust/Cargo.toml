@@ -19,6 +19,9 @@ int-rolls = []
 # tell a build with it from one without.
 ika211-control = []
 ika209-control = []
+# IKA-458 stage 3.2: the self-switch node takes the worst option instead of the best, a choice
+# valued wrong while every leaf is right. Not for use; the positive control of a comparison.
+ika458-selfswitch-control = []
 # IKA-215's positive control: the trace broken on purpose -- no `acts` entry for the
 # residual phase, and no "fainted" line. Never for use; `diff_commands --events` has to
 # tell a build with it from one without.

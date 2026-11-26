@@ -56,6 +56,7 @@ mod resolve;
 mod qfeatures;
 mod qmenus;
 mod score;
+mod selfswitch;
 mod semi_invulnerable;
 mod served;
 mod shm;

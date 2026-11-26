@@ -326,20 +326,7 @@ fn resolve_key(value: &Value) -> String {
 }
 
 pub(crate) fn resolve_fresh(reg: &Reg, value: &Value, key: String) -> Result<KeptTurn, Value> {
-    let position = crate::held::position(&value["position"]);
-    if &*position.format != reg.format_id.as_str() {
-        return Err(json!({ "refused": "position is for another regulation" }));
-    }
-    let actions_value = &value["actions"];
-    let actions = [
-        parse_actions_list(&actions_value[0]),
-        parse_actions_list(&actions_value[1]),
-    ];
-    let budget = Budget::from_json(&value["budget"]);
-    let result = match resolve_turn(reg, &position, &actions, budget) {
-        Err(reason) => return Err(json!({ "refused": reason })),
-        Ok(result) => result,
-    };
+    let result = resolve_raw(reg, value)?;
     // A suspension's continuation state cannot cross a process boundary, but its weight
     // can -- and the caller only has to resolve the turn itself when it actually draws
     // one, which is rarer than merely having one.
@@ -351,6 +338,27 @@ pub(crate) fn resolve_fresh(reg: &Reg, value: &Value, key: String) -> Result<Kep
         unmodelled: result.unmodelled.iter().cloned().collect(),
         positions: result.branches.into_iter().map(|b| b.position).collect(),
     })
+}
+
+/// The turn a request names, whole: its branches and the pauses with their continuations.
+pub(crate) fn resolve_raw<'a>(
+    reg: &'a Reg,
+    value: &Value,
+) -> Result<crate::resolve::TurnResult<'a>, Value> {
+    let position = crate::held::position(&value["position"]);
+    if &*position.format != reg.format_id.as_str() {
+        return Err(json!({ "refused": "position is for another regulation" }));
+    }
+    let actions_value = &value["actions"];
+    let actions = [
+        parse_actions_list(&actions_value[0]),
+        parse_actions_list(&actions_value[1]),
+    ];
+    let budget = Budget::from_json(&value["budget"]);
+    match resolve_turn(reg, &position, &actions, budget) {
+        Err(reason) => Err(json!({ "refused": reason })),
+        Ok(result) => Ok(result),
+    }
 }
 
 /// Scores a pool of candidates, which is what decides the menu the matrix is filled from.
@@ -1239,7 +1247,7 @@ fn answer<R: BufRead, W: Write>(
         }
         // IKA-458 stage 3.1: a turn's weights, the draw and the drawn branch in one request.
         Ok(value) if value["kind"].as_str() == Some("advanceTurn") => {
-            crate::advance::advance_turn(reg, &value)
+            crate::advance::advance_turn(reg, encoder, &value)
         }
         Ok(value) if value["kind"].as_str() == Some("beliefServed") => {
             crate::beliefnode::belief_served(&encoder.widths, &value)

@@ -80,7 +80,9 @@ COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps"
           # IKA-458 stage 3.4: the steps whose seen identities and completions the port made.
           "hidden": 0,
           # IKA-458 stage 3.5: the games whose preparation the port made.
-          "prepared": 0}
+          "prepared": 0,
+          # IKA-458 stage 3.2: the self-switch nodes the port chose and played on.
+          "selfswitched": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -283,6 +285,24 @@ def set_prep(on: bool) -> None:
 
 set_prep(PREP[0])
 
+SELFSWITCH_ENV = "POKEURAOU_GEN_PORT_SELFSWITCH"
+#: IKA-458 stage 3.2: whether a mid-turn replacement (a self-switch) is chosen and played on in the
+#: port, inside the turn's `advanceTurn` (`selfplay._advance_turn`, `rust/src/selfswitch.rs`): the
+#: options, the other side's completions, the leaves' scores on the inference server, the fold and
+#: the draw of what follows, to the end of the turn. Off by default, and off in
+#: `default_on_for_generation`. On includes `PREP` (and so the stages below it).
+SELFSWITCH = [os.environ.get(SELFSWITCH_ENV, "0").strip() == "1"]
+
+
+def set_selfswitch(on: bool) -> None:
+    """Turn stage 3.2 on or off in this process; on turns `PREP` on too."""
+    SELFSWITCH[0] = bool(on)
+    if on:
+        set_prep(True)
+
+
+set_selfswitch(SELFSWITCH[0])
+
 
 def default_on_for_generation() -> None:
     """Generation's, and its board's, default: stage 1.4's whole-node road, unless
@@ -319,7 +339,8 @@ def echo() -> str:
         f"decide {word[DECIDE[0]]} ({DECIDE_ENV}={os.environ.get(DECIDE_ENV, '(unset)')}), "
         f"advance {word[ADVANCE[0]]} ({ADVANCE_ENV}={os.environ.get(ADVANCE_ENV, '(unset)')}), "
         f"hidden {word[HIDDEN[0]]} ({HIDDEN_ENV}={os.environ.get(HIDDEN_ENV, '(unset)')}), "
-        f"prep {word[PREP[0]]} ({PREP_ENV}={os.environ.get(PREP_ENV, '(unset)')}); "
+        f"prep {word[PREP[0]]} ({PREP_ENV}={os.environ.get(PREP_ENV, '(unset)')}), "
+        f"selfswitch {word[SELFSWITCH[0]]} ({SELFSWITCH_ENV}={os.environ.get(SELFSWITCH_ENV, '(unset)')}); "
         f"faults solved in Python: {COUNTS['faults']}; {counts()}"
     )
 
@@ -544,7 +565,7 @@ def counts() -> dict[str, int]:
 
 
 __all__ = ["ADVANCE", "ADVANCE_ENV", "COUNTS", "DECIDE", "DECIDE_ENV", "ENV", "EXACT",
-           "PREP", "PREP_ENV", "set_prep",
+           "PREP", "PREP_ENV", "set_prep", "SELFSWITCH", "SELFSWITCH_ENV", "set_selfswitch",
            "EXACT_ENV", "FOLD", "FOLD_ENV",
            "GEN", "GEN_ENV", "NODE", "NODE_ENV", "MENUS", "MENUS_ENV", "ON", "REPLACE",
            "REPLACE_ENV", "PortFault", "STACK", "STACK_ENV", "bayesian_answer", "counts",

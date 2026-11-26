@@ -455,6 +455,9 @@ class AdvancedTurn:
     unmodelled: tuple[str, ...]
     index: int | None
     position: Position | None
+    #: IKA-458 stage 3.2: the self-switch nodes the port played on from a drawn pause (its
+    #: `chain` answer), with `position` the turn's end; None where the pause is left to Python.
+    chain: dict[str, Any] | None = None
 
 
 #: The landed position of the last `advance_turn` and the replacements it owes, which the port
@@ -942,7 +945,8 @@ class RustNode:
 
     @timing.timed("rust.resolve")
     def advance_turn(
-        self, pos: Position, actions: list[SideAction], budget: Budget, rng: Any  # noqa: ANN401
+        self, pos: Position, actions: list[SideAction], budget: Budget, rng: Any,  # noqa: ANN401
+        self_switch: dict[str, Any] | None = None,
     ) -> AdvancedTurn | str | None:
         """IKA-458 stage 3.1: `resolve`'s weights, the draw among them with `rng`'s PCG64 state
         and the drawn branch, in one request (`advanceTurn`). `rng` is set to the state after
@@ -960,6 +964,8 @@ class RustNode:
                 "inc": format(before["state"]["inc"], "x"),
             },
         }
+        if self_switch is not None:
+            request["selfSwitch"] = self_switch
         response = self._exchange(request)
         if response.get("refused"):
             self.refusal = str(response["refused"])
@@ -967,6 +973,11 @@ class RustNode:
         if "fault" in response:
             # Said by the caller (`port.advance`), outside the restart loop: the port is well.
             return str(response["fault"])
+        if "serverError" in response:
+            from .inference import request_failed
+
+            raise request_failed({"error": response["serverError"], "oom": response.get("oom"),
+                                  "capGb": response.get("capGb")}, "inference failed")
         if "rng" not in response:
             raise RuntimeError("the port did not answer `advanceTurn`; the binary predates it -- rebuild it")
         index = response["index"]
@@ -991,6 +1002,7 @@ class RustNode:
             unmodelled=tuple(response["unmodelled"]),
             index=None if index is None else int(index),
             position=landed,
+            chain=response.get("chain"),
         )
 
     @timing.timed("rust.hidden")
