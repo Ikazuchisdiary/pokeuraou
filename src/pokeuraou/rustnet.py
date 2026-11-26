@@ -103,31 +103,102 @@ def write_net(
     header["sha256"] = sha256
     header["format_id"] = encoder.vocab.format_id
     header["vocab_fingerprint"] = encoder.vocab.fingerprint()
+    named = [
+        (name, tensor.detach().cpu().numpy())
+        for name, tensor in net.state_dict().items()
+        if not name.startswith(("aux", "move_props"))
+    ]
+    _pack(header, named, out)
+    return header
+
+
+def _pack(header: dict[str, Any], named: list[tuple[str, np.ndarray]], out: str | Path) -> None:
+    """Write `header` and the tensors as one `.rnet` file."""
     tensors = []
-    chunks: list[bytes] = []
+    chunks: list[tuple[int, bytes]] = []
     offset = 0
-    for name, tensor in net.state_dict().items():
-        if name.startswith(("aux", "move_props")):
-            continue
-        array = np.ascontiguousarray(tensor.detach().cpu().numpy(), dtype="<f4")
+    for name, array in named:
+        array = np.ascontiguousarray(array, dtype="<f4")
         offset = _aligned(offset)
         tensors.append({"name": name, "shape": list(array.shape), "offset": offset})
-        chunks.append((offset, array.tobytes()))  # type: ignore[arg-type]
+        chunks.append((offset, array.tobytes()))
         offset += array.nbytes
     header["tensors"] = tensors
     body = json.dumps(header, sort_keys=True).encode("utf-8")
-    # The padded header ends where the data starts, a multiple of 64 from the file's start.
     head_len = _aligned(len(MAGIC) + 8 + len(body) + 1) - len(MAGIC) - 8
     padded = body + b" " * (head_len - len(body) - 1) + b"\n"
     data = bytearray(offset)
-    for at, raw in chunks:  # type: ignore[misc]
+    for at, raw in chunks:
         data[at : at + len(raw)] = raw
     blob = MAGIC + struct.pack("<Q", len(padded)) + padded + bytes(data)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(out) + ".part")
     tmp.write_bytes(blob)
     tmp.replace(out)
+
+
+def write_q(
+    net: Any,  # noqa: ANN401
+    encoder: Any,  # noqa: ANN401
+    out: str | Path,
+    *,
+    source: str,
+    sha256: str = "",
+) -> dict[str, Any]:
+    """Write a loaded Q net (`qhead.build_net`) as the `.rnet` file `out`; returns the header.
+
+    The header is the trunk's (`net_header`) with `kind` "q" and the Q's own sizes. Only the
+    net the Rust forward pass implements is written: move properties and attention on.
+    """
+    from . import qhead
+
+    config = net.config
+    if not (config.properties and config.attend):
+        raise ValueError("the Rust Q reads a net with move properties and attention (q-mc4 on)")
+    header = net_header(net.trunk, encoder)
+    header.update({
+        "kind": "q",
+        "source": source,
+        "sha256": sha256,
+        "format_id": encoder.vocab.format_id,
+        "vocab_fingerprint": encoder.vocab.fingerprint(),
+        "q": {
+            "act_dim": config.act_dim, "pair_dim": config.pair_dim, "rank": config.rank,
+            "features": qhead.FEATURE_WIDTH, "heads": 4, "slots": qhead.SLOTS,
+            "properties": bool(config.properties),
+        },
+    })
+    named = [
+        (name, tensor.detach().cpu().numpy())
+        for name, tensor in net.state_dict().items()
+        if not name.startswith(("trunk.head.", "trunk.aux", "trunk.move_props"))
+    ]
+    _pack(header, named, out)
     return header
+
+
+def ensure_exported_q(pt: str | Path, out_dir: str | Path) -> Path:
+    """The `.rnet` of the Q file `pt` in `out_dir`, written when missing or its source changed."""
+    from . import qhead
+    from .encode import Encoder
+    from .regulation import load_regulation
+
+    pt = Path(pt)
+    digest = file_sha256(pt)
+    out = Path(out_dir) / f"{pt.stem}.rnet"
+    if out.exists():
+        try:
+            if read_header(out).get("sha256") == digest:
+                return out
+        except (ValueError, OSError):
+            pass
+    net = qhead.load_q(pt, "cpu")
+    import torch
+
+    blob = torch.load(pt, map_location="cpu", weights_only=False)
+    encoder = Encoder(load_regulation(blob["regulation"]))
+    write_q(net, encoder, out, source=pt.name, sha256=digest)
+    return out
 
 
 def read_header(path: str | Path) -> dict[str, Any]:

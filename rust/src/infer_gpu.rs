@@ -89,6 +89,8 @@ struct Dims {
 pub struct Net {
     dims: Dims,
     ptr: HashMap<String, u64>,
+    /// "trunk." for a Q file (the value net is its trunk), "" for a value net.
+    prefix: &'static str,
     _hold: Vec<CudaSlice<f32>>,
     pub source: String,
 }
@@ -110,7 +112,11 @@ impl Net {
             ptr.insert(name.clone(), dev.device_ptr(stream).0);
             hold.push(dev);
         }
-        let vocab = |name: &str| rnet.tensors.get(name).map(|t| t.0[0]).ok_or(format!("no tensor {name}"));
+        let is_q = h.get("kind").and_then(|k| k.as_str()) == Some("q");
+        let prefix: &'static str = if is_q { "trunk." } else { "" };
+        let vocab = |name: &str| {
+            rnet.tensors.get(&format!("{prefix}{name}")).map(|t| t.0[0]).ok_or(format!("no tensor {prefix}{name}"))
+        };
         let dims = Dims {
             sd: num(&["dims", "species"])?,
             ad: num(&["dims", "ability"])?,
@@ -138,20 +144,25 @@ impl Net {
         if dims.mon > 256 || dims.side > 256 || dims.head > 256 {
             return Err("a layer wider than 256 needs a wider block in infer.cu".into());
         }
-        for name in [
-            "mon_mlp.0.weight", "mon_mlp.1.weight", "mon_mlp.3.weight", "mon_mlp.4.weight",
-            "side_mlp.0.weight", "side_mlp.1.weight", "head.0.weight", "head.1.weight",
-            "head.4.weight", "head.5.weight", "head.8.weight", "head.8.bias",
-        ] {
-            if !ptr.contains_key(name) {
-                return Err(format!("the .rnet has no tensor {name}"));
+        let trunk = ["mon_mlp.0.weight", "mon_mlp.1.weight", "mon_mlp.3.weight", "mon_mlp.4.weight",
+            "side_mlp.0.weight", "side_mlp.1.weight"];
+        let head = ["head.0.weight", "head.1.weight", "head.4.weight", "head.5.weight", "head.8.weight", "head.8.bias"];
+        for name in trunk.iter().chain(if is_q { [].iter() } else { head.iter() }) {
+            if !ptr.contains_key(&format!("{prefix}{name}")) {
+                return Err(format!("the .rnet has no tensor {prefix}{name}"));
             }
         }
-        Ok(Net { dims, ptr, _hold: hold, source: rnet.source.clone() })
+        Ok(Net { dims, ptr, prefix, _hold: hold, source: rnet.source.clone() })
     }
 
+    /// A trunk tensor's device pointer (a Q file's trunk is under "trunk.").
     fn w(&self, name: &str) -> u64 {
-        self.ptr[name]
+        self.ptr[&format!("{}{name}", self.prefix)]
+    }
+
+    /// A tensor by its full name (the Q's own layers).
+    pub fn raw(&self, name: &str) -> u64 {
+        *self.ptr.get(name).unwrap_or_else(|| panic!("the .rnet has no tensor {name}"))
     }
 }
 
@@ -162,6 +173,13 @@ pub struct Kernels {
     head_input: CudaFunction,
     head_final: CudaFunction,
     finalize: CudaFunction,
+    add_bias: CudaFunction,
+    props_pool: CudaFunction,
+    attend: CudaFunction,
+    ln_residual: CudaFunction,
+    action_input: CudaFunction,
+    slot_sum: CudaFunction,
+    pair_matrix: CudaFunction,
 }
 
 /// The versions of the libraries this process loaded, for the start-up line.
@@ -220,6 +238,13 @@ impl Gpu {
             head_input: f("head_input")?,
             head_final: f("head_final")?,
             finalize: f("finalize")?,
+            add_bias: f("add_bias")?,
+            props_pool: f("props_pool")?,
+            attend: f("attend")?,
+            ln_residual: f("ln_residual")?,
+            action_input: f("action_input")?,
+            slot_sum: f("slot_sum")?,
+            pair_matrix: f("pair_matrix")?,
         };
         let stream = ctx.new_stream().map_err(|e| e.to_string())?;
         let blas = CudaBlas::new(stream).map_err(|e| format!("cuBLAS: {e}"))?;
@@ -303,6 +328,32 @@ fn ptr<T>(slice: &CudaSlice<T>, stream: &Arc<CudaStream>) -> u64 {
     slice.device_ptr(stream).0
 }
 
+/// y (rows, n) = x (rows, k) . w (n, k)^T + beta * y, all row-major: the transposed product in
+/// cuBLAS's column-major terms.
+#[allow(clippy::too_many_arguments)]
+fn sgemm_nt(blas: &CudaBlas, w: u64, x: u64, y: u64, n: usize, k: usize, rows: usize, beta: f32) -> Result<(), String> {
+    let one = 1.0f32;
+    unsafe {
+        bres::sgemm(
+            *blas.handle(),
+            bsys::cublasOperation_t::CUBLAS_OP_T,
+            bsys::cublasOperation_t::CUBLAS_OP_N,
+            n as i32,
+            rows as i32,
+            k as i32,
+            &one,
+            w as *const f32,
+            k as i32,
+            x as *const f32,
+            k as i32,
+            &beta,
+            y as *mut f32,
+            n as i32,
+        )
+    }
+    .map_err(|e| e.to_string())
+}
+
 fn cfg(grid: usize, block: usize) -> LaunchConfig {
     LaunchConfig { grid_dim: (grid as u32, 1, 1), block_dim: (block as u32, 1, 1), shared_mem_bytes: 0 }
 }
@@ -365,28 +416,7 @@ impl Slot {
     }
 
     fn gemm(&self, w: u64, x: u64, y: u64, n: usize, k: usize, rows: usize) -> Result<(), String> {
-        // y (rows, n) = x (rows, k) . w (n, k)^T, row-major: the transposed product in
-        // cuBLAS's column-major terms.
-        let (one, zero) = (1.0f32, 0.0f32);
-        unsafe {
-            bres::sgemm(
-                *self.blas.handle(),
-                bsys::cublasOperation_t::CUBLAS_OP_T,
-                bsys::cublasOperation_t::CUBLAS_OP_N,
-                n as i32,
-                rows as i32,
-                k as i32,
-                &one,
-                w as *const f32,
-                k as i32,
-                x as *const f32,
-                k as i32,
-                &zero,
-                y as *mut f32,
-                n as i32,
-            )
-        }
-        .map_err(|e| e.to_string())
+        sgemm_nt(&self.blas, w, x, y, n, k, rows, 0.0)
     }
 
     fn bln(&self, k: &Kernels, x: u64, rows: usize, n: usize, b: u64, g: u64, be: u64) -> Result<(), String> {
@@ -573,6 +603,380 @@ impl Slot {
         let probs = unsafe { std::slice::from_raw_parts(self.host_out.ptr as *const f64, rows) };
         out.push(("probability", 1, probs.iter().map(|&v| v as f32).collect()));
         Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The Q net (`qhead.build_net`). One request is a few items; each item is one position, two
+// pools of actions and the port's features for them, and its answer is an N0 x N1 matrix.
+
+/// The most actions in one side's pool of one item.
+pub const Q_POOL: usize = 1024;
+/// Bytes of one request's arrays, as staged (a request's shared block is 8 MB).
+const Q_STAGE: usize = 12 << 20;
+/// Cells of all of one request's matrices.
+const Q_CELLS: usize = 1 << 20;
+
+/// The arrays of an item, in the order they are staged.
+pub const Q_ARRAYS: [&str; 12] = [
+    "species", "ability", "item", "moves", "mon", "mask", "side", "field", "acts0", "acts1", "feats0",
+    "feats1",
+];
+
+pub struct QDims {
+    act: usize,
+    pair: usize,
+    rank: usize,
+    feats: usize,
+    heads: usize,
+    props: usize,
+}
+
+/// A Q net on the card: the trunk (`Net`, tensors under "trunk.") and the layers after it.
+pub struct QNet {
+    pub net: Net,
+    q: QDims,
+    pub fingerprint: String,
+    pub sha256: String,
+    pub properties: bool,
+}
+
+impl QNet {
+    pub fn upload(stream: &Arc<CudaStream>, rnet: &RNet) -> Result<QNet, String> {
+        let h = &rnet.header;
+        if h.get("kind").and_then(|k| k.as_str()) != Some("q") {
+            return Err("not a Q .rnet (kind is not \"q\")".into());
+        }
+        let num = |key: &str| -> Result<usize, String> {
+            h["q"][key].as_u64().map(|n| n as usize).ok_or(format!("the .rnet's q.{key}"))
+        };
+        let net = Net::upload(stream, rnet)?;
+        for name in [
+            "move_props", "mon_props.weight", "mon_props.bias", "attend.in_proj_weight", "attend.in_proj_bias",
+            "attend.out_proj.weight", "attend.out_proj.bias", "attend_norm.weight", "attend_norm.bias",
+            "context.0.weight", "context.1.weight", "kind.weight", "target.weight", "slot_pos.weight",
+            "slot_mlp.0.weight", "slot_mlp.1.weight", "slot_mlp.3.weight", "slot_mlp.3.bias",
+            "act_mlp.0.weight", "act_mlp.1.weight", "act_mlp.4.weight", "act_mlp.5.weight",
+            "first_pair.weight", "first_pair.bias", "second_pair.weight", "pair_out.weight", "pair_out.bias",
+            "first_low.weight", "first_low.bias", "second_low.weight", "second_low.bias",
+        ] {
+            if !net.ptr.contains_key(name) {
+                return Err(format!("the Q .rnet has no tensor {name}"));
+            }
+        }
+        let props = rnet.tensors["move_props"].0[1];
+        let q = QDims {
+            act: num("act_dim")?,
+            pair: num("pair_dim")?,
+            rank: num("rank")?,
+            feats: num("features")?,
+            heads: num("heads")?,
+            props,
+        };
+        if q.act > 256 || q.heads * 32 > 256 || net.dims.mon % q.heads != 0 {
+            return Err("a Q wider than infer.cu's blocks".into());
+        }
+        Ok(QNet {
+            net,
+            q,
+            fingerprint: h["vocab_fingerprint"].as_str().unwrap_or("").to_string(),
+            sha256: h["sha256"].as_str().unwrap_or("").to_string(),
+            properties: h["q"]["properties"].as_bool().unwrap_or(false),
+        })
+    }
+
+    pub fn widths(&self) -> (usize, usize, usize) {
+        Slot::widths_of(&self.net)
+    }
+}
+
+/// Where one item's arrays are in the staged block, and its matrix in the output.
+pub struct QItem {
+    pub offsets: [usize; 12],
+    pub n0: usize,
+    pub n1: usize,
+    pub cells_at: usize,
+}
+
+pub struct QSlot {
+    stream: Arc<CudaStream>,
+    blas: CudaBlas,
+    event: CudaEvent,
+    geom: Geometry,
+    stage_dev: CudaSlice<u8>,
+    stage_host: Pinned,
+    out_dev: CudaSlice<f64>,
+    out_host: Pinned,
+    _workspace: CudaSlice<u8>,
+    feat: CudaSlice<f32>,
+    h0: CudaSlice<f32>,
+    h1: CudaSlice<f32>,
+    props: CudaSlice<f32>,
+    qkv: CudaSlice<f32>,
+    att: CudaSlice<f32>,
+    hq: CudaSlice<f32>,
+    hfin: CudaSlice<f32>,
+    pooled: CudaSlice<f32>,
+    sides: CudaSlice<f32>,
+    ctx_in: CudaSlice<f32>,
+    ctx: CudaSlice<f32>,
+    x: CudaSlice<f32>,
+    s0: CudaSlice<f32>,
+    s1: CudaSlice<f32>,
+    act_in: CudaSlice<f32>,
+    a0: CudaSlice<f32>,
+    u: [CudaSlice<f32>; 2],
+    fp: [CudaSlice<f32>; 2],
+    sp: [CudaSlice<f32>; 2],
+    fl: [CudaSlice<f32>; 2],
+    sl: [CudaSlice<f32>; 2],
+}
+
+unsafe impl Send for QSlot {}
+
+impl QSlot {
+    pub fn new(gpu: &Gpu, geom: Geometry, q: &QNet) -> Result<QSlot, String> {
+        let e = |e: cudarc::driver::DriverError| e.to_string();
+        let stream = gpu.ctx.new_stream().map_err(e)?;
+        let blas = CudaBlas::new(stream.clone()).map_err(|e| e.to_string())?;
+        let workspace = stream.alloc_zeros::<u8>(32 << 20).map_err(e)?;
+        unsafe { bsys::cublasSetWorkspace_v2(*blas.handle(), ptr(&workspace, &stream) as *mut _, 32 << 20) }
+            .result()
+            .map_err(|e| e.to_string())?;
+        let d = &q.net.dims;
+        let t = 2 * geom.m;
+        let buf = |n: usize| stream.alloc_zeros::<f32>(n.max(1)).map_err(e);
+        let (act, pair, rank) = (q.q.act, q.q.pair, q.q.rank);
+        let pools = |w: usize| -> Result<[CudaSlice<f32>; 2], String> { Ok([buf(Q_POOL * w)?, buf(Q_POOL * w)?]) };
+        Ok(QSlot {
+            event: gpu.ctx.new_event(Some(dsys::CUevent_flags::CU_EVENT_BLOCKING_SYNC)).map_err(e)?,
+            stage_dev: stream.alloc_zeros::<u8>(Q_STAGE).map_err(e)?,
+            stage_host: Pinned::new(Q_STAGE)?,
+            out_dev: stream.alloc_zeros::<f64>(Q_CELLS).map_err(e)?,
+            out_host: Pinned::new(Q_CELLS * 8)?,
+            feat: buf(t * d.mon_in)?,
+            h0: buf(t * d.mon)?,
+            h1: buf(t * d.mon)?,
+            props: buf(t * q.q.props)?,
+            qkv: buf(t * 3 * d.mon)?,
+            att: buf(t * d.mon)?,
+            hq: buf(t * d.mon)?,
+            hfin: buf(t * d.mon)?,
+            pooled: buf(2 * d.pooled)?,
+            sides: buf(2 * d.side)?,
+            ctx_in: buf(2 * d.head_in)?,
+            ctx: buf(2 * act)?,
+            x: buf(Q_POOL * 2 * (16 + d.mon + d.md + q.q.props + 1 + 8 + d.mon + d.mon))?,
+            s0: buf(Q_POOL * 2 * act)?,
+            s1: buf(Q_POOL * 2 * act)?,
+            act_in: buf(Q_POOL * (2 * act + q.q.feats))?,
+            a0: buf(Q_POOL * act)?,
+            u: pools(act)?,
+            fp: pools(pair)?,
+            sp: pools(pair)?,
+            fl: pools(rank)?,
+            sl: pools(rank)?,
+            _workspace: workspace,
+            stream,
+            blas,
+            geom,
+        })
+    }
+
+    pub fn stage_mut(&mut self, at: usize, n: usize) -> Result<&mut [u8], String> {
+        if at + n > Q_STAGE {
+            return Err(format!("a Q request's arrays are over {} MB", Q_STAGE >> 20));
+        }
+        Ok(self.stage_host.slice_mut(at, n))
+    }
+
+    fn p<T>(&self, s: &CudaSlice<T>) -> u64 {
+        ptr(s, &self.stream)
+    }
+
+    fn lin(&self, w: u64, x: u64, y: u64, n: usize, k: usize, rows: usize, beta: f32) -> Result<(), String> {
+        sgemm_nt(&self.blas, w, x, y, n, k, rows, beta)
+    }
+
+    fn bln(&self, k: &Kernels, x: u64, rows: usize, n: usize, b: u64, g: u64, be: u64) -> Result<(), String> {
+        let n = n as i32;
+        let mut l = self.stream.launch_builder(&k.bias_ln_gelu);
+        l.arg(&x).arg(&b).arg(&g).arg(&be).arg(&n);
+        unsafe { l.launch(cfg(rows, 256)) }.map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    fn bias(&self, k: &Kernels, x: u64, rows: usize, n: usize, b: u64) -> Result<(), String> {
+        let (n, total) = (n as i32, (rows * n) as i32);
+        let mut l = self.stream.launch_builder(&k.add_bias);
+        l.arg(&x).arg(&b).arg(&n).arg(&total);
+        unsafe { l.launch(cfg((total as usize).div_ceil(256).max(1), 256)) }.map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// The matrices of `items` (their arrays staged in `stage_mut`, `used` bytes) in `cells`
+    /// doubles, valid until the next call.
+    pub fn matrices(&mut self, gpu: &Gpu, q: &QNet, items: &[QItem], used: usize, cells: usize) -> Result<&[f64], String> {
+        if cells > Q_CELLS {
+            return Err(format!("a Q request's matrices are over {Q_CELLS} cells"));
+        }
+        let k = &gpu.kernels;
+        let src = unsafe { std::slice::from_raw_parts(self.stage_host.ptr, used) };
+        unsafe { dres::memcpy_htod_async(self.p(&self.stage_dev), src, self.stream.cu_stream()) }
+            .map_err(|e| e.to_string())?;
+        for item in items {
+            self.item(k, q, item)?;
+        }
+        let dst = unsafe { std::slice::from_raw_parts_mut(self.out_host.ptr as *mut f64, cells) };
+        unsafe { dres::memcpy_dtoh_async(dst, self.p(&self.out_dev), self.stream.cu_stream()) }
+            .map_err(|e| e.to_string())?;
+        self.event.record(&self.stream).map_err(|e| e.to_string())?;
+        self.event.synchronize().map_err(|e| e.to_string())?;
+        Ok(unsafe { std::slice::from_raw_parts(self.out_host.ptr as *const f64, cells) })
+    }
+
+    fn item(&self, k: &Kernels, q: &QNet, item: &QItem) -> Result<(), String> {
+        let (net, qd) = (&q.net, &q.q);
+        let d = &net.dims;
+        let g = self.geom;
+        let s = &self.stream;
+        let base = self.p(&self.stage_dev);
+        let at: Vec<u64> = item.offsets.iter().map(|o| base + *o as u64).collect();
+        let t = 2 * g.m;
+        let i = |v: usize| v as i32;
+        // The leaf's trunk on this position: Pokemon rows (+ move properties), the side vectors.
+        {
+            let (sd, ad, idd, md) = (i(d.sd), i(d.ad), i(d.id), i(d.md));
+            let (nsp, nab, nit, nmv) = (i(d.vocab[0]), i(d.vocab[1]), i(d.vocab[2]), i(d.vocab[3]));
+            let (wm, id_lo, n_ids, cut, mon_in) = (i(g.wm), i(d.id_lo), i(d.n_ids), i(d.mon_cut), i(d.mon_in));
+            let (es, ea, ei, em) =
+                (net.w("species.weight"), net.w("ability.weight"), net.w("item.weight"), net.w("move.weight"));
+            let feat = self.p(&self.feat);
+            let mut l = s.launch_builder(&k.mon_features);
+            l.arg(&at[0]).arg(&at[1]).arg(&at[2]).arg(&at[3]).arg(&at[4]);
+            l.arg(&es).arg(&ea).arg(&ei).arg(&em);
+            l.arg(&sd).arg(&ad).arg(&idd).arg(&md).arg(&nsp).arg(&nab).arg(&nit).arg(&nmv);
+            l.arg(&wm).arg(&id_lo).arg(&n_ids).arg(&cut).arg(&mon_in).arg(&feat);
+            unsafe { l.launch(cfg(t, 128)) }.map_err(|e| e.to_string())?;
+        }
+        let (feat, h0, h1) = (self.p(&self.feat), self.p(&self.h0), self.p(&self.h1));
+        self.lin(net.w("mon_mlp.0.weight"), feat, h0, d.mon, d.mon_in, t, 0.0)?;
+        self.bln(k, h0, t, d.mon, net.w("mon_mlp.0.bias"), net.w("mon_mlp.1.weight"), net.w("mon_mlp.1.bias"))?;
+        self.lin(net.w("mon_mlp.3.weight"), h0, h1, d.mon, d.mon, t, 0.0)?;
+        self.bln(k, h1, t, d.mon, net.w("mon_mlp.3.bias"), net.w("mon_mlp.4.weight"), net.w("mon_mlp.4.bias"))?;
+        // mon = mon_mlp(...) + mon_props(mean of the moves' properties)
+        let props = self.p(&self.props);
+        {
+            let (pd, nmv) = (i(qd.props), i(d.vocab[3]));
+            let move_props = net.raw("move_props");
+            let mut l = s.launch_builder(&k.props_pool);
+            l.arg(&at[3]).arg(&move_props).arg(&pd).arg(&nmv).arg(&props);
+            unsafe { l.launch(cfg(t, 128)) }.map_err(|e| e.to_string())?;
+        }
+        self.lin(net.raw("mon_props.weight"), props, h1, d.mon, qd.props, t, 1.0)?;
+        self.bias(k, h1, t, d.mon, net.raw("mon_props.bias"))?;
+        // the side vectors from the rows before attention
+        let (pooled, sides) = (self.p(&self.pooled), self.p(&self.sides));
+        {
+            let (m, wm, act, ws, sc, dd) = (i(g.m), i(g.wm), i(d.active), i(g.ws), i(d.side_cut), i(d.mon));
+            let mut l = s.launch_builder(&k.pool);
+            l.arg(&m).arg(&h1).arg(&at[5]).arg(&at[4]).arg(&wm).arg(&act).arg(&at[6]);
+            l.arg(&ws).arg(&sc).arg(&dd).arg(&pooled);
+            unsafe { l.launch(cfg(2, 256)) }.map_err(|e| e.to_string())?;
+        }
+        self.lin(net.w("side_mlp.0.weight"), pooled, sides, d.side, d.pooled, 2, 0.0)?;
+        self.bln(k, sides, 2, d.side, net.w("side_mlp.0.bias"), net.w("side_mlp.1.weight"), net.w("side_mlp.1.bias"))?;
+        // attention over the rows: hfin = attend_norm(h1 + attention(h1))
+        let (qkv, att, hq, hfin) = (self.p(&self.qkv), self.p(&self.att), self.p(&self.hq), self.p(&self.hfin));
+        self.lin(net.raw("attend.in_proj_weight"), h1, qkv, 3 * d.mon, d.mon, t, 0.0)?;
+        self.bias(k, qkv, t, 3 * d.mon, net.raw("attend.in_proj_bias"))?;
+        {
+            let (tokens, heads, hd) = (i(t), i(qd.heads), i(d.mon / qd.heads));
+            let mut l = s.launch_builder(&k.attend);
+            l.arg(&qkv).arg(&at[5]).arg(&tokens).arg(&heads).arg(&hd).arg(&att);
+            unsafe { l.launch(cfg(t, d.mon)) }.map_err(|e| e.to_string())?;
+        }
+        self.lin(net.raw("attend.out_proj.weight"), att, hq, d.mon, d.mon, t, 0.0)?;
+        self.bias(k, hq, t, d.mon, net.raw("attend.out_proj.bias"))?;
+        {
+            let (gamma, beta, n) = (net.raw("attend_norm.weight"), net.raw("attend_norm.bias"), i(d.mon));
+            let mut l = s.launch_builder(&k.ln_residual);
+            l.arg(&h1).arg(&hq).arg(&gamma).arg(&beta).arg(&hfin).arg(&n);
+            unsafe { l.launch(cfg(t, 256)) }.map_err(|e| e.to_string())?;
+        }
+        // the context of each side: context(sides, field)
+        let (ctx_in, ctx) = (self.p(&self.ctx_in), self.p(&self.ctx));
+        {
+            let (r, sd, wf, fc) = (1i32, i(d.side), i(g.wf), i(d.field_cut));
+            let mut l = s.launch_builder(&k.head_input);
+            l.arg(&r).arg(&sides).arg(&sd).arg(&at[7]).arg(&wf).arg(&fc).arg(&ctx_in);
+            unsafe { l.launch(cfg(2, 256)) }.map_err(|e| e.to_string())?;
+        }
+        self.lin(net.raw("context.0.weight"), ctx_in, ctx, qd.act, d.head_in, 2, 0.0)?;
+        self.bln(k, ctx, 2, qd.act, net.raw("context.0.bias"), net.raw("context.1.weight"), net.raw("context.1.bias"))?;
+        // each side's actions -> vectors
+        let slot_width = 16 + d.mon + d.md + qd.props + 1 + 8 + d.mon + d.mon;
+        for (side, n) in [item.n0, item.n1].into_iter().enumerate() {
+            if n == 0 {
+                continue;
+            }
+            if n > Q_POOL {
+                return Err(format!("a pool of {n} actions is over {}", Q_POOL));
+            }
+            let (x, s0, s1, act_in, a0, u) = (
+                self.p(&self.x), self.p(&self.s0), self.p(&self.s1), self.p(&self.act_in), self.p(&self.a0),
+                self.p(&self.u[side]),
+            );
+            {
+                let (sd, m, hd, md, pd, nmv) = (i(side), i(g.m), i(d.mon), i(d.md), i(qd.props), i(d.vocab[3]));
+                let (kind_w, target_w, move_w, move_props) =
+                    (net.raw("kind.weight"), net.raw("target.weight"), net.w("move.weight"), net.raw("move_props"));
+                let mut l = s.launch_builder(&k.action_input);
+                l.arg(&at[8 + side]).arg(&hfin).arg(&sd).arg(&m).arg(&hd).arg(&kind_w).arg(&target_w);
+                l.arg(&move_w).arg(&md).arg(&move_props).arg(&pd).arg(&nmv).arg(&x);
+                unsafe { l.launch(cfg(n * 2, 256)) }.map_err(|e| e.to_string())?;
+            }
+            self.lin(net.raw("slot_mlp.0.weight"), x, s0, qd.act, slot_width, n * 2, 0.0)?;
+            self.bln(k, s0, n * 2, qd.act, net.raw("slot_mlp.0.bias"), net.raw("slot_mlp.1.weight"), net.raw("slot_mlp.1.bias"))?;
+            self.lin(net.raw("slot_mlp.3.weight"), s0, s1, qd.act, qd.act, n * 2, 0.0)?;
+            {
+                let (bias, pos) = (net.raw("slot_mlp.3.bias"), net.raw("slot_pos.weight"));
+                let (ad, nf) = (i(qd.act), i(qd.feats));
+                let ctx_side = ctx + (side * qd.act * 4) as u64;
+                let mut l = s.launch_builder(&k.slot_sum);
+                l.arg(&s1).arg(&bias).arg(&pos).arg(&ctx_side).arg(&at[10 + side]).arg(&ad).arg(&nf).arg(&act_in);
+                unsafe { l.launch(cfg(n, 256)) }.map_err(|e| e.to_string())?;
+            }
+            let width = 2 * qd.act + qd.feats;
+            self.lin(net.raw("act_mlp.0.weight"), act_in, a0, qd.act, width, n, 0.0)?;
+            self.bln(k, a0, n, qd.act, net.raw("act_mlp.0.bias"), net.raw("act_mlp.1.weight"), net.raw("act_mlp.1.bias"))?;
+            self.lin(net.raw("act_mlp.4.weight"), a0, u, qd.act, qd.act, n, 0.0)?;
+            self.bln(k, u, n, qd.act, net.raw("act_mlp.4.bias"), net.raw("act_mlp.5.weight"), net.raw("act_mlp.5.bias"))?;
+        }
+        // the pair head: first_pair / second_pair / first_low / second_low of every vector
+        for (side, n) in [item.n0, item.n1].into_iter().enumerate() {
+            let (u, fp, sp, fl, sl) =
+                (self.p(&self.u[side]), self.p(&self.fp[side]), self.p(&self.sp[side]), self.p(&self.fl[side]), self.p(&self.sl[side]));
+            self.lin(net.raw("first_pair.weight"), u, fp, qd.pair, qd.act, n, 0.0)?;
+            self.bias(k, fp, n, qd.pair, net.raw("first_pair.bias"))?;
+            self.lin(net.raw("second_pair.weight"), u, sp, qd.pair, qd.act, n, 0.0)?;
+            self.lin(net.raw("first_low.weight"), u, fl, qd.rank, qd.act, n, 0.0)?;
+            self.bias(k, fl, n, qd.rank, net.raw("first_low.bias"))?;
+            self.lin(net.raw("second_low.weight"), u, sl, qd.rank, qd.act, n, 0.0)?;
+            self.bias(k, sl, n, qd.rank, net.raw("second_low.bias"))?;
+        }
+        let out = self.p(&self.out_dev) + (item.cells_at * 8) as u64;
+        let (n0, n1, pd, rank) = (i(item.n0), i(item.n1), i(qd.pair), i(qd.rank));
+        let (w, b) = (net.raw("pair_out.weight"), net.raw("pair_out.bias"));
+        let (fpu, spu, flu, slu) = (self.p(&self.fp[0]), self.p(&self.sp[0]), self.p(&self.fl[0]), self.p(&self.sl[0]));
+        let (fpv, spv, flv, slv) = (self.p(&self.fp[1]), self.p(&self.sp[1]), self.p(&self.fl[1]), self.p(&self.sl[1]));
+        let mut l = s.launch_builder(&k.pair_matrix);
+        l.arg(&n0).arg(&n1).arg(&pd).arg(&rank).arg(&fpu).arg(&spu).arg(&flu).arg(&slu);
+        l.arg(&fpv).arg(&spv).arg(&flv).arg(&slv).arg(&w).arg(&b).arg(&out);
+        let launch = LaunchConfig {
+            grid_dim: (item.n1.div_ceil(128).max(1) as u32, item.n0.max(1) as u32, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { l.launch(launch) }.map(|_| ()).map_err(|e| e.to_string())
     }
 }
 
