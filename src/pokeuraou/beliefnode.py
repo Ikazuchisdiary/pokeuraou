@@ -90,6 +90,9 @@ class BeliefNode:
     #: Cells resolved once and shared, and cell-resolutions that had to be repeated.
     shared: int = 0
     redone: int = 0
+    #: IKA-455 stage 1.2: the Bayesian games the port solved with the fold, by the side whose
+    #: strategy each is (`BayesianEquilibrium`, or the error `solve_bayesian` would raise).
+    solved: dict = field(default_factory=dict)
 
 
 def reaches_bench(
@@ -241,8 +244,13 @@ def belief_payoffs(
     *,
     budget: Budget,
     spreads: dict[int, list],
+    solve: Sequence[int] = (),
 ) -> BeliefNode:
     """Every completion's matrix, resolving the turns that do not depend on the bench once.
+
+    ``solve`` names the sides whose Bayesian game (`search.belief_solve`) the port solves in
+    the same crossing as the fold, when stage 1.2 is on (`portlp.FOLD`): their answers come
+    back in `BeliefNode.solved` and nothing else about the node changes (IKA-455).
 
     `spreads[s]` completes side `s`'s own unseen slots, so side `1 - s`'s game is solved
     over it. A side with nothing hidden contributes a single exact completion and costs
@@ -378,6 +386,20 @@ def belief_payoffs(
 
     matrices: dict[int, list[np.ndarray]] = {}
     shared = redone = 0
+    ported = _fold_in_port(
+        reg, filled, jobs, reference_block, dirty, values, starts, parts, len(row), len(col),
+        solve, spreads,
+    )
+    if ported is not None:
+        # The port folded every completion's matrix; what is left is the counts, as below.
+        with timing.region("belief.fold"):
+            for job, payoff in zip(jobs, ported[0], strict=True):
+                shared += int((~dirty).sum())
+                if wanted:
+                    unmodelled |= job.notes
+                    redone += len(wanted) if job.resolved is None else job.resolved
+                matrices.setdefault(1 - job.side, []).append(payoff)
+        return BeliefNode(matrices, unmodelled, shared, redone, ported[1])
     with timing.region("belief.fold"):
         for job in jobs:
             shared_values = rows_of(job.shared)
@@ -421,6 +443,130 @@ def belief_payoffs(
                 redone += len(wanted) if job.resolved is None else job.resolved
             matrices.setdefault(1 - job.side, []).append(payoff)
     return BeliefNode(matrices, unmodelled, shared, redone)
+
+
+def _fold_in_port(  # noqa: PLR0913 - the node's pieces
+    reg: Regulation,
+    filled,  # noqa: ANN001 - EncodedNode, the reference fill
+    jobs: list,
+    reference_block: int | None,
+    dirty: np.ndarray,
+    values: np.ndarray,
+    starts: list[int],
+    parts: list,
+    m: int,
+    n: int,
+    solve: Sequence[int],
+    spreads: dict[int, list],
+) -> tuple[list[np.ndarray], dict] | None:
+    """Every completion's matrix, folded in the port from the fills' span blocks and the
+    values (`rust/src/beliefnode.rs`), and the Bayesian games of ``solve``'s sides solved there
+    too; None where this road is off or a fill kept no span block (the Python loop folds).
+
+    The arithmetic is the loop's: numpy's dot in the order the port copies, a replaced cell's
+    tree by `fold_value`. IKA-455 stage 1.2.
+    """
+    import base64
+    import json
+
+    from . import portlp
+
+    if not portlp.FOLD[0] or filled.span_block is None:
+        return None
+    if any(
+        job.dirty is not None and not job.dirty_from_reference and job.filled.span_block is None
+        for job in jobs
+    ):
+        return None
+
+    def at(index: int) -> list[int]:
+        return [starts[index], parts[index][0]]
+
+    def block(node) -> dict:  # noqa: ANN001 - EncodedNode
+        raw, count, total = node.span_block
+        return {"spans": base64.b64encode(raw).decode("ascii"), "count": count, "total": total}
+
+    def trees(found: list) -> str:
+        return json.dumps(found) if found else ""
+
+    request = {
+        "kind": "beliefFold",
+        "rows": m,
+        "cols": n,
+        "values": portlp._b64(values),  # noqa: SLF001
+        "dirty": base64.b64encode(
+            np.ascontiguousarray(dirty, dtype=np.uint8).tobytes()
+        ).decode("ascii"),
+        "ref": {
+            **block(filled),
+            "folded": trees(filled.folded),
+            "at": None if reference_block is None else at(reference_block),
+        },
+    }
+    out_jobs = []
+    for job in jobs:
+        one: dict = {"side": job.side, "shared": at(job.shared),
+                     "refDirty": bool(job.dirty_from_reference), "borrowed": []}
+        if not job.dirty_from_reference and job.dirty is not None:
+            one["own"] = {**block(job.filled), "folded": trees(job.filled.folded),
+                          "at": at(job.dirty)}
+        for index, spans, folds in job.borrowed:
+            if index is None:
+                # The reference's own cells, read at this completion's rows.
+                one["borrowed"].append({
+                    "at": at(job.shared),
+                    "cells": {"spans": [[i, j] for i, j, _ix, _w in spans],
+                              "folds": [[i, j] for i, j, _root in folds]},
+                })
+            else:
+                one["borrowed"].append({"at": at(index), "packed": _packed(spans),
+                                        "folded": trees(folds)})
+        out_jobs.append(one)
+    request["jobs"] = out_jobs
+    asks = []
+    for side in solve:
+        items = spreads.get(1 - side)
+        if items:
+            asks.append((side, np.asarray([item.weight for item in items], dtype=np.float64)))
+    request["solve"] = [{"side": side, "weights": portlp._b64(w)}  # noqa: SLF001
+                        for side, w in asks]
+    answer = portlp._ask(reg, request)  # noqa: SLF001
+    if "error" in answer:
+        raise RuntimeError(f"`beliefFold`: {answer['error']}")
+    flat = np.frombuffer(base64.b64decode(answer["matrices"]), dtype="<f8")
+    payoffs = [
+        flat[k * m * n : (k + 1) * m * n].reshape(m, n).astype(np.float64)
+        for k in range(len(jobs))
+    ]
+    by_side: dict[int, list[np.ndarray]] = {}
+    for job, payoff in zip(jobs, payoffs, strict=True):
+        by_side.setdefault(1 - job.side, []).append(payoff)
+    weights = dict(asks)
+    solved: dict = {}
+    for one in answer["answers"]:
+        side = int(one["side"])
+        games = [mat if side == 0 else -mat.T for mat in by_side[side]]
+        solved[side] = portlp.bayesian_answer(games, weights[side], one)
+    portlp.COUNTS["folded"] += len(jobs)
+    portlp.COUNTS["bayes"] += len(answer["answers"])
+    return payoffs, solved
+
+
+def _packed(spans: list) -> dict | None:
+    """Spans `(row, column, leaf indices, weights)` in the span block's layout."""
+    import base64
+
+    kept = [(i, j, ix, w) for i, j, ix, w in spans if w]
+    if not kept:
+        return None
+    weights = np.asarray([x for _i, _j, _ix, w in kept for x in w], dtype="<f8")
+    rows = np.asarray([i for i, _j, _ix, _w in kept], dtype="<u4")
+    cols = np.asarray([j for _i, j, _ix, _w in kept], dtype="<u4")
+    lengths = np.asarray([len(ix) for _i, _j, ix, _w in kept], dtype="<u4")
+    indices = np.asarray([k for _i, _j, ix, _w in kept for k in ix], dtype="<u4")
+    raw = b"".join(a.tobytes() for a in (weights, rows, cols, lengths, indices))
+    return {"spans": base64.b64encode(raw).decode("ascii"), "count": len(kept),
+            "total": int(len(indices))}
 
 
 @dataclass

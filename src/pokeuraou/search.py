@@ -1628,14 +1628,14 @@ def belief_solve(
     if same:
         node = belief_payoffs(
             reg, position, row, col, evaluators[0], budget=budget,
-            spreads=completions_by_side,
+            spreads=completions_by_side, solve=wanted,
         )
         nodes = {0: node, 1: node}
     else:
         nodes = {
             side: belief_payoffs(
                 reg, position, row, col, evaluators[side], budget=budget,
-                spreads={1 - side: completions_by_side[1 - side]},
+                spreads={1 - side: completions_by_side[1 - side]}, solve=(side,),
             )
             for side in wanted
         }
@@ -1654,15 +1654,20 @@ def belief_solve(
         # 0's solve is what makes the uncertainty sit on the side that has it.
         games[side] = ([m if side == 0 else -m.T for m in built], weights)
     ported: dict[int, Any] = {}
+    # IKA-455 stage 1.2: the games the port solved with the node's fold.
+    ported.update({side: nodes[side].solved[side] for side in wanted if side in nodes[side].solved})
     if portlp.GEN[0]:
-        # IKA-455: both sides' games in one crossing to the port, each `solve_bayesian`'s
-        # answer to the bit (`portlp`). The first error is the one the loop below meets first.
-        with timing.region("lp.side"), timing.stage("lp"):
-            got = portlp.solve_bayesian_many(reg, [games[side] for side in wanted])
-        for side, answer in zip(wanted, got, strict=True):
-            if isinstance(answer, Exception):
-                raise answer
-            ported[side] = answer
+        # IKA-455: the other sides' games in one crossing to the port, each
+        # `solve_bayesian`'s answer to the bit (`portlp`).
+        rest = [side for side in wanted if side not in ported]
+        if rest:
+            with timing.region("lp.side"), timing.stage("lp"):
+                got = portlp.solve_bayesian_many(reg, [games[side] for side in rest])
+            ported.update(zip(rest, got, strict=True))
+    # The first error is the one the loop below meets first.
+    for side in wanted:
+        if isinstance(ported.get(side), Exception):
+            raise ported[side]
     for side in wanted:
         built = nodes[side].matrices[side]
         items = completions_by_side[1 - side]

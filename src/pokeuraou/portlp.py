@@ -89,6 +89,25 @@ def set_on(on: bool) -> None:
 
 set_on(ON[0])
 
+FOLD_ENV = "POKEURAOU_GEN_PORT_FOLD"
+#: IKA-455 stage 1.2: whether a hidden bench's node is folded in the port too -- each
+#: completion's matrix from the fills' span blocks and the leaves' values -- and its Bayesian
+#: games solved in the same crossing (`beliefnode.belief_payoffs`, `rust/src/beliefnode.rs`).
+#: Off by default. On includes `GEN` (the Q's games, and the games of a node not folded here),
+#: and keeps the fills' span blocks, which the request is made of.
+FOLD = [os.environ.get(FOLD_ENV, "0").strip() == "1"]
+
+
+def set_fold(on: bool) -> None:
+    """Turn stage 1.2 on or off in this process; on turns `GEN` and the span blocks on."""
+    FOLD[0] = bool(on)
+    if on:
+        set_gen(True)
+        rustnode._SPAN_BLOCKS[0] = True
+
+
+set_fold(FOLD[0])
+
 
 def _b64(a: np.ndarray) -> str:
     return base64.b64encode(np.ascontiguousarray(a, dtype="<f8").tobytes()).decode("ascii")
@@ -190,6 +209,22 @@ def solve_bayesian_many(
     return out
 
 
+def bayesian_answer(
+    matrices: Sequence[np.ndarray], weights: np.ndarray, one: dict[str, Any]
+) -> BayesianEquilibrium | Exception:
+    """`solve_bayesian_many`'s answer for one game from the port's ``one`` (IKA-455: the
+    `beliefFold` answer carries the same fields), or the error `solve_bayesian` would raise."""
+    try:
+        mats, w = bayesian_inputs(list(matrices), weights)
+    except ValueError as exc:
+        return exc
+    error = _error(one)
+    if error is not None:
+        return error
+    return assemble_bayesian(mats, w, float(one["valueRow"]), float(one["valueCol"]),
+                             _unb64(one["x"]), tuple(_unb64(y) for y in one["ys"]))
+
+
 def solve_one(reg: Any, payoff: np.ndarray) -> Equilibrium:  # noqa: ANN401 - a Regulation
     """`equilibrium.solve` of one matrix -- in the port when `ON`, else in Python -- raising
     as `solve` raises (IKA-387)."""
@@ -271,6 +306,7 @@ def counts() -> dict[str, int]:
     return dict(COUNTS)
 
 
-__all__ = ["COUNTS", "ENV", "GEN", "GEN_ENV", "ON", "counts", "set_gen", "set_on",
+__all__ = ["COUNTS", "ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "ON", "bayesian_answer", "counts",
+           "set_fold", "set_gen", "set_on",
            "solve_bayesian_many",
            "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]

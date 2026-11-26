@@ -18,6 +18,7 @@ mod events;
 mod ability_notes;
 mod airborne;
 mod battler;
+mod beliefnode;
 mod bind;
 mod blas;
 #[cfg(feature = "count-allocations")]

@@ -976,7 +976,7 @@ pub fn b64_decode(text: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn f64s(value: &Value) -> Result<Vec<f64>, String> {
+pub fn f64s(value: &Value) -> Result<Vec<f64>, String> {
     let text = value.as_str().ok_or("an array is not base64 text")?;
     let bytes = b64_decode(text)?;
     if bytes.len() % 8 != 0 {
@@ -985,7 +985,7 @@ fn f64s(value: &Value) -> Result<Vec<f64>, String> {
     Ok(bytes.chunks(8).map(|b| f64::from_le_bytes(b.try_into().unwrap())).collect())
 }
 
-fn f64s_text(values: &[f64]) -> String {
+pub fn f64s_text(values: &[f64]) -> String {
     let mut bytes = Vec::with_capacity(values.len() * 8);
     for v in values {
         bytes.extend_from_slice(&v.to_le_bytes());
