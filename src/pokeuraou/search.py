@@ -1644,6 +1644,7 @@ def belief_solve(
     #: Depth-2 cell values in side 0's orientation, shared by both sides' answers: with
     #: one leaf, a position both sides' lists hold (an exact bench) is one position.
     memo: dict[tuple, tuple[float | None, set[str], int]] = {}
+    games: dict[int, tuple[list, np.ndarray]] = {}
     for side in wanted:
         built = nodes[side].matrices[side]
         items = completions_by_side[1 - side]
@@ -1651,9 +1652,26 @@ def belief_solve(
         # Side 1 minimises the matrix side 0 maximises, so its own game is the transpose
         # of the negation. Solving that rather than reading the column strategy off side
         # 0's solve is what makes the uncertainty sit on the side that has it.
-        matrices = [m if side == 0 else -m.T for m in built]
-        with timing.region("lp.side"):
-            solved = solve_bayesian(matrices, weights)
+        games[side] = ([m if side == 0 else -m.T for m in built], weights)
+    ported: dict[int, Any] = {}
+    if portlp.GEN[0]:
+        # IKA-455: both sides' games in one crossing to the port, each `solve_bayesian`'s
+        # answer to the bit (`portlp`). The first error is the one the loop below meets first.
+        with timing.region("lp.side"), timing.stage("lp"):
+            got = portlp.solve_bayesian_many(reg, [games[side] for side in wanted])
+        for side, answer in zip(wanted, got, strict=True):
+            if isinstance(answer, Exception):
+                raise answer
+            ported[side] = answer
+    for side in wanted:
+        built = nodes[side].matrices[side]
+        items = completions_by_side[1 - side]
+        matrices, weights = games[side]
+        if side in ported:
+            solved = ported[side]
+        else:
+            with timing.region("lp.side"):
+                solved = solve_bayesian(matrices, weights)
         strategy = np.asarray(solved.row_strategy, dtype=np.float64)
         if select[side] != DEFAULT_EQ_SELECT:
             with timing.region("lp.select"):

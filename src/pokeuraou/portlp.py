@@ -68,6 +68,19 @@ ON = [os.environ.get(ENV, "0").strip() == "1"]
 COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps": 0}
 
 
+GEN_ENV = "POKEURAOU_GEN_PORT_LP"
+#: IKA-455: whether generation's own LPs go to the port, off by default: the Q's games of one
+#: `qrank.prefetch` in one crossing, and the Bayesian games of both sides of one
+#: `search.belief_solve` in one. Apart from `ON`, which is the ladder's and also asks for span
+#: blocks nobody here reads. A list so a test can turn it on in one process.
+GEN = [os.environ.get(GEN_ENV, "0").strip() == "1"]
+
+
+def set_gen(on: bool) -> None:
+    """Turn generation's LPs on or off in this process (IKA-455)."""
+    GEN[0] = bool(on)
+
+
 def set_on(on: bool) -> None:
     """Turn the port's LPs on or off in this process (and the span blocks they need)."""
     ON[0] = bool(on)
@@ -258,5 +271,6 @@ def counts() -> dict[str, int]:
     return dict(COUNTS)
 
 
-__all__ = ["COUNTS", "ENV", "ON", "counts", "set_on", "solve_bayesian_many",
+__all__ = ["COUNTS", "ENV", "GEN", "GEN_ENV", "ON", "counts", "set_gen", "set_on",
+           "solve_bayesian_many",
            "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]

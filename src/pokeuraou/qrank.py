@@ -42,7 +42,7 @@ from typing import Any
 
 import numpy as np
 
-from . import timing
+from . import portlp, timing
 from .actions import SideAction
 from .position import Position
 from .regulation import Regulation
@@ -891,6 +891,14 @@ def prefetch(
     # rank from one matrix, and so from one game: its solve is the same LP on the same
     # numbers, and was solved twice (2.9 of 16 rankings a game in M-C generation).
     memos: list[dict[str, Any]] = [{} for _ in asks]
+    if portlp.GEN[0]:
+        # IKA-455: the games of every request in one crossing to the port, each `solve`'s
+        # answer to the bit (`portlp`); `rank` takes it where it would have solved. A game the
+        # port could not solve is `solve`'s error returned in its place: `rank`'s None.
+        with timing.stage("lp.q"):
+            got = portlp.solve_many(reg, [matrices[index] for index in range(len(asks))])
+        for memo, answer in zip(memos, got, strict=True):
+            memo["pre"] = None if isinstance(answer, Exception) else answer
     return {
         side: (own_key, foe, matrices[index].copy(), memos[index])
         for side, (own_key, foe, index) in plan.items()
@@ -947,6 +955,10 @@ def q_ranking(
             # IKA-339: the other side solved this matrix's game already.
             e = memo["solved"]
             timing.count("q.solve.shared")
+        elif memo is not None and "pre" in memo:
+            # IKA-455: `prefetch` had the port solve it, in one crossing for the request.
+            e = memo["pre"]
+            memo["solved"] = e
         else:
             try:
                 # IKA-339: the Q's own game, as a row apart from the search's LPs (`lp`).
