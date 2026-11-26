@@ -78,10 +78,13 @@ class _LeafScores:
             encoded.mask.reshape(n, -1).sum(axis=1).astype(np.float64) * 0.5,
             # Weighted by column, so two features that move in opposite directions between
             # completions cannot cancel the way they could in a plain sum.
-            encoded.side.reshape(n, -1).astype(np.float64)
-            @ np.linspace(0.3, 1.7, encoded.side[0].size),
-            encoded.field.reshape(n, -1).astype(np.float64)
-            @ np.linspace(0.2, 1.1, encoded.field.shape[1]),
+            # Reduced row by row, not by a matrix product: the port's node and the definition
+            # score different batches, and a product's summation order can depend on the
+            # batch on another BLAS core (the Linux runner).
+            (encoded.side.reshape(n, -1).astype(np.float64)
+             * np.linspace(0.3, 1.7, encoded.side[0].size)).sum(axis=1),
+            (encoded.field.reshape(n, -1).astype(np.float64)
+             * np.linspace(0.2, 1.1, encoded.field.shape[1])).sum(axis=1),
         )
         raw = sum(parts)
         return 1.0 / (1.0 + np.exp(-(raw % 7.0) + 3.0))

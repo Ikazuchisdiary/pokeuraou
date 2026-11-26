@@ -177,7 +177,8 @@ jobs:
       #              the Python server's tests (the whole of tests/test_inference.py, which
       #              skipped as a module, and the two graphed-Q tests in tests/test_q_rank.py):
       #              30. The seven CUDA-graph tests of the Python server went with it, and so
-      #              did the CPU-batch skip of its test.
+      #              did the CPU-batch skip of its test. Step 4 added two tests of the Rust
+      #              server's hp-share arm to that module: 23.
       - name: what the suite skipped, and whether it was allowed to
         if: always()
         run: >
@@ -261,7 +262,7 @@ jobs:
         if: always()
         run: >
           uv run --no-sync python tools/ci_skip_audit.py --junit reports/pytest-learn.xml
-          --absent standings=9 --absent cuda=21
+          --absent standings=9 --absent cuda=23
 
       - uses: actions/upload-artifact@v4
         if: always()

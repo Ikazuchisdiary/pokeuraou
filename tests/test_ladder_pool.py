@@ -94,16 +94,17 @@ def _read(reg, node, stages, budget_ms=None, *, side=0, workers, **how):  # noqa
         ladder._POOL = saved
 
 
-def _same(a, b) -> None:  # noqa: ANN001
+def _same(a, b, rtol: float = 0.0) -> None:  # noqa: ANN001
     assert [r.stage for r in a.rungs] == [r.stage for r in b.rungs]
     for x, y in zip(a.rungs, b.rungs, strict=True):
-        assert x.value == y.value and x.fresh == y.fresh and x.work == y.work
+        assert (np.isclose(x.value, y.value, rtol=rtol, atol=0) and x.fresh == y.fresh
+                and x.work == y.work)
         assert (x.rows, x.cols) == (y.rows, y.cols)
-        np.testing.assert_array_equal(x.strategy, y.strategy)
+        np.testing.assert_allclose(x.strategy, y.strategy, rtol=rtol, atol=0)
         assert x.spent_ms == y.spent_ms
     assert (a.stopped, a.unfinished, a.abandoned) == (b.stopped, b.unfinished, b.abandoned)
-    np.testing.assert_array_equal(a.strategy, b.strategy)
-    assert a.value == b.value and a.work == b.work
+    np.testing.assert_allclose(a.strategy, b.strategy, rtol=rtol, atol=0)
+    assert np.isclose(a.value, b.value, rtol=rtol, atol=0) and a.work == b.work
     assert a.unmodelled == b.unmodelled
 
 
@@ -223,8 +224,9 @@ def test_the_ports_lps_read_as_pythons(roster, pool) -> None:  # noqa: ANN001
             # IKA-387: the stages' rectangles and the deep children's, in this process.
             solved["bayes"] += portlp.COUNTS["bayes"] - bayes
             pooled = _read(reg, node, how, side=side, workers=True)
-            _same(serial, plain)
-            _same(pooled, plain)
+            # The port's LP and Python's may differ in the last place on another BLAS core.
+            _same(serial, plain, rtol=1e-14)
+            _same(pooled, plain, rtol=1e-14)
             solved["here"] += serial.here["portLps"]
             solved["pool"] += pooled.pool["portLps"]
             # IKA-387: the reader's own port solves its stages' rectangles.
