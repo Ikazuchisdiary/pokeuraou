@@ -66,6 +66,16 @@ serde = { version = "1", features = ["derive"] }
 # files (the strategies are Python's `repr` of a float); without it a read can be one ulp off.
 serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 
+# IKA-461: the inference server's CUDA calls. `dynamic-loading` reads the driver, NVRTC and
+# cuBLAS at run time (the CUDA 12 DLLs of the `.venv`'s torch, or --dll-dir), so the build
+# needs no CUDA toolkit; the other features are the three libraries' Rust wrappers.
+# `cuda-12080` names the headers' version; the DLLs are checked when the server starts.
+cudarc = { version = "=0.17.8", default-features = false, features = ["std", "driver", "nvrtc", "cublas", "dynamic-loading", "cuda-12080"] }
+# Pinned: from 0.8.6 `libloading` takes `windows-link`, which links kernel32 as `raw-dylib`
+# and needs a `dlltool` on PATH with the windows-gnu toolchain (the reason `cmake` is pinned
+# below 0.1.57 too). 0.8.5 takes `windows-targets`, whose import libraries come as crates.
+libloading = "=0.8.5"
+
 [build-dependencies]
 # IKA-381: builds vendor/HiGHS (1.12.0, scipy's commit) for the LP in src/lp.rs (build.rs).
 # Pinned below 0.1.57: from there it links kernel32 as `raw-dylib`, which needs a dlltool
