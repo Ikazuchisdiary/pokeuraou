@@ -346,12 +346,21 @@ def default_on_for_generation() -> None:
     node with nothing hidden, the replacement node, the menus and the menus with the node in one
     request), each the Python road's to the bit at 21 workers. ``POKEURAOU_GEN_PORT_DECIDE=0``
     keeps the default at stage 1.4's road; ``POKEURAOU_GEN_PORT_NODE=0`` turns all of it off.
+
+    Since IKA-458 the default is stage 3.6's road (`PLAY`, and so every stage below it: the
+    turn's advance, the hidden bench's completions, the game's preparation, the self-switch,
+    the replacement phase and the game's turns in one request), the stage-2 road's games to
+    the bit on 4,000 board games. ``POKEURAOU_GEN_PORT_PLAY=0`` keeps the default at stage 2.4's
+    road.
     """
     if os.environ.get(NODE_ENV, "").strip():
         return
     set_node(True)
-    if not os.environ.get(DECIDE_ENV, "").strip():
-        set_decide(True)
+    if os.environ.get(DECIDE_ENV, "").strip():
+        return
+    set_decide(True)
+    if not os.environ.get(PLAY_ENV, "").strip():
+        set_play(True)
 
 
 def echo() -> str:
