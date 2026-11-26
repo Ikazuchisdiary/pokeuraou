@@ -31,6 +31,25 @@ def _positions_not_held() -> Iterator[None]:
     rustnode.hold_positions(False)
 
 
+@pytest.fixture(autouse=True)
+def _port_roads_restored() -> Iterator[None]:
+    """`portlp`'s roads are process-wide, and generation's entry points turn them on for good
+    (`portlp.default_on_for_generation`, IKA-455).
+
+    test_pool_match runs `pool_match.main` in-process, which left every road on for the rest
+    of its worker: a later test_q_rank counted the port's solves as shared ones, and
+    test_belief_fold_port and test_port_faults compared the port against a "Python" node the
+    port had solved too. Four tests failed on CI at 131d811 for that alone.
+    """
+    from pokeuraou import portlp
+
+    was = (portlp.ON[0], portlp.GEN[0], portlp.FOLD[0], portlp.STACK[0], portlp.NODE[0],
+           rustnode._SPAN_BLOCKS[0])  # noqa: SLF001
+    yield
+    (portlp.ON[0], portlp.GEN[0], portlp.FOLD[0], portlp.STACK[0], portlp.NODE[0],
+     rustnode._SPAN_BLOCKS[0]) = was  # noqa: SLF001
+
+
 @pytest.fixture(scope="session")
 def reg() -> Regulation:
     if not (regulation_dir() / f"{FORMAT_ID}.json").exists():

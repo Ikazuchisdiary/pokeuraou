@@ -31,6 +31,7 @@ from pokeuraou.payoff import HP_SHARE
 from pokeuraou.search import belief_solve
 
 from .test_beliefnode import setup  # noqa: F401 - fixture
+from .test_portlp import openblas_core
 from .test_portserved import Stub
 
 
@@ -67,11 +68,22 @@ def _inject(monkeypatch, kinds, *, node=False):  # noqa: ANN001, ANN202
     monkeypatch.setattr(rustnode.RustNode, "belief_node", belief_node)
 
 
+#: The port's fold is numpy's to the bit on the core whose `ddot` order it copies (SkylakeX);
+#: on another core (CI's runners vary) the last place may move, as `test_portlp` allows.
+EXACT = openblas_core() == "SkylakeX"
+
+
+def _equal(x: np.ndarray, y: np.ndarray) -> bool:
+    if EXACT:
+        return bool(np.array_equal(x, y))
+    return x.shape == y.shape and bool(np.allclose(x, y, rtol=0, atol=1e-12))
+
+
 def _same_node(a, b) -> bool:  # noqa: ANN001
     return (
         all(
             len(a.matrices[s]) == len(b.matrices[s])
-            and all(np.array_equal(x, y) for x, y in zip(a.matrices[s], b.matrices[s], strict=True))
+            and all(_equal(x, y) for x, y in zip(a.matrices[s], b.matrices[s], strict=True))
             for s in (0, 1)
         )
         and (a.shared, a.redone, a.unmodelled) == (b.shared, b.redone, b.unmodelled)

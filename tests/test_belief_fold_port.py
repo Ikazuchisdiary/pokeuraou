@@ -28,6 +28,7 @@ from pokeuraou.narrow import narrow
 
 from ._port import Budget
 from .test_beliefnode import _Leaf, _SlotLeaf, midgame, setup  # noqa: F401 - fixtures
+from .test_portlp import openblas_core
 
 
 @pytest.fixture
@@ -51,12 +52,29 @@ def _both(reg, position, ours, theirs, spreads, leaf, solve=(0, 1)):  # noqa: AN
     return python, ported
 
 
+#: `lp.rs::numpy_dot` copies the SkylakeX `ddot`'s order: on that core the fold is numpy's to
+#: the bit; on another (CI's runners vary) the last place may move, as `test_portlp` allows.
+EXACT = openblas_core() == "SkylakeX"
+
+
+def _equal(x: np.ndarray, y: np.ndarray) -> bool:
+    if EXACT:
+        return bool(np.array_equal(x, y))
+    return x.shape == y.shape and bool(np.allclose(x, y, rtol=0, atol=1e-12))
+
+
 def _same(a, b) -> bool:  # noqa: ANN001
     return all(
         len(a.matrices[s]) == len(b.matrices[s])
-        and all(np.array_equal(x, y) for x, y in zip(a.matrices[s], b.matrices[s], strict=True))
+        and all(_equal(x, y) for x, y in zip(a.matrices[s], b.matrices[s], strict=True))
         for s in (0, 1)
     )
+
+
+def _reference(python, ported):  # noqa: ANN001, ANN202
+    """The node whose matrices the port's games are held to: Python's on the core whose order
+    the port copies, else the port's own (the LP is then the same code on the same numbers)."""
+    return python if EXACT else ported
 
 
 def _games(node, spreads, side):  # noqa: ANN001, ANN202
@@ -78,7 +96,7 @@ def test_a_turn_one_node_is_folded_to_the_bit(setup, fold_off) -> None:  # noqa:
     # Its games are the Python solves, to the bit.
     assert set(ported.solved) == {0, 1}
     for side in (0, 1):
-        games, weights = _games(python, spreads, side)
+        games, weights = _games(_reference(python, ported), spreads, side)
         want = solve_bayesian(games, weights)
         got = ported.solved[side]
         assert got.value == want.value
@@ -100,7 +118,7 @@ def test_a_midgame_node_is_folded_to_the_bit(midgame, fold_off, monkeypatch) -> 
     assert packed, "no cell was borrowed from another completion: that road is not held"
     assert _same(python, ported)
     for side in (0, 1):
-        games, weights = _games(python, spreads, side)
+        games, weights = _games(_reference(python, ported), spreads, side)
         want = solve_bayesian(games, weights)
         got = ported.solved[side]
         assert got.value == want.value and np.array_equal(got.row_strategy, want.row_strategy)
