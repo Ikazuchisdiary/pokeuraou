@@ -259,6 +259,33 @@ enum Done {
     Unresolved(Value),
 }
 
+/// A replacement phase's `Decision` as the record writes it, from `phase_core`'s answer.
+fn replacement_decision(pos: &Position, step: &crate::hiddenbench::Step, answer: &Value) -> Result<Value, String> {
+    let side_of = |key: &str, side: usize| -> Result<&Value, String> {
+        answer.get(key).and_then(|v| v.get(side)).ok_or_else(|| format!("the answer has no {key}[{side}]"))
+    };
+    let chosen = |side: usize| -> Result<usize, String> {
+        side_of("chosen", side)?.as_u64().map(|i| i as usize).ok_or_else(|| "chosen is not an index".to_string())
+    };
+    let picked = |side: usize| -> Result<Value, String> {
+        side_of("options", side)?.get(chosen(side)?).cloned().ok_or_else(|| "chosen is past the options".to_string())
+    };
+    Ok(json!({
+        "turn": pos.turn,
+        "kind": "replacement",
+        "position": pos.to_json(),
+        "ownActions": side_of("options", 0)?,
+        "ownPolicy": side_of("policy", 0)?,
+        "foeActions": side_of("options", 1)?,
+        "foePolicy": side_of("policy", 1)?,
+        "searchValue": answer.get("value").ok_or("the answer has no value")?,
+        "ownChosen": picked(0)?,
+        "foeChosen": picked(1)?,
+        "shownIdentities": step.seen,
+        "foeSearchValue": answer.get("foeValue").ok_or("the answer has no foeValue")?,
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn one_step(
     reg: &Reg,
@@ -283,14 +310,14 @@ fn one_step(
         let mut trial = rng.clone();
         let (answer, after) = crate::replacephase::phase_core(reg, encoder, context, pos, &mut trial, &step)
             .map_err(|failed| Handoff::of(format!("replacement: {failed}")))?;
+        let decision = replacement_decision(pos, &step, &answer)
+            .map_err(|why| Handoff::of(format!("replacement record: {why}")))?;
         let event = json!({
             "kind": "replacement",
-            "turn": pos.turn,
-            "position": pos.to_json(),
-            "seen": step.seen,
             "stepNotes": step.notes,
             "completions": completions(&step),
             "answer": answer,
+            "decision": decision,
         });
         *rng = trial;
         *seen = [step.seen[0].clone(), step.seen[1].clone()];
@@ -357,22 +384,32 @@ fn one_step(
         }
     }
     let rank_views: Vec<Value> = node.used.iter().map(|u| u.as_ref().map_or(Value::Null, |(at, species)| json!([at, species]))).collect();
+    let ours = choices(&kept[0]);
+    let theirs = choices(&kept[1]);
+    // The `Decision` as the record writes it (`GameRecord.to_json`), made here and only written by Python.
+    let mut decision = json!({
+        "turn": pos.turn,
+        "kind": "move",
+        "position": pos.to_json(),
+        "ownActions": ours,
+        "ownPolicy": own_strategy,
+        "foeActions": theirs,
+        "foePolicy": foe_strategy,
+        "searchValue": own_value,
+        "ownChosen": ours[own_at],
+        "foeChosen": theirs[foe_at],
+        "shownIdentities": step.seen,
+        "foeSearchValue": -foe_value,
+    });
+    if rank_views.iter().any(|v| !v.is_null()) {
+        decision["rankViews"] = Value::Array(rank_views);
+    }
     let mut event = json!({
         "kind": "move",
-        "turn": pos.turn,
-        "position": pos.to_json(),
-        "seen": step.seen,
         "stepNotes": step.notes,
         "completions": completions(&step),
         "hiddenSlots": node.asked["hidden"].clone(),
-        "ours": strings(&choices(&kept[0])),
-        "theirs": strings(&choices(&kept[1])),
-        "ownPolicy": own_strategy,
-        "foePolicy": foe_strategy,
-        "value": own_value,
-        "foeValue": -foe_value,
-        "chosen": [own_at, foe_at],
-        "rankViews": rank_views,
+        "decision": decision,
         "answer": Value::Object(kept_answer),
         "nodeNotes": answer["unmodelled"].clone(),
         "advanceNotes": advanced.unmodelled,

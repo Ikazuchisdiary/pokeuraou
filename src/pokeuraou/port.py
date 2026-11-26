@@ -390,11 +390,6 @@ def turn_expectation(
 
 
 def replacements_needed(reg: Regulation, pos: Position) -> tuple[tuple[bool, ...], ...]:
-    # The port said so along with the turn that landed here (IKA-458 stage 3.1).
-    said = rustnode.take_needed(pos)
-    if said is not None:
-        return said
-
     def call(node: RustNode) -> tuple[tuple[bool, ...], ...]:
         answer = node.replacements_needed(pos)
         if answer is None:

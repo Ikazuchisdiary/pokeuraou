@@ -202,7 +202,7 @@ def _write(record: Any, event: dict[str, Any], setup: Setup) -> None:  # noqa: A
     """One step as `play_game` wrote it: the notes, the node's and the server's books, the
     `Decision`, then the turn's own notes and the self-switch nodes."""
     from . import beliefnode, replacephase
-    from .selfplay import Decision, _apply_chain
+    from .selfplay import WrittenDecision, _apply_chain
 
     for note in event["stepNotes"]:
         if note not in record.unmodelled:
@@ -213,25 +213,7 @@ def _write(record: Any, event: dict[str, Any], setup: Setup) -> None:  # noqa: A
     if event["kind"] == "replacement":
         replacephase._book(setup.owners, answer)  # noqa: SLF001
         portlp.COUNTS["lps"] += int(answer.get("lps", 0))
-        options = [list(side) for side in answer["options"]]
-        policy = [[float(x) for x in side] for side in answer["policy"]]
-        chosen = [int(i) for i in answer["chosen"]]
-        record.decisions.append(
-            Decision(
-                turn=int(event["turn"]),
-                kind="replacement",
-                position=event["position"],
-                own_actions=options[0],
-                own_policy=policy[0],
-                foe_actions=options[1],
-                foe_policy=policy[1],
-                search_value=float(answer["value"]),
-                own_chosen=options[0][chosen[0]],
-                foe_chosen=options[1][chosen[1]],
-                shown=[list(ids) for ids in event["seen"]],
-                foe_search_value=float(answer["foeValue"]),
-            )
-        )
+        record.decisions.append(WrittenDecision(event["decision"]))
         timing.decided("replacement")
         record.unmodelled.extend(answer["notes"])
         portlp.COUNTS["phased"] += 1
@@ -251,26 +233,7 @@ def _write(record: Any, event: dict[str, Any], setup: Setup) -> None:  # noqa: A
     seconds = float(event["seconds"])
     record.search_seconds[0] += seconds / 2
     record.search_seconds[1] += seconds / 2
-    views = [None if got is None else [got[0], list(got[1])] for got in event["rankViews"]]
-    chosen = [int(i) for i in event["chosen"]]
-    record.decisions.append(
-        Decision(
-            turn=int(event["turn"]),
-            kind="move",
-            position=event["position"],
-            own_actions=list(event["ours"]),
-            own_policy=[float(x) for x in event["ownPolicy"]],
-            foe_actions=list(event["theirs"]),
-            foe_policy=[float(x) for x in event["foePolicy"]],
-            search_value=float(event["value"]),
-            own_chosen=event["ours"][chosen[0]],
-            foe_chosen=event["theirs"][chosen[1]],
-            rank_views=None if views == [None, None] else views,
-            shown=[list(ids) for ids in event["seen"]],
-            foe_search_value=float(event["foeValue"]),
-            deepened=None,
-        )
-    )
+    record.decisions.append(WrittenDecision(event["decision"]))
     timing.decided("move")
     record.unmodelled.extend(event["advanceNotes"])
     portlp.COUNTS["advanced"] += 1

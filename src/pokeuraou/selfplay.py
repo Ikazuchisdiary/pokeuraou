@@ -183,6 +183,31 @@ class Decision:
     deepened: list[dict[str, int] | None] | None = None
 
 
+class WrittenDecision:
+    """IKA-458 stage 3.6c: a `Decision` the port wrote as the record holds it (the keys of
+    `GameRecord.to_json`'s ``decisions``). Python keeps it and writes it; the attributes the
+    readers of a record in memory use (`kind`, `turn`, `own_chosen`, ...) are read from it."""
+
+    __slots__ = ("json",)
+
+    #: `Decision`'s field -> the record's key, for the fields not named the same way.
+    _KEYS = {
+        "own_actions": "ownActions", "own_policy": "ownPolicy", "foe_actions": "foeActions",
+        "foe_policy": "foePolicy", "search_value": "searchValue", "own_chosen": "ownChosen",
+        "foe_chosen": "foeChosen", "rank_views": "rankViews", "shown": "shownIdentities",
+        "foe_search_value": "foeSearchValue", "deepened": "deepened",
+    }
+
+    def __init__(self, written: dict[str, Any]) -> None:
+        self.json = written
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        key = self._KEYS.get(name, name)
+        if key not in ("turn", "kind", "position") and key not in self._KEYS.values():
+            raise AttributeError(name)
+        return self.json.get(key)
+
+
 def _shown_record(
     pos: Position, hidden_seen: Sequence[Collection[str]] | None
 ) -> list[list[str]]:
@@ -477,7 +502,7 @@ class GameRecord:
             **({"leads": self.leads} if self.leads is not None else {}),
             **_final_json(self),
             "decisions": [
-                {
+                d.json if isinstance(d, WrittenDecision) else {
                     "turn": d.turn,
                     "kind": d.kind,
                     "position": d.position,

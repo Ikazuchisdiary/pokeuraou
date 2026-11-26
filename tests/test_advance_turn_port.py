@@ -105,23 +105,6 @@ def test_the_draw_is_numpys(turns, flags_off) -> None:  # noqa: ANN001
     assert paused >= 1 and branched >= 5, (paused, branched)
 
 
-def test_the_needed_comes_with_the_turn(turns, flags_off) -> None:  # noqa: ANN001
-    """The position's `needed` is read from the turn's answer, once, for that object only."""
-    for reg, pos, chosen in turns:
-        got = port.advance(reg, pos, chosen, Budget.exact(), np.random.default_rng(7))
-        if got.position is None:
-            continue
-        said = rustnode.take_needed(got.position)
-        assert said is not None
-        assert said == port.replacements_needed(reg, got.position)
-        assert rustnode.take_needed(got.position) is None
-        # Another object, even an equal one, is asked of the port.
-        got = port.advance(reg, pos, chosen, Budget.exact(), np.random.default_rng(7))
-        assert rustnode.take_needed(got.position.copy()) is None
-        return
-    raise AssertionError("no turn landed on a branch")
-
-
 def test_another_seed_is_another_draw(turns, flags_off) -> None:  # noqa: ANN001
     """The comparison can fail: seeds that differ draw other outcomes somewhere."""
     indices = {0: [], 1: []}

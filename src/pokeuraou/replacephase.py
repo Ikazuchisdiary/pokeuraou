@@ -98,10 +98,6 @@ def play(  # noqa: PLR0913 - the phase's pieces
     after["uinteger"] = int(answer["rng"]["uinteger"])
     rng.bit_generator.state = after
     played = Played(answer)
-    rustnode._NEEDED[0] = (  # noqa: SLF001
-        played.position,
-        tuple(tuple(bool(flag) for flag in side) for side in answer["needed"]),
-    )
     portlp.COUNTS["phased"] += 1
     return played
 

@@ -460,18 +460,6 @@ class AdvancedTurn:
     chain: dict[str, Any] | None = None
 
 
-#: The landed position of the last `advance_turn` and the replacements it owes, which the port
-#: answered along with it: `take_needed` hands them to the very next `replacements_needed` of
-#: that same object and forgets them.
-_NEEDED: list[tuple[Position, tuple[tuple[bool, ...], ...]] | None] = [None]
-
-
-def take_needed(pos: Position) -> tuple[tuple[bool, ...], ...] | None:
-    """What `advance_turn` said `pos` owes, if `pos` is the position it landed; one use."""
-    held, _NEEDED[0] = _NEEDED[0], None
-    return held[1] if held is not None and held[0] is pos else None
-
-
 @dataclass
 class NodeResult:
     """One matrix per objective, plus what the port declined to fill."""
@@ -990,11 +978,6 @@ class RustNode:
             rng.bit_generator.state = after
         raw = response.get("position")
         landed = Position.from_json(raw) if raw else None
-        if landed is not None:
-            _NEEDED[0] = (
-                landed,
-                tuple(tuple(bool(flag) for flag in side) for side in response["needed"]),
-            )
         return AdvancedTurn(
             branches=list(response["branches"]),
             suspended=list(response.get("suspended", [])),
