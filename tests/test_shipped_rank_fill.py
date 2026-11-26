@@ -216,7 +216,7 @@ def _board_worker(tmp_path, monkeypatch, extra: list[str]) -> list[str]:  # noqa
         "--pool", str(_write_pool(tmp_path / "pool.json", _variants())),
         "--value", "unused.pt", "--hide-bench", "--games", "1", "--seed", "9",
         "--games-out", str(tmp_path / "m" / "games-worker0.jsonl"), "--limit", "2",
-        "--baseline-hp-share", *extra,
+        "--baseline", "b.pt", *extra,
     ])
     return fills
 

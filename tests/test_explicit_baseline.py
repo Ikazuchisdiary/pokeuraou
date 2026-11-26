@@ -12,7 +12,6 @@ Under the old code both calls complete, so these tests fail on them.
 
 from __future__ import annotations
 
-import json
 import sys
 
 import pytest
@@ -67,17 +66,15 @@ def test_the_worker_refuses_hp_share_beside_a_leaf(tmp_path, monkeypatch, capsys
     assert "contradicts" in capsys.readouterr().err
 
 
-def test_the_worker_plays_hp_share_when_told(tmp_path, monkeypatch, capsys) -> None:  # noqa: ANN001
+def test_the_worker_stops_at_hp_share_until_it_is_a_served_arm(tmp_path, monkeypatch, capsys) -> None:  # noqa: ANN001
+    """`--baseline-hp-share` says why it cannot be used now (IKA-460: the hp-share leaf is to
+    come back as an arm of the Rust inference server) and plays nothing."""
     tool, argv, out = _worker(tmp_path, monkeypatch)
-    tool.main([*argv, "--baseline-hp-share"])
-    records = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
-    assert len(records) == 2
-    for record in records:
-        which = record["seatIndex"]
-        assert record["provenance"]["leaves"][1 - which] == "hp-share"
-    # The head of the echo names both arms, hp-share included.
-    err = capsys.readouterr().err
-    assert "  tested arm: leaf stub" in err and "  other arm: leaf hp-share" in err
+    with pytest.raises(SystemExit) as stopped:
+        tool.main([*argv, "--baseline-hp-share"])
+    assert stopped.value.code == 2
+    assert "IKA-460 step 4" in capsys.readouterr().err
+    assert not out.exists()
 
 
 # ------------------------------------------------------------------ the queue driver
@@ -112,11 +109,11 @@ def test_the_driver_refuses_an_unnamed_other_arm(tmp_path, monkeypatch, pool_fil
     assert "--baseline" in code
 
 
-def test_the_driver_passes_hp_share_on(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
+def test_the_driver_stops_at_hp_share(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
     code, command = _driver(tmp_path, monkeypatch,
                             ["--pool", pool_file, "--hide-bench", "--baseline-hp-share"])
-    assert code == 0
-    assert "--baseline-hp-share" in command and "--baseline" not in command
+    assert command is None
+    assert isinstance(code, str) and "IKA-460 step 4" in code
 
 
 def test_an_explicit_baseline_is_passed_as_before(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001

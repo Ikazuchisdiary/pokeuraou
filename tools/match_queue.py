@@ -77,6 +77,12 @@ def check_other_arm(args: argparse.Namespace, extra: list[str]) -> None:
             "--baseline-hp-share contradicts the baseline leaf also given; one of them is "
             "not what you meant."
         )
+    if args.baseline_hp_share:
+        raise SystemExit(
+            "--baseline-hp-share cannot be used now: a game's nodes are scored by the port on "
+            "the inference server, and the hp-share leaf is to come back as an arm of the Rust "
+            "inference server in IKA-460 step 4 (until then there is no hp-share leaf to serve)"
+        )
     if not args.baseline_hp_share and not named:
         raise SystemExit(
             "no --baseline: the other arm would be hp-share without anyone choosing it "

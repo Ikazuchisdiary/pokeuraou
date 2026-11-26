@@ -229,6 +229,14 @@ def _q_delta(before: dict[str, dict[str, int]], label: str) -> tuple[int, int]:
             now.get("cells", 0) - was.get("cells", 0))
 
 
+#: What `--baseline-hp-share` says until the hp-share arm is back on the Rust inference server.
+HP_SHARE_STOPPED = (
+    "--baseline-hp-share cannot be used now: a game's nodes are scored by the port on the "
+    "inference server, and the hp-share leaf is to come back as an arm of the Rust inference "
+    "server in IKA-460 step 4 (until then there is no hp-share leaf to serve)"
+)
+
+
 def check_other_arm(args: argparse.Namespace, error: Callable[[str], object]) -> None:
     """The other arm's leaf is named, never defaulted (IKA-335).
 
@@ -242,6 +250,8 @@ def check_other_arm(args: argparse.Namespace, error: Callable[[str], object]) ->
         error("--baseline-hp-share contradicts the baseline leaf "
               f"{args.baseline_inference_arm or [str(p) for p in args.baseline]}: "
               "one of them is not what you meant")
+    if args.baseline_hp_share:
+        error(HP_SHARE_STOPPED)
     if not args.baseline_hp_share and not named:
         error("the other arm's leaf is not named: pass --baseline (loaded here) or "
               "--baseline-inference-arm (on a server), or --baseline-hp-share to play "
