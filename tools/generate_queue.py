@@ -179,11 +179,6 @@ def main() -> None:
     add_bench_flags(ap)
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
-        "--no-port-node", action="store_true",
-        help="turn off the port's whole-node road for hidden benches (IKA-455), which the "
-        "workers have on by default; the same as POKEURAOU_GEN_PORT_NODE=0",
-    )
-    ap.add_argument(
         "--pool",
         required=True,
         help="M-C generation (IKA-81): both seats from this pool (data/pool/<id>.json), "
@@ -267,8 +262,6 @@ def main() -> None:
 
     env = dict(os.environ)
     env["POKEURAOU_RUST_NODE"] = "0" if args.no_bridge else "1"
-    if args.no_port_node:
-        env["POKEURAOU_GEN_PORT_NODE"] = "0"
     env["PYTHONPATH"] = str(ROOT / "src")
 
     servers: list[subprocess.Popen] = []

@@ -169,9 +169,6 @@ def main(argv: list[str] | None = None) -> None:
             values = found
         else:
             say(f"note: no {DEFAULT_VALUE[0]} here, so the read uses hp-share (--value names a leaf)")
-    from pokeuraou import portlp
-
-    portlp.default_on_for_play()
     address = humanplay.inference_address_or_start(
         args.inference, reg, None if args.hp_share else values,
         args.q_model or (repo_root() / DEFAULT_Q), device, say)

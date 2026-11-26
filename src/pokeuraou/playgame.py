@@ -1,20 +1,21 @@
 """IKA-458 stage 3.6b: a game's turns played in one request to the port (`playGame`,
-`rust/src/playgame.rs`) -- off by default (`portlp.PLAY`).
+`rust/src/playgame.rs`).
 
 `selfplay.play_game`'s loop made, for each step, the hidden bench's completions
 (`hiddenstep.step`), then a replacement phase (`replacephase.play`) or a move node
 (`selfplay._decide`: the menus and the node over them) and the turn's advance
 (`selfplay._advance_turn`) -- each a crossing to the port, the next step's request built from the
-last one's answer. With `portlp.PLAY` on and the game of the shape generation plays, the port makes
-all the steps it can in one request and Python does what only it does: it writes the steps down
-(`Decision`, the record's notes) and books what the port says it did (the inference server's work
-on the leaf, the counts the report reads) exactly as the road that crossed for every step booked
-it.
+last one's answer. For the game of the shape generation plays (one leaf on both seats, the
+hidden bench's node, the Q's menus), the port makes all the steps it can in one request and
+Python does what only it does: it writes the steps down (`Decision`, the record's notes) and
+books what the port says it did (the inference server's work on the leaf, the counts the report
+reads) exactly as the loop that crossed for every step booked it.
 
-The port stops at a step it does not do the way Python does (a hidden bench its sheet cannot
-explain, an empty menu, a draw numpy would refuse, a game it cannot resolve) before drawing or
-recording anything, and `play` hands the game back at that step: `play_game` goes on from the same
-position and generator, the old road.
+The port stops at a step that is a state of the game the loop answers itself (a hidden bench its
+sheet cannot explain, an empty menu, a draw numpy would refuse, a turn it has no outcome of)
+before drawing or recording anything, and `play` hands the game back at that step: `play_game`
+goes on from the same position and generator, in its own loop (`portlp.COUNTS["handoffs"]`). A
+request the port answers with a fault is `portlp.PortFault` (IKA-460).
 """
 
 from __future__ import annotations
@@ -74,8 +75,6 @@ def prepare(  # noqa: PLR0913 - the loop's settings
     from .encode import HP_SCALE, rules_of
     from .selfplay import _HiddenBench, _self_switch_request
 
-    if not (portlp.PLAY[0] and portlp.GAME[0] and portlp.DECIDE[0] and portlp.NODE[0] and portlp.EXACT[0]):
-        return None
     if game is None or luck.active() or timing.DUPES or rank_scores._SINK.get() is not None:  # noqa: SLF001
         return None
     if leaves[0] is None or leaves[0] is not leaves[1]:
@@ -172,8 +171,7 @@ def play(  # noqa: PLR0913 - the loop's state
     answer = port.ask(reg, lambda node: node.play_game(request, hidden))
     portlp.COUNTS["crossings"] += 1
     if "fault" in answer:
-        portlp.faulted("playGame", str(answer["fault"]))
-        return None
+        raise portlp.PortFault("playGame", str(answer["fault"]))
     if "serverError" in answer:
         from .inference import request_failed
 
@@ -189,7 +187,8 @@ def play(  # noqa: PLR0913 - the loop's state
     after["uinteger"] = int(answer["rng"]["uinteger"])
     rng.bit_generator.state = after
     if answer["stop"] == "handoff":
-        portlp.faulted("playGame", f"a step is the caller's: {answer['why']}")
+        # A state of the game the port leaves to the loop (see the module's words), not a fault.
+        portlp.COUNTS["handoffs"] += 1
     played = Played(answer)
     if played.turns is not None:
         record.turns = played.turns

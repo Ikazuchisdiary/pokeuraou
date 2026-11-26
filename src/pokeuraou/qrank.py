@@ -891,34 +891,17 @@ def prefetch(
     # rank from one matrix, and so from one game: its solve is the same LP on the same
     # numbers, and was solved twice (2.9 of 16 rankings a game in M-C generation).
     memos: list[dict[str, Any]] = [{} for _ in asks]
-    if portlp.GEN[0]:
-        # IKA-455: the games of every request in one crossing to the port, each `solve`'s
-        # answer to the bit (`portlp`); `rank` takes it where it would have solved. A game the
-        # port could not solve is `solve`'s error returned in its place: `rank`'s None.
-        try:
-            with timing.stage("lp.q"):
-                got = portlp.solve_many(reg, [matrices[index] for index in range(len(asks))])
-        except portlp.PortFault as fault:
-            # The port could not solve them: `rank` solves each in Python, as it does without it.
-            portlp.faulted("lp", fault)
-        else:
-            for memo, answer in zip(memos, got, strict=True):
-                memo["pre"] = None if isinstance(answer, Exception) else answer
+    # IKA-455: the games of every request in one crossing to the port, each `solve`'s answer
+    # (`portlp`); `rank` takes it. A game the port could not solve is `solve`'s error returned
+    # in its place: `rank`'s None. A fault of the port is `portlp.PortFault` (IKA-460).
+    with timing.stage("lp.q"):
+        got = portlp.solve_many(reg, [matrices[index] for index in range(len(asks))])
+    for memo, answer in zip(memos, got, strict=True):
+        memo["pre"] = None if isinstance(answer, Exception) else answer
     return {
         side: (own_key, foe, matrices[index].copy(), memos[index])
         for side, (own_key, foe, index) in plan.items()
     }
-
-
-_Q_SOLVED: dict[Any, Any] = {}
-
-
-def _q_solve(solve: Callable[..., Any]) -> Callable[..., Any]:
-    """`solve` charged to `lp.q` rather than `lp` (IKA-339); `solve` when timing is off."""
-    found = _Q_SOLVED.get(solve)
-    if found is None:
-        found = _Q_SOLVED[solve] = timing.timed("lp.q")(getattr(solve, "__wrapped__", solve))
-    return found
 
 
 def q_ranking(
@@ -936,7 +919,6 @@ def q_ranking(
     was asked for, and otherwise Q is asked here as without it.
     """
     from . import qhead
-    from .equilibrium import EquilibriumError, solve
 
     def rank(pool: list[SideAction], _scored: object = None) -> np.ndarray:
         memo: dict[str, Any] | None = None
@@ -965,12 +947,11 @@ def q_ranking(
             e = memo["pre"]
             memo["solved"] = e
         else:
-            try:
-                # IKA-339: the Q's own game, as a row apart from the search's LPs (`lp`).
-                # Timing off, this is `solve` itself.
-                e = _q_solve(solve)(q)
-            except (EquilibriumError, ValueError):
-                e = None
+            # IKA-339: the Q's own game, as a row apart from the search's LPs (`lp`); the
+            # port's HiGHS solves it (`portlp`, IKA-460: the LP has no Python road).
+            with timing.stage("lp.q"):
+                got = portlp.solve_many(reg, [q])[0]
+            e = None if isinstance(got, Exception) else got
             if memo is not None:
                 memo["solved"] = e
         if e is None:

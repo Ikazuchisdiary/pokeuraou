@@ -802,10 +802,6 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
-    # IKA-460: human play's roads (stage 2.4's), as play_human.py and analyze.py take them.
-    from pokeuraou import portlp
-
-    portlp.default_on_for_play()
     if args.worker is not None:
         worker(args)
         return 0

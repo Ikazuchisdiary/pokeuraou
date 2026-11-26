@@ -393,7 +393,8 @@ def generate_pool(
             started = time.perf_counter()
             prepared = None
             # IKA-458 stage 3.5: the pair, the four, the priors and the start position from the
-            # port, where `portlp.PREP` is on; a game it declines is prepared here as before.
+            # port, where it holds positions (`rustnode.hold_positions`); a game it declines is
+            # prepared here.
             if rng is None:
                 assert solver is not None and index is not None
                 with timing.stage("selection"):

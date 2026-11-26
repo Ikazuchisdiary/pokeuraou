@@ -1,20 +1,22 @@
-"""IKA-457 stage 2.3: a move node's two menus by the Q, built in the port -- off by default.
+"""IKA-457 stage 2.3: a move node's two menus by the Q, built in the port.
 
 `selfplay._menus` with a `q-nocover` rank fill built them in the worker's Python: both sides'
 legal pools (`qhead.legal_pool`), `qrank.prefetch`'s Q request (the arrays, a `qfeatures`
 crossing a side, `RemoteQ.matrices`), the Q's games, and `narrow(..., rank=..., cover=False)`
 of each ranking (which also asked the port for both pools' damage scores, only to keep them
-in a detail line nobody reads). With `portlp.MENUS` on one `rootMenus` request
+in a detail line nobody reads). Now one `rootMenus` request
 (`rust/src/qmenus.rs`) does all of it and hands back the two menus: the same pools action for
 action, the same arrays byte for byte into the Q's own block, the same `q` / `q_many` request,
 the same games, numpy's own BLAS for the scores, and the cut at each side's width.
 
 Only where the Q is the inference server's (`qrank.RemoteQ`), its encoder is `encode.Encoder`
 and numpy's BLAS is an OpenBLAS the port can load; the fill is a ``q-nocover`` one; and no
-wider menu is asked for. Anything else, an empty pool and a fault from the port leave the
-menus to Python. A binary that predates the request stops, as the other stages' do.
+wider menu is asked for. Anything else and an empty pool leave the
+menus to Python (`selfplay._menus`'s own ranking: the damage order, the leaf's, a wider menu).
+A fault from the port is `portlp.PortFault`. A binary that predates the request stops, as the
+other requests do.
 
-Stage 2.4 (`portlp.DECIDE`, `fused.py`) asks the same of the same request as the first half of
+Stage 2.4 (`beliefnode.fused_node`) asks the same of the same request as the first half of
 `moveNode`, whose second half is the node over those menus: `Plan` is the half both use.
 """
 
@@ -111,8 +113,6 @@ def plan(  # noqa: PLR0913 - the node's pieces
     server_key: str = "server",
 ) -> Plan | None:
     """The menus' request where this road goes, else None (Python then builds the menus)."""
-    if not portlp.MENUS[0] or timing.DUPES:
-        return None
     from . import actions
     from .encode import Encoder
 
@@ -144,6 +144,6 @@ def menus(  # noqa: PLR0913 - the node's pieces
     portlp.COUNTS["crossings"] += 1
     portlp.COUNTS["lps"] += int(answer.get("lps", 0))
     if "fault" in answer:
-        raise portlp.PortFault(str(answer["fault"]))
+        raise portlp.PortFault("rootMenus", str(answer["fault"]))
     planned.finish(answer)
     return planned.menus

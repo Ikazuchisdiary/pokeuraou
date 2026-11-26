@@ -1,16 +1,17 @@
 """IKA-458 stage 3.4: what each side has shown and the positions its unseen slots could hold,
-asked of the port in one request (`hiddenStep`, `rust/src/hiddenbench.rs`) -- off by default.
+asked of the port in one request (`hiddenStep`, `rust/src/hiddenbench.rs`).
 
 `play_game` carried each side's seen identities (`hidden.seen_identities`), turned them into
 this position's seen slots, priced each way of filling the unseen slots with the selection prior
 (`selfplay._bench_weights`) and built each completed position (`hidden.completions`) once a
-step. With `portlp.HIDDEN` on the port does all of it. A completed position is kept in the port
-under a number (`rustnode.HeldPosition`) and Python names it in later requests; it is written
-out only if Python reads it (a fallback road does).
+step. With the port holding positions (`rustnode.hold_positions`) it does all of it. A completed
+position is kept in the port under a number (`rustnode.HeldPosition`) and Python names it in later
+requests; it is written out only if Python reads it.
 
-Where this road does not go -- a binary that predates it, positions not held, a side that
-believes the dex's base species (`dex_base_belief`), a fault the port answers -- `step` returns
-None and `play_game` builds them as it did.
+Where this road does not go -- positions not held (a process that plays two executables, human
+play), a side that believes the dex's base species (`dex_base_belief`) -- `step` returns None
+and `play_game` builds them with `hidden.completions`. A fault the port answers is
+`portlp.PortFault`.
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ class Step:
 
 
 def usable() -> bool:
-    return portlp.HIDDEN[0] and rustnode._HOLD[0]  # noqa: SLF001
+    return bool(rustnode._HOLD[0])  # noqa: SLF001
 
 
 def step(  # noqa: PLR0913 - the step's pieces
@@ -125,8 +126,7 @@ def step(  # noqa: PLR0913 - the step's pieces
     answer = port.ask(reg, call)
     portlp.COUNTS["crossings"] += 1
     if "fault" in answer:
-        portlp.faulted("hiddenStep", answer["fault"])
-        return None
+        raise portlp.PortFault("hiddenStep", str(answer["fault"]))
     portlp.COUNTS["hidden"] += 1
     seen_now = [frozenset(ids) for ids in answer["seen"]]
     shown = [frozenset(slots) for slots in answer["shown"]]

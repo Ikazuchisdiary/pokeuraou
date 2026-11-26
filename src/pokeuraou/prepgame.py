@@ -1,17 +1,18 @@
 """IKA-458 stage 3.5: a game's preparation asked of the port in one request (`prepGame`,
-`rust/src/prep.rs`) -- off by default.
+`rust/src/prep.rs`).
 
 `poolplay.generate_pool` drew the pair and its seats from `default_rng([seed, index])`, read the
 pair's selection solve, drew both sides' four from it, built the two bench priors and the turn-1
-position with the leads' switch-ins applied. With `portlp.PREP` on the port does all of it from the
-pool's number, the seed and the game's index. The pool crosses once (`poolDefine`); the solves are
-read there from the store directory, and a pair with no file is solved here (it needs the leaf) and
-asked again. The game's sheets and priors are defined in the port under a number for `hiddenStep`
+position with the leads' switch-ins applied. The port does all of it from the pool's number, the
+seed and the game's index. The pool crosses once (`poolDefine`); the solves are read there from
+the store directory, and a pair with no file is solved here (it needs the leaf) and asked again.
+The game's sheets and priors are defined in the port under a number for `hiddenStep`
 (`hiddenstep.Game`), so they never cross.
 
-Where this road does not go -- a binary that predates it, no store, no queue index, a generator
-that is not numpy's PCG64, a selection game with more than one class of the opponent, a fault the
-port answers -- `prepare` returns None and `generate_pool` does the preparation as it did.
+Where this road does not go -- positions not held, no store, no queue index, a generator that is
+not numpy's PCG64, a selection game with more than one class of the opponent -- `prepare` returns
+None and `generate_pool` does the preparation itself. A fault the port answers is
+`portlp.PortFault`.
 """
 
 from __future__ import annotations
@@ -124,7 +125,7 @@ class Prepared:
 
 
 def usable() -> bool:
-    return portlp.PREP[0] and hiddenstep.usable()
+    return hiddenstep.usable()
 
 
 def prepare(  # noqa: PLR0913 - the request's pieces
@@ -175,8 +176,7 @@ def prepare(  # noqa: PLR0913 - the request's pieces
     if "stop" in answer:
         raise ValueError(str(answer["stop"]))
     if "fault" in answer:
-        portlp.faulted("prepGame", answer["fault"])
-        return None
+        raise portlp.PortFault("prepGame", str(answer["fault"]))
     portlp.COUNTS["prepared"] += 1
     a, b = (int(t) for t in answer["teams"])
     key = (min(a, b), max(a, b))

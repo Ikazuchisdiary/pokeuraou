@@ -12,13 +12,13 @@ in the turn unless it is switched in**. So for the cells where none of them reac
 field, the turn resolves identically in every completion and the leaves differ only in who
 is standing on the bench. Counted over opening nodes, that is **84.3% of cells**.
 
-So this resolves those cells once, on the true position, and builds each completion's
+So the port resolves those cells once, on the true position, and builds each completion's
 leaves by overwriting the bench rows of the encoding -- every per-Pokemon array is
 ``(B, 2, M, ...)``, so a slot is one assignment. The true position is only a carrier: the
 Pokemon it holds in those slots take no part in the cells being shared, and their rows are
 overwritten before anything is scored. Nothing about them reaches a payoff.
 
-The remaining cells are resolved per completion, restricted with ``cells=``:
+The remaining cells are resolved per completion:
 
 - the opponent's action switches into a hidden slot;
 - our action carries a move that forces their switch;
@@ -31,35 +31,25 @@ shared cell's resolution depends on neither. That is what takes 6.0x to a projec
 A dirty cell is dirty for a side (IKA-269). One that reaches only side 0's bench is the true
 position's turn for every completion of side 1's, read off their patched blocks like a
 shared cell; and one that reaches a bench only by that side's own switches is the same turn
-for every completion that brings the same Pokemon into the same slot -- the port brings in
-the switch's species wherever it stands (`_entering`) -- read off the first such
-completion's fill with its other hidden slot patched. Half the per-completion cell
-resolutions of M-C generation went (2,781 -> 1,360 a game), and the node is the same to the
-bit with a row-wise leaf over 1,375 nodes generation met.
+for every completion that brings the same Pokemon into the same slot.
 
-And the whole node is scored in one call of the leaf (IKA-105): every completion's patched
-rows and the port's leaves of its dirty cells
-are blocks of one `Encoded`, and each completion reads its values back by where its block
-starts. It was a forward pass per completion and another per completion's dirty cells --
-15.5 a node over `data/ika73/w12` games 0-209, against 17.74 for a whole `move.hidden`
-decision of shipping generation, every pass it makes counted (IKA-98).
-The answers are the same to the bit with a leaf whose rows do not depend on the batch;
-the learned net's do, in the float32 sums, which moves a value by 1e-9 (IKA-148).
+The whole node is scored in one call of the inference server (IKA-105): every completion's
+patched rows and the port's leaves of its dirty cells are blocks of one batch, and each
+completion reads its values back by where its block starts.
 
-## What has to be true, and is asserted rather than assumed
-
-That a patched encoding equals the encoding of the same completion resolved from scratch.
-If it does not -- a feature that reads the bench, a mechanic that counts party members --
-the payoffs stay plausible and are wrong, and nothing downstream could tell. `tests/
-test_beliefnode.py` compares the two, cell by cell, and the fast path is only taken when
-the port is available to be compared against.
+Since IKA-460 stage 4 the node is the port's, and only the port's: `belief_payoffs` is one
+`beliefNode` request (`rust/src/beliefplan.rs`) on the inference server's leaf
+(`inference.RemoteValue`), which plans the node, fills and patches the blocks, scores them on
+the server, folds them and solves the Bayesian games (`rust/src/beliefnode.rs`). The Python
+road that did each of those in turn, and the matrix per completion that defined the answer, are
+gone; a leaf that is not the inference server's is `UnservedLeaf`, and a request the port
+answers with a fault is `portlp.PortFault`.
 """
 
 from __future__ import annotations
 
 import functools
-import itertools
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -67,8 +57,6 @@ import numpy as np
 from . import port, timing
 from .actions import MoveAction, SideAction, SwitchAction
 from .budget import Budget
-from .fold import _fold_from_json, fold_value
-from .port import batched_payoff
 from .position import Position
 from .regulation import Regulation
 from .rustnode import PortBranch
@@ -78,6 +66,13 @@ from .rustnode import PortBranch
 #: because a missing entry is silent: the cell would be shared, the substitution would be
 #: wrong, and the payoff would still look like a payoff.
 PHAZING_MOVES = frozenset({"dragontail", "circlethrow", "whirlwind", "roar"})
+
+
+class UnservedLeaf(TypeError):
+    """A node was asked of a leaf that is not the inference server's (`inference.RemoteValue`).
+
+    The port plans, scores and folds the node on the server itself; there is no leaf held in
+    this process to score it with (IKA-460 stage 4)."""
 
 
 @dataclass
@@ -92,8 +87,8 @@ class BeliefNode:
     #: Cells resolved once and shared, and cell-resolutions that had to be repeated.
     shared: int = 0
     redone: int = 0
-    #: IKA-455 stage 1.2: the Bayesian games the port solved with the fold, by the side whose
-    #: strategy each is (`BayesianEquilibrium`, or the error `solve_bayesian` would raise).
+    #: The Bayesian games the port solved with the fold, by the side whose strategy each is
+    #: (`BayesianEquilibrium`, or the error `solve_bayesian` would raise).
     solved: dict = field(default_factory=dict)
 
 
@@ -163,10 +158,10 @@ def turn_in_completion(
     `reference` and `position` are two completions of one node: the same position but for
     `side`'s hidden `slots`. A turn in which no hidden Pokemon is brought in -- the cells
     `reaches_bench` clears, and the caller asks only for those -- is the same turn in both,
-    and each branch differs only in who stands in those slots, as `belief_payoffs` shares
-    a clean cell's leaves. So each branch here is the reference's with `position`'s
-    Pokemon in those slots, and the side's `mega_capable_slots` (numbers read off the
-    party when the side was built, which the port hands back as it was given) theirs.
+    and each branch differs only in who stands in those slots. So each branch here is the
+    reference's with `position`'s Pokemon in those slots, and the side's `mega_capable_slots`
+    (numbers read off the party when the side was built, which the port hands back as it was
+    given) theirs.
 
     Checked rather than assumed, branch by branch: a hidden slot the turn changed in any
     way -- brought in, dragged in, renumbered, touched -- is not the Pokemon the reference
@@ -233,8 +228,23 @@ def _red_card_on_field(position: Position | None, side: int) -> bool:
     )
 
 
-# Its own Python -- the copies per completion, the span loop, the folds -- had no stage and
-# sat in "the rest" (IKA-98); what it calls is still charged to the stages it calls.
+def served_leaf(evaluate: object, what: str = "the hidden bench's node"):  # noqa: ANN201
+    """The inference server's leaf (`inference.RemoteValue`) that ``evaluate`` is, or
+    `UnservedLeaf`: the port scores a node on the server and reads no leaf held here."""
+    from .inference import RemoteValue
+
+    owner = getattr(evaluate, "__self__", evaluate)
+    if type(owner) is not RemoteValue:
+        raise UnservedLeaf(
+            f"{what} is solved by the port on the inference server's leaf "
+            f"(inference.RemoteValue), not on {type(owner).__name__}; start the Rust inference "
+            "server (`inference.start_server`, or `--inference ADDRESS`) and read through it"
+        )
+    return owner
+
+
+# Its own Python -- the request's pieces and the books -- had no stage and sat in "the rest"
+# (IKA-98); what it calls is still charged to the stages it calls.
 @timing.timed("belief")
 @timing.labelled("matrix")
 def belief_payoffs(
@@ -250,19 +260,15 @@ def belief_payoffs(
 ) -> BeliefNode:
     """Every completion's matrix, resolving the turns that do not depend on the bench once.
 
+    One `beliefNode` request to the port (`_node_in_port`), on the inference server's leaf.
     ``solve`` names the sides whose Bayesian game (`search.belief_solve`) the port solves in
-    the same crossing as the fold, when stage 1.2 is on (`portlp.FOLD`): their answers come
-    back in `BeliefNode.solved` and nothing else about the node changes (IKA-455).
+    the same request: their answers come back in `BeliefNode.solved`.
 
     `spreads[s]` completes side `s`'s own unseen slots, so side `1 - s`'s game is solved
     over it. A side with nothing hidden contributes a single exact completion and costs
-    nothing extra -- which was true of one such side and not of two until IKA-104: with
-    both exact the two completions are the same position, and `_per_completion` resolved
-    it once per side. It resolves it once now.
-
-    A matrix per completion (`_per_completion`, the definition) when nothing is hidden or
-    the leaf has no encoded form. Both roads are the port's; there is no Python one to
-    fall back to (IKA-209), so a missing binary or a refused cell stops.
+    nothing extra: with both exact the two completions are the same position, which the
+    port resolves once. A cell the port refuses stops the node (IKA-209): there is no Python
+    resolver behind it, and a request the port faults on is `portlp.PortFault`.
     """
     row, col = list(ours), list(theirs)
     hidden = {
@@ -273,273 +279,25 @@ def belief_payoffs(
         # Per decision, by whether any bench here is hidden (IKA-98's per-decision table).
         timing.refine("hidden" if any(hidden.values()) else "exact")
         timing.count("completions", sum(len(items) for items in spreads.values()))
-    from . import portlp
+    from .encode import rules_of
 
-    # IKA-457 stage 2.1: a node with nothing hidden is the whole-node request's too (the
-    # completions are the position itself, `exact` and `root`), where `portlp.EXACT` is on.
-    exact_node = not any(hidden.values())
-    if exact_node and not (portlp.EXACT[0] and portlp.NODE[0]):
-        with timing.region("belief.exact"):
-            return _per_completion(reg, row, col, evaluate, budget, spreads)
-
-    from .encode import Encoded, rules_of
-
-    owner = getattr(evaluate, "__self__", evaluate)
-    scorer = getattr(owner, "from_encoded", None)
-    if scorer is None:
-        return _per_completion(reg, row, col, evaluate, budget, spreads)
-    # The leaf's own encoder and rules, for the port's arrays and for the patched rows alike:
-    # a match plays two arms in one process, and each arm is scored the way its leaf says
-    # (IKA-141). A leaf without an encoder is scored under the current rules.
-    encoder = getattr(owner, "encoder", None) or _encoder_for(reg)
+    leaf = served_leaf(evaluate)
     rules = rules_of(evaluate)
-    # IKA-455 stage 1.3: the port keeps each fill's arrays and stacks and scores them itself,
-    # where the leaf is an inference server's (`_stack_leaf`); then each fill is held by number.
-    leaf = _stack_leaf(owner, rules)
-    tickets: Iterator[int] | None = _TICKETS if leaf is not None else None
-    ref_ticket = next(tickets) if tickets is not None else None
-    if leaf is not None and portlp.NODE[0]:
-        try:
-            done = _node_in_port(
-                reg, leaf, position, row, col, budget, rules, hidden, spreads, solve,
-                scorer, encoder,
-            )
-        except portlp.PortFault as fault:
-            # The port could not plan the node: Python does, down the road below (IKA-455).
-            portlp.faulted("beliefNode", fault)
-            done = None
-        if done is _NOT_ON_THIS_BINARY:
-            return _per_completion(reg, row, col, evaluate, budget, spreads)
-        if done is not None:
-            return done
-    if exact_node:
-        # Not the port's (no server's leaf, a fault, an old binary): the definition.
-        with timing.region("belief.exact"):
-            return _per_completion(reg, row, col, evaluate, budget, spreads)
-
-    with timing.region("belief.ref"):
-        filled = port.ask(
-            reg,
-            lambda node: node.fill_encoded(
-                position, row, col, budget, [], None, rules=rules,
-                hold=ref_ticket, hold_clear=True,
-            ),
+    if rules.patch_shares_side:
+        raise UnservedLeaf(
+            "the pre-IKA-119 patch (`patch_shares_side`) is not the port's: the node's leaves "
+            "are patched there with the rebuilt side vector"
         )
-    if rules.mega_from_slots and filled.mega_from_slots is not True:
-        # A binary that predates the field encoded with the current rule. The fill cannot
-        # be used for this leaf; the per-completion path encodes in Python.
-        return _per_completion(reg, row, col, evaluate, budget, spreads)
-    port.note_port_rule([scorer], filled)
-    # A refused cell has no span and no fold: it used to be resolved per completion in
-    # Python (IKA-139). There is no Python resolver now, so it stops the node (IKA-209).
-    port.raise_refused(filled.refused)
-
-    dirty = reaches_bench(reg, row, col, hidden, position)
-    for i, j, _root in filled.folded:
-        dirty[i, j] = True
-    reference: Encoded = filled.encoded
-    unmodelled = set(filled.unmodelled)
-    wanted = [(i, j) for i in range(len(row)) for j in range(len(col)) if dirty[i, j]]
-    # Everything the node's leaves need, gathered first and scored once (IKA-105). Until
-    # then a hidden decision paid a forward pass per completion for the shared cells, and
-    # per completion again for the dirty cells -- the port's leaves in one and the cells
-    # it refused, resolved here, in another: 17.74 passes a `move.hidden` decision against
-    # 3.02 for `move.exact` (IKA-98). Each part is a block of rows in one `Encoded`; the
-    # values go back to the completion that asked for them by the block's start.
-    parts: list[tuple[int, Callable[[], Encoded]]] = []
-    #: How the port makes each part from the fills it holds, or None where it cannot.
-    descs: list[dict | None] = []
-
-    def block(rows: int, make: Callable[[], Encoded], desc: dict | None = None) -> int:
-        parts.append((rows, make))
-        descs.append(desc)
-        return len(parts) - 1
-
-    patchers: dict[tuple[int, int], _Patcher] = {}
-
-    def patcher(side: int, item) -> _Patcher:  # noqa: ANN001 - Completion
-        # One per completion and side: the completion's root is encoded once for all of them.
-        found = patchers.get((side, id(item)))
-        if found is None:
-            found = patchers[(side, id(item))] = _Patcher(
-                side, item, reg, position, encoder, rules
-            )
-        return found
-
-    # Which dirty cells reach each side's own bench, and through which slots (IKA-269).
-    reach = {
-        side: _reaching(reg, row, col, side, slots, position, filled.folded, dirty)
-        for side, slots in hidden.items()
-        # The pre-IKA-119 patch keeps the true side vector, which a completion's own fill
-        # does not: under it every dirty cell is filled per completion, as before.
-        if slots and not rules.patch_shares_side
-    }
-    claimed: dict[int, dict] = {side: {} for side in reach}
-    reference_block: int | None = None
-    jobs: list[_Job] = []
-    with timing.region("belief.jobs"):
-        for side, items in spreads.items():
-            slots = hidden.get(side, ())
-            for item in items:
-                job = _Job(side=side, item=item)
-                ref_desc = None if ref_ticket is None else {"ticket": ref_ticket}
-                if item.exact or not slots:
-                    if reference_block is None:
-                        reference_block = block(len(reference), lambda: reference, ref_desc)
-                    job.shared = reference_block
-                else:
-                    job.shared = block(
-                        len(reference),
-                        lambda item=item, side=side, slots=slots: _patched(
-                            reference, side, slots, item, reg, position, encoder, rules
-                        ),
-                        None if ref_ticket is None
-                        else patcher(side, item).desc(ref_ticket, None, slots, len(reference)),
-                    )
-                if wanted and side in reach and not item.exact:
-                    own_cells = _borrow(
-                        job, reach[side], claimed[side], filled, wanted, block,
-                        patcher(side, item) if ref_ticket is not None
-                        else (
-                            lambda rows, patch, item=item, side=side: _patched(
-                                rows, side, patch, item, reg, position, encoder, rules
-                            )
-                        ),
-                    )
-                    if own_cells:
-                        _gather_dirty(
-                            job, reg, position, row, col, budget, own_cells, rules, scorer, block,
-                            tickets,
-                        )
-                elif wanted:
-                    _gather_dirty(
-                        job, reg, position, row, col, budget, wanted, rules, scorer, block,
-                        tickets,
-                    )
-                    if job.dirty_from_reference and reference_block is None:
-                        reference_block = block(len(reference), lambda: reference, ref_desc)
-                jobs.append(job)
-
-    if leaf is not None and all(desc is not None for desc in descs):
-        try:
-            served = _served_in_port(
-                reg, leaf, filled, jobs, reference_block, dirty, parts, descs, len(row),
-                len(col), solve, spreads, encoder,
-            )
-        except portlp_fault() as fault:
-            portlp_faulted("beliefServed", fault)
-            served = None
-        if served is not None:
-            payoffs, solved = served
-            shared = redone = 0
-            matrices = {}
-            with timing.region("belief.fold"):
-                for job, payoff in zip(jobs, payoffs, strict=True):
-                    shared += int((~dirty).sum())
-                    if wanted:
-                        unmodelled |= job.notes
-                        redone += len(wanted) if job.resolved is None else job.resolved
-                    matrices.setdefault(1 - job.side, []).append(payoff)
-            for job in jobs:
-                if job.filled is not None:
-                    job.filled.encoded = None
-            return BeliefNode(matrices, unmodelled, shared, redone, solved)
-
-    with timing.region("belief.stack"):
-        stacked, starts = _stacked(parts, reference)
-    with timing.region("belief.score"):
-        values = (
-            np.asarray(scorer(stacked), dtype=np.float64)
-            if len(stacked)
-            else np.zeros(0, dtype=np.float64)
+    # The leaf's own encoder and rules, for the port's arrays: a match plays two arms in one
+    # process, and each arm is scored the way its leaf says (IKA-141).
+    encoder = getattr(leaf, "encoder", None) or _encoder_for(reg)
+    done = _node_in_port(reg, leaf, position, row, col, budget, rules, hidden, spreads, solve, encoder)
+    if done is _NOT_ON_THIS_BINARY:
+        raise RuntimeError(
+            "the port encoded with another `can_mega` rule than the leaf asked for; the "
+            "executable predates the field -- rebuild it"
         )
-    del stacked
-    # The parts' arrays are in the batch now, and only their sizes, spans and folds are
-    # read from here on; a dirty fill is as large as the node, so it is let go.
-    parts = [(rows, None) for rows, _make in parts]
-    for job in jobs:
-        if job.filled is not None:
-            job.filled.encoded = None
-
-    def rows_of(index: int) -> np.ndarray:
-        start = starts[index]
-        return values[start : start + parts[index][0]]
-
-    matrices: dict[int, list[np.ndarray]] = {}
-    shared = redone = 0
-    try:
-        ported = _fold_in_port(
-            reg, filled, jobs, reference_block, dirty, values, starts, parts, len(row),
-            len(col), solve, spreads,
-        )
-    except portlp_fault() as fault:
-        portlp_faulted("beliefFold", fault)
-        ported = None
-    if ported is not None:
-        # The port folded every completion's matrix; what is left is the counts, as below.
-        with timing.region("belief.fold"):
-            for job, payoff in zip(jobs, ported[0], strict=True):
-                shared += int((~dirty).sum())
-                if wanted:
-                    unmodelled |= job.notes
-                    redone += len(wanted) if job.resolved is None else job.resolved
-                matrices.setdefault(1 - job.side, []).append(payoff)
-        return BeliefNode(matrices, unmodelled, shared, redone, ported[1])
-    with timing.region("belief.fold"):
-        for job in jobs:
-            shared_values = rows_of(job.shared)
-            payoff = np.zeros((len(row), len(col)), dtype=np.float64)
-            for i, j, indices, weights in filled.spans:
-                if not weights or dirty[i, j]:
-                    continue
-                payoff[i, j] = float(shared_values[list(indices)] @ np.asarray(weights))
-            # Every folded cell is dirty (above), so no fold is read off the shared rows.
-            shared += int((~dirty).sum())
-            if wanted:
-                part = np.zeros((len(row), len(col)), dtype=np.float64)
-                if job.dirty_from_reference:
-                    # The exact completion is the true position itself, so its dirty cells are
-                    # the reference fill's own leaves: what `_per_completion` scores for it.
-                    ported = rows_of(reference_block)
-                    for i, j, indices, weights in filled.spans:
-                        if weights and dirty[i, j]:
-                            part[i, j] = float(ported[indices] @ np.asarray(weights))
-                    for i, j, root in filled.folded:
-                        part[i, j] = fold_value(_fold_from_json(root), ported)
-                elif job.dirty is not None:
-                    ported = rows_of(job.dirty)
-                    # As `resolve._rust_encoded_payoffs` writes a node the port filled.
-                    for i, j, indices, weights in job.filled.spans:
-                        if not weights:
-                            continue
-                        part[i, j] = float(ported[indices] @ np.asarray(weights))
-                    for i, j, root in job.filled.folded:
-                        part[i, j] = fold_value(_fold_from_json(root), ported)
-                for index, spans, folds in job.borrowed:
-                    ported = rows_of(job.shared if index is None else index)
-                    for i, j, indices, weights in spans:
-                        if weights:
-                            part[i, j] = float(ported[indices] @ np.asarray(weights))
-                    for i, j, root in folds:
-                        part[i, j] = fold_value(_fold_from_json(root), ported)
-                for i, j in wanted:
-                    payoff[i, j] = part[i, j]
-                unmodelled |= job.notes
-                redone += len(wanted) if job.resolved is None else job.resolved
-            matrices.setdefault(1 - job.side, []).append(payoff)
-    return BeliefNode(matrices, unmodelled, shared, redone)
-
-
-def portlp_fault() -> type[Exception]:
-    from . import portlp
-
-    return portlp.PortFault
-
-
-def portlp_faulted(where: str, why: object) -> None:
-    from . import portlp
-
-    portlp.faulted(where, why)
+    return done
 
 
 def fused_node(  # noqa: PLR0913 - the node's pieces
@@ -553,135 +311,42 @@ def fused_node(  # noqa: PLR0913 - the node's pieces
 ) -> BeliefNode | None:
     """IKA-457 stage 2.4: the menus (`planned`, `rootmenus.plan`) and the node over them in one
     `moveNode` request: the `BeliefNode` `belief_payoffs` would build over those menus, with the
-    menus in ``planned.menus``. None where the node would not be the port's whole-node request's
-    (then nothing has been sent, and Python builds the menus and the node)."""
-    from . import portlp
+    menus in ``planned.menus``. None where the leaf is not the inference server's, or the binary
+    encoded with another rule (then nothing has been sent but the request, and the menus and the
+    node are built apart)."""
     from .encode import rules_of
+    from .inference import RemoteValue
 
-    if not portlp.NODE[0] or timing.DUPES:
+    owner = getattr(evaluate, "__self__", evaluate)
+    if type(owner) is not RemoteValue:
+        return None
+    rules = rules_of(evaluate)
+    if rules.patch_shares_side:
         return None
     hidden = {
         side: (items[0].slots if items and not items[0].exact else ())
         for side, items in spreads.items()
     }
-    exact_node = not any(hidden.values())
-    if exact_node and not portlp.EXACT[0]:
-        return None
-    owner = getattr(evaluate, "__self__", evaluate)
-    scorer = getattr(owner, "from_encoded", None)
-    if scorer is None:
-        return None
     encoder = getattr(owner, "encoder", None) or _encoder_for(reg)
-    rules = rules_of(evaluate)
-    leaf = _stack_leaf(owner, rules)
-    if leaf is None:
-        return None
     if timing.ON:
         timing.refine("hidden" if any(hidden.values()) else "exact")
         timing.count("completions", sum(len(items) for items in spreads.values()))
-    try:
-        done = _node_in_port(
-            reg, leaf, position, None, None, budget, rules, hidden, spreads, solve, scorer,
-            encoder, fused=planned,
-        )
-    except portlp.PortFault as fault:
-        portlp.faulted("moveNode", fault)
-        return None
+    done = _node_in_port(
+        reg, owner, position, None, None, budget, rules, hidden, spreads, solve, encoder,
+        fused=planned,
+    )
     if done is _NOT_ON_THIS_BINARY:
         return None
-    portlp.COUNTS["decided"] += 1
-    return done
-
-
-def _fold_request(  # noqa: PLR0913 - the node's pieces
-    filled,  # noqa: ANN001 - EncodedNode, the reference fill
-    jobs: list,
-    reference_block: int | None,
-    dirty: np.ndarray,
-    starts: list[int],
-    parts: list,
-    m: int,
-    n: int,
-    solve: Sequence[int],
-    spreads: dict[int, list],
-) -> tuple[dict, list] | None:
-    """`beliefFold`'s request but for the values, and the games it asks to have solved; None
-    where this road is off or a fill kept no span block (the Python loop folds).
-
-    The arithmetic is the loop's: numpy's dot in the order the port copies, a replaced cell's
-    tree by `fold_value`. IKA-455 stage 1.2.
-    """
-    import base64
-    import json
-
     from . import portlp
 
-    if not portlp.FOLD[0] or filled.span_block is None:
-        return None
-    if any(
-        job.dirty is not None and not job.dirty_from_reference and job.filled.span_block is None
-        for job in jobs
-    ):
-        return None
-
-    def at(index: int) -> list[int]:
-        return [starts[index], parts[index][0]]
-
-    def block(node) -> dict:  # noqa: ANN001 - EncodedNode
-        raw, count, total = node.span_block
-        return {"spans": base64.b64encode(raw).decode("ascii"), "count": count, "total": total}
-
-    def trees(found: list) -> str:
-        return json.dumps(found) if found else ""
-
-    request = {
-        "kind": "beliefFold",
-        "rows": m,
-        "cols": n,
-        "dirty": base64.b64encode(
-            np.ascontiguousarray(dirty, dtype=np.uint8).tobytes()
-        ).decode("ascii"),
-        "ref": {
-            **block(filled),
-            "folded": trees(filled.folded),
-            "at": None if reference_block is None else at(reference_block),
-        },
-    }
-    out_jobs = []
-    for job in jobs:
-        one: dict = {"side": job.side, "shared": at(job.shared),
-                     "refDirty": bool(job.dirty_from_reference), "borrowed": []}
-        if not job.dirty_from_reference and job.dirty is not None:
-            one["own"] = {**block(job.filled), "folded": trees(job.filled.folded),
-                          "at": at(job.dirty)}
-        for index, spans, folds in job.borrowed:
-            if index is None:
-                # The reference's own cells, read at this completion's rows.
-                one["borrowed"].append({
-                    "at": at(job.shared),
-                    "cells": {"spans": [[i, j] for i, j, _ix, _w in spans],
-                              "folds": [[i, j] for i, j, _root in folds]},
-                })
-            else:
-                one["borrowed"].append({"at": at(index), "packed": _packed(spans),
-                                        "folded": trees(folds)})
-        out_jobs.append(one)
-    request["jobs"] = out_jobs
-    asks = []
-    for side in solve:
-        items = spreads.get(1 - side)
-        if items:
-            asks.append((side, np.asarray([item.weight for item in items], dtype=np.float64)))
-    request["solve"] = [{"side": side, "weights": portlp._b64(w)}  # noqa: SLF001
-                        for side, w in asks]
-    return request, asks
+    portlp.COUNTS["decided"] += 1
+    return done
 
 
 def _fold_answer(
     answer: dict, jobs: list, m: int, n: int, asks: list
 ) -> tuple[list[np.ndarray], dict]:
-    """Every completion's matrix and the solved games out of `beliefFold`'s (or
-    `beliefServed`'s) answer."""
+    """Every completion's matrix and the solved games out of a `beliefNode`'s answer."""
     import base64
 
     from . import portlp
@@ -705,178 +370,13 @@ def _fold_answer(
     return payoffs, solved
 
 
-def _fold_in_port(  # noqa: PLR0913 - the node's pieces
-    reg: Regulation,
-    filled,  # noqa: ANN001 - EncodedNode, the reference fill
-    jobs: list,
-    reference_block: int | None,
-    dirty: np.ndarray,
-    values: np.ndarray,
-    starts: list[int],
-    parts: list,
-    m: int,
-    n: int,
-    solve: Sequence[int],
-    spreads: dict[int, list],
-) -> tuple[list[np.ndarray], dict] | None:
-    """Every completion's matrix folded in the port from the values (IKA-455 stage 1.2), and
-    the games of ``solve``'s sides solved there; None where the Python loop folds."""
-    from . import portlp
-
-    made = _fold_request(filled, jobs, reference_block, dirty, starts, parts, m, n, solve, spreads)
-    if made is None:
-        return None
-    request, asks = made
-    request["values"] = portlp._b64(values)  # noqa: SLF001
-    answer = portlp._ask(reg, request)  # noqa: SLF001
-    return _fold_answer(answer, jobs, m, n, asks)
-
-
-#: The numbers fills are held under in the port (a node's first fill clears the last node's).
-_TICKETS = itertools.count(1)
-
-
 def _stack_leaf(owner, rules):  # noqa: ANN001, ANN202 - the leaf, an inference.RemoteValue
-    """The inference server's leaf when stage 1.3 takes this node, or None."""
-    from . import portlp
-
-    if not portlp.STACK[0] or timing.DUPES or rules.patch_shares_side:
+    """The inference server's leaf when the port takes this node (and the game's steps), or None."""
+    if rules.patch_shares_side:
         return None
     from .inference import RemoteValue
 
     return owner if type(owner) is RemoteValue else None
-
-
-class _Patcher:
-    """`_patched` for one completion and side, and how the port makes the same block.
-
-    Called as `_patched(rows, side, slots, item, ...)` for the Python road; `desc` says the
-    same to the port: the held fill, the rows cut from it and the completion's own rows for the
-    slots (its root encoded once, as `_patched` encodes it, bench columns not asked for).
-    """
-
-    def __init__(self, side, item, reg, position, encoder, rules) -> None:  # noqa: ANN001, PLR0913
-        self.side, self.item, self.reg, self.position = side, item, reg, position
-        self.encoder, self.rules = encoder, rules
-        self._source = None
-
-    def __call__(self, rows, slots):  # noqa: ANN001, ANN204
-        return _patched(
-            rows, self.side, slots, self.item, self.reg, self.position, self.encoder, self.rules
-        )
-
-    def desc(self, ticket: int, rows: list[int] | None, slots, count: int | None = None) -> dict:  # noqa: ANN001
-        import base64
-
-        if self._source is None:
-            self._source = self.encoder.encode_positions([self.item.position], bind=False)
-        source = self._source
-        side = self.side
-        slots = tuple(slots)
-
-        def pack(array: np.ndarray, dtype: str) -> str:
-            part = np.ascontiguousarray(array[0, side, list(slots)], dtype=dtype)
-            return base64.b64encode(part.tobytes()).decode("ascii")
-
-        return {
-            "ticket": ticket,
-            "rows": None if rows is None else [int(r) for r in rows],
-            "patch": {
-                "side": side,
-                "slots": [int(s) for s in slots],
-                "source": {
-                    "species": pack(source.species, "<i4"),
-                    "ability": pack(source.ability, "<i4"),
-                    "item": pack(source.item, "<i4"),
-                    "moves": pack(source.moves, "<i4"),
-                    "mon": pack(source.mon, "<f4"),
-                    "mask": pack(source.mask, "<f4"),
-                },
-            },
-        }
-
-
-def _served_in_port(  # noqa: PLR0913 - the node's pieces
-    reg: Regulation,
-    leaf,  # noqa: ANN001 - inference.RemoteValue
-    filled,  # noqa: ANN001 - EncodedNode, the reference fill
-    jobs: list,
-    reference_block: int | None,
-    dirty: np.ndarray,
-    parts: list,
-    descs: list,
-    m: int,
-    n: int,
-    solve: Sequence[int],
-    spreads: dict[int, list],
-    encoder,  # noqa: ANN001 - Encoder
-) -> tuple[list[np.ndarray], dict] | None:
-    """The node stacked, scored by the inference server and folded in the port (`beliefServed`,
-    IKA-455 stage 1.3); None where Python stacks (a fill without a span block)."""
-    from . import portlp, rustnode
-    from .encode import HP_SCALE
-    from .inference import request_failed
-
-    rows = [rows for rows, _make in parts]
-    starts = [0]
-    for count in rows[:-1]:
-        starts.append(starts[-1] + count)
-    made = _fold_request(filled, jobs, reference_block, dirty, starts, parts, m, n, solve, spreads)
-    if made is None:
-        return None
-    request, asks = made
-    mon_k = {name: k for k, name in enumerate(encoder.mon_names)}
-    side_k = {name: k for k, name in enumerate(encoder.side_names)}
-    request["kind"] = "beliefServed"
-    request["server"] = {
-        "address": leaf.address,
-        "model": leaf.model,
-        "shm": leaf._block.name,  # noqa: SLF001 - the leaf's own block, idle while the port asks
-        "bytes": int(leaf._block.size),  # noqa: SLF001
-        "batch": int(leaf.batch_size),
-        "merge": bool(leaf.merge),
-    }
-    request["netScoresEnds"] = bool(leaf.encoder.rules.net_scores_ends)
-    request["patch"] = {
-        "can_mega": mon_k["can_mega"],
-        "maxhp_scaled": mon_k["maxhp_scaled"],
-        "hp_fraction": mon_k["hp_fraction"],
-        "fainted": mon_k["fainted"],
-        "mega_used": side_k["mega_used"],
-        "mega_available": side_k["mega_available"],
-        "alive_fraction": side_k["alive_fraction"],
-        "team_hp_fraction": side_k["team_hp_fraction"],
-        "hp_scale": float(HP_SCALE),
-    }
-    request["parts"] = [{**desc, "count": count} for desc, count in zip(descs, rows, strict=True)]
-    with timing.region("belief.score"):
-        answer = portlp._ask(reg, request)  # noqa: SLF001
-    if "serverError" in answer:
-        raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
-                              "capGb": answer.get("capGb")}, "inference failed")
-    if "served" not in answer:
-        raise RuntimeError("the port did not answer `beliefServed`; the binary predates it -- rebuild it")
-    served = answer["served"]
-    waited = float(served.get("waitUs", 0.0)) / 1e6
-    # The server's share of the port's answer is the leaf's clock, as `portserved` has it.
-    rustnode.PORT_WAITED[0] -= waited
-    requests, count = int(served.get("requests", 0)), int(served.get("rows", 0))
-    leaf.waited += waited
-    leaf.copied += float(served.get("copyUs", 0.0)) / 1e6
-    leaf.calls += requests
-    leaf.evaluated += count
-    leaf.ended += int(served.get("ended", 0))
-    timing.count("leaves", count)
-    timing.count("forward.passes", requests)
-    timing.count("serve.requests", requests)
-    portlp.COUNTS["stacked"] = portlp.COUNTS.get("stacked", 0) + 1
-    if hasattr(encoder, "note"):
-        # What `_patched` notes for each block it makes (the rows it patched), counted here once
-        # the port has made them: a node that goes back to Python is counted by `_patched` alone.
-        for desc, count in zip(descs, rows, strict=True):
-            if desc.get("patch") is not None:
-                encoder.note("patched side=rebuilt", count)
-    return _fold_answer(answer, jobs, m, n, asks)
 
 
 #: `_node_in_port`'s answer when the port encoded with another `can_mega` rule than asked.
@@ -903,20 +403,20 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     reg: Regulation,
     leaf,  # noqa: ANN001 - inference.RemoteValue
     position: Position,
-    row: list[SideAction],
-    col: list[SideAction],
+    row: list[SideAction] | None,
+    col: list[SideAction] | None,
     budget: Budget,
     rules,  # noqa: ANN001 - EncodingRules
     hidden: dict[int, tuple[int, ...]],
     spreads: dict[int, list],
     solve: Sequence[int],
-    scorer: Callable,
     encoder,  # noqa: ANN001 - Encoder
     fused=None,  # noqa: ANN001 - `rootmenus.Fused`
 ):  # noqa: ANN202 - a BeliefNode, or `_NOT_ON_THIS_BINARY`
-    """The whole node in the port (`beliefNode`, IKA-455 stage 1.4): what `belief_payoffs` does
-    from the reference fill to the folded matrices, in one crossing. Python sends the positions,
-    the actions and what it alone reads off them; the answer is the node.
+    """The whole node in the port (`beliefNode`, IKA-455 stage 1.4): the reference fill, the plan,
+    each completion's own fill, the stack, the server's values, the fold and the games, in one
+    crossing. Python sends the positions, the actions and what it alone reads off them; the
+    answer is the node.
 
     With ``fused`` (IKA-457 stage 2.4) the actions are not Python's: the request is `moveNode`,
     which builds both menus first (`fused.request` is `rootMenus`' half) and solves the node over
@@ -1001,7 +501,7 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     portlp.COUNTS["crossings"] += 1
     portlp.COUNTS["lps"] += int(answer.get("lps", 0))
     if "fault" in answer:
-        raise portlp.PortFault(str(answer["fault"]))
+        raise portlp.PortFault(request["kind"], str(answer["fault"]))
     if "serverError" in answer:
         raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
                               "capGb": answer.get("capGb")}, "inference failed")
@@ -1014,7 +514,7 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     if "refused" in answer:
         port.raise_refused([(int(i), int(j), str(why)) for i, j, why in answer["refused"]])
     if rules.mega_from_slots and answer["mega"] is not True:
-        # A binary that predates the field encoded with the current rule (as `belief_payoffs`).
+        # A binary that predates the field encoded with the current rule.
         return _NOT_ON_THIS_BINARY
     if "served" not in answer:
         raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
@@ -1089,255 +589,6 @@ def _id_of(name: str) -> str:
     return to_id(name)
 
 
-def _packed(spans: list) -> dict | None:
-    """Spans `(row, column, leaf indices, weights)` in the span block's layout."""
-    import base64
-
-    kept = [(i, j, ix, w) for i, j, ix, w in spans if w]
-    if not kept:
-        return None
-    weights = np.asarray([x for _i, _j, _ix, w in kept for x in w], dtype="<f8")
-    rows = np.asarray([i for i, _j, _ix, _w in kept], dtype="<u4")
-    cols = np.asarray([j for _i, j, _ix, _w in kept], dtype="<u4")
-    lengths = np.asarray([len(ix) for _i, _j, ix, _w in kept], dtype="<u4")
-    indices = np.asarray([k for _i, _j, ix, _w in kept for k in ix], dtype="<u4")
-    raw = b"".join(a.tobytes() for a in (weights, rows, cols, lengths, indices))
-    return {"spans": base64.b64encode(raw).decode("ascii"), "count": len(kept),
-            "total": int(len(indices))}
-
-
-@dataclass
-class _Job:
-    """One completion's share of the node: which blocks of the one batch are its own."""
-
-    side: int
-    item: object
-    #: The block its shared cells read: the reference, or its own patched copy of it.
-    shared: int = -1
-    #: Its dirty cells: the port's fill of them on this completion, and its block.
-    filled: object = None
-    dirty: int | None = None
-    #: The exact completion is the true position, and reads the reference fill instead.
-    dirty_from_reference: bool = False
-    notes: set[str] = field(default_factory=set)
-    #: Dirty cells read elsewhere (IKA-269): (block, spans, folds), block None for `shared`.
-    borrowed: list = field(default_factory=list)
-    #: Its own fill's spans by cell, once another completion borrows from it.
-    by_cell: dict | None = None
-    #: How many of the dirty cells it resolved itself, when it borrowed the others.
-    resolved: int | None = None
-
-
-def _reaching(  # noqa: PLR0913 - the node's pieces, for one side
-    reg: Regulation,
-    row: list[SideAction],
-    col: list[SideAction],
-    side: int,
-    slots: tuple[int, ...],
-    position: Position,
-    folded: list,
-    dirty: np.ndarray,
-) -> dict[tuple[int, int], tuple | None]:
-    """The dirty cells that can put `side`'s own hidden slots on the field, and how.
-
-    `reaches_bench` with only this side's slots hidden -- what a match with two leaves
-    already asks of it per side -- plus a cell whose turn stops for a replacement that
-    `side` chooses. A cell that reaches the bench only by this side's own switches maps to
-    those switch actions (which Pokemon they bring in is the completion's, `_entering`);
-    phazing, Red Card and a replacement could bring in any of them, and map to None. Every
-    other dirty cell is the true position's turn for this side's completions, with their
-    bench patched in (IKA-269).
-    """
-    mine = reaches_bench(reg, row, col, {side: slots}, position)
-    carded = _red_card_on_field(position, 1 - side)
-    out: dict[tuple[int, int], tuple | None] = {}
-    for i, j in zip(*np.nonzero(mine), strict=True):
-        own, other = (row[i], col[j]) if side == 0 else (col[j], row[i])
-        switches = tuple(
-            s for s in own.slots
-            if isinstance(s, SwitchAction) and s.party_index - 1 in slots
-        )
-        anywhere = _phazes(reg, other) or (carded and _attacks(reg, own))
-        out[(int(i), int(j))] = None if anywhere or not switches else switches
-    for i, j, root in folded:
-        if side in _choosers(root):
-            out[(int(i), int(j))] = None
-    assert all(dirty[cell] for cell in out), "a cell reaching a bench was not dirty"
-    return out
-
-
-def _entering(item, side: int, switches: tuple) -> tuple | None:  # noqa: ANN001 - Completion
-    """Which of this completion's slots the switches bring in, and who stands there.
-
-    As the port picks it (`transform::switch_names` in `resolve::involved` and the switch
-    itself): the party member of the switch's species or base species, else the one at its
-    party index. So a switch to the true bench's Sylveon brings in this completion's
-    Sylveon wherever it sits, and a completion without one gets whoever is at that index.
-    None when it cannot be said cleanly -- the cell is then resolved for this completion.
-    """
-    from .regulation import to_id
-
-    pokemon = item.position.sides[side].pokemon
-    hidden = set(item.slots)
-    out = []
-    for switch in switches:
-        wanted = to_id(switch.species)
-        found = next(
-            (
-                q for q, mon in enumerate(pokemon)
-                if to_id(mon.species) == wanted or to_id(mon.base_species) == wanted
-            ),
-            switch.party_index - 1,
-        )
-        if not 0 <= found < len(pokemon) or pokemon[found].slot != found or found not in hidden:
-            return None
-        out.append((found, to_id(pokemon[found].species)))
-    if len({q for q, _species in out}) != len(out):
-        return None
-    return tuple(out)
-
-
-def _choosers(tree: dict) -> set[int]:
-    """The sides that choose a replacement anywhere in a port fold tree."""
-    found: set[int] = set()
-    stack = [tree]
-    while stack:
-        node = stack.pop()
-        if "best" in node:
-            found.add(int(node["best"]))
-            stack.extend(node["options"])
-        elif "avg" in node:
-            stack.extend(part for _w, part in node["avg"])
-    return found
-
-
-def _borrow(  # noqa: PLR0913 - one completion's dirty cells, and where each is read
-    job: _Job,
-    reach: dict[tuple[int, int], tuple | None],
-    claimed: dict,
-    filled,  # noqa: ANN001 - EncodedNode, the reference fill
-    wanted: list[tuple[int, int]],
-    block: Callable[..., int],
-    patch: Callable,
-) -> list[tuple[int, int]]:
-    """Which of the node's dirty cells this completion resolves itself; the rest are booked.
-
-    A cell that does not reach this side's bench is the reference's turn: its spans and
-    folds are read off this completion's patched block. A cell that reaches it only by
-    switches bringing in the same Pokemon into the same slots as for an earlier completion
-    of this side is that completion's turn, and its leaves are the earlier fill's rows with
-    the other hidden slots patched to this completion's (a folded one is resolved again:
-    its tree is not renumbered). What is left is returned, to be filled here (IKA-269).
-    """
-    spans = {(i, j): (i, j, ix, w) for i, j, ix, w in filled.spans}
-    folds = {(i, j): (i, j, root) for i, j, root in filled.folded}
-    everything = frozenset(job.item.slots)
-    shared_spans: list = []
-    shared_folds: list = []
-    lent: dict[tuple[int, tuple[int, ...]], tuple[_Job, list]] = {}
-    own: list[tuple[int, int]] = []
-    for cell in wanted:
-        if cell not in reach:
-            if cell in spans:
-                shared_spans.append(spans[cell])
-            elif cell in folds:
-                shared_folds.append(folds[cell])
-            continue
-        switches = reach[cell]
-        entering = None if switches is None else _entering(job.item, job.side, switches)
-        if entering is None:
-            own.append(cell)
-            continue
-        key = (cell, entering)
-        owner = claimed.get(key)
-        if owner is not None:
-            if owner.by_cell is None:
-                owner.by_cell = {(i, j): (ix, w) for i, j, ix, w in owner.filled.spans}
-            span = owner.by_cell.get(cell)
-            if span is not None:
-                rest = tuple(sorted(everything - {q for q, _species in entering}))
-                lent.setdefault((id(owner), rest), (owner, []))[1].append((cell, span))
-                continue
-            if not any((i, j) == cell for i, j, _root in owner.filled.folded):
-                continue  # an empty cell there: empty here, as it would be filled
-        else:
-            claimed[key] = job
-        own.append(cell)
-    if shared_spans or shared_folds:
-        job.borrowed.append((None, shared_spans, shared_folds))
-    for (_owner_id, rest), (owner, cells) in lent.items():
-        rows = sorted({int(k) for _cell, (ix, _w) in cells for k in ix})
-        at = {k: n for n, k in enumerate(rows)}
-        index = block(
-            len(rows),
-            lambda owner=owner, rows=rows, rest=rest: patch(
-                _subset(owner.filled.encoded, rows), rest
-            ),
-            # IKA-455 stage 1.3: the same block as the port would make it from the held fill.
-            patch.desc(owner.filled.ticket, rows, rest)
-            if owner.filled.ticket is not None and hasattr(patch, "desc")
-            else None,
-        )
-        job.borrowed.append(
-            (index, [(i, j, [at[int(k)] for k in ix], w) for (i, j), (ix, w) in cells], [])
-        )
-    job.resolved = len(own)
-    return own
-
-
-def _subset(encoded, rows: list[int]):  # noqa: ANN001, ANN202 - Encoded
-    """Rows `rows` of an `Encoded`, in that order."""
-    from .encode import Encoded
-
-    return Encoded(
-        **{name: getattr(encoded, name)[rows] for name in _ARRAYS},
-        unknown_volatiles=dict(encoded.unknown_volatiles),
-        decided=None if encoded.decided is None else encoded.decided[rows],
-    )
-
-
-def _gather_dirty(  # noqa: PLR0913 - one completion's dirty cells, and where they go
-    job: _Job,
-    reg: Regulation,
-    position: Position,
-    row: list[SideAction],
-    col: list[SideAction],
-    budget: Budget,
-    wanted: list[tuple[int, int]],
-    rules,  # noqa: ANN001 - EncodingRules
-    scorer: Callable,
-    block: Callable[..., int],
-    tickets: Iterator[int] | None = None,
-) -> None:
-    """Fill one completion's dirty cells over there without scoring them; book the block.
-
-    What `batched_payoffs(item.position, cells=wanted)` did, less its forward pass. The
-    cells the port refuses used to be resolved here in Python; they stop now (IKA-209).
-    """
-    item = job.item
-    with timing.purpose("dirty"):
-        if item.exact and item.position is position:
-            # The reference fill's own leaves (its refusals have already stopped the node).
-            job.dirty_from_reference = True
-            return
-        ticket = next(tickets) if tickets is not None else None
-        own = port.ask(
-            reg,
-            lambda node: node.fill_encoded(
-                item.position, row, col, budget, [], wanted, rules=rules, hold=ticket
-            ),
-        )
-        port.raise_refused(own.refused)
-        port.note_port_rule([scorer], own)
-        timing.count("leaves.node", len(own.encoded))
-        job.filled = own
-        job.dirty = block(
-            len(own.encoded), lambda own=own: own.encoded,
-            None if ticket is None else {"ticket": ticket},
-        )
-        job.notes |= set(own.unmodelled)
-
-
 #: The arrays one batch is made of, in `Encoded`'s order.
 _ARRAYS = ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
 
@@ -1403,6 +654,9 @@ def _patched(
     `rules.patch_shares_side` puts that back -- the true position's side vector, and the
     root's `can_mega` copied as it is -- for a match that measures the fix (IKA-141). It is
     the pre-IKA-119 body, line for line, and nothing else should ask for it.
+
+    The port makes the same blocks for a node (`rust/src/beliefplan.rs`); this is what a
+    self-switch node in Python patches its options' leaves with (`selfplay._self_switch_encoded`).
     """
     from .encode import CURRENT_RULES, HP_SCALE, Encoded
 
@@ -1503,58 +757,12 @@ def _encoder_for(reg: Regulation):  # noqa: ANN202
     return made
 
 
-def _per_completion(
-    reg: Regulation,
-    ours: list[SideAction],
-    theirs: list[SideAction],
-    evaluate: Callable[[list[Position]], np.ndarray],
-    budget: Budget,
-    spreads: dict[int, list],
-) -> BeliefNode:
-    """A matrix per completion, resolved from scratch. The definition of the answer.
-
-    Per position rather than per entry: a position both sides' lists hold is resolved once,
-    and the second side gets a copy of that matrix -- a copy so that the two lists still
-    hold two arrays, as they did when each was resolved on its own. Nothing hidden on
-    either side is exactly that case, since `completions` then hands each side the
-    position itself, and until IKA-104 it was resolved once per side: the port's fill, the
-    forward pass and the fold twice over for the same numbers, on 37% of the move
-    decisions of IKA-73's width-12 pool (`scratchpad/both_exact.py`).
-
-    Nothing is turned round for side 1. Every matrix here is side 0's payoff, whichever
-    list it comes from, and `belief_solve` is what makes side 1's its own game.
-
-    Identity and not equality, because the same object is the only thing known to be the
-    same node. A completion with anything in it is a fresh `substitute`, so two of those
-    are never one object and nothing else here is shared.
-    """
-    matrices: dict[int, list[np.ndarray]] = {}
-    unmodelled: set[str] = set()
-    resolved: dict[int, np.ndarray] = {}
-    shared = redone = 0
-    for side, items in spreads.items():
-        built: list[np.ndarray] = []
-        for item in items:
-            payoff = resolved.get(id(item.position))
-            if payoff is None:
-                payoff, notes = batched_payoff(
-                    reg, item.position, ours, theirs, evaluate, budget=budget
-                )
-                resolved[id(item.position)] = payoff
-                unmodelled |= notes
-                redone += len(ours) * len(theirs)
-            else:
-                payoff = payoff.copy()
-                shared += len(ours) * len(theirs)
-            built.append(payoff)
-        matrices[1 - side] = built
-    return BeliefNode(matrices, unmodelled, shared, redone)
-
-
 __all__ = [
     "PHAZING_MOVES",
     "BeliefNode",
+    "UnservedLeaf",
     "belief_payoffs",
     "reaches_bench",
+    "served_leaf",
     "turn_in_completion",
 ]

@@ -166,10 +166,11 @@ def advance(
 
     answer = ask(reg, call)
     if isinstance(answer, str):
-        # Not a failure of the process (`ask` would restart it): the caller does the turn itself.
+        # Not a failure of the process (`ask` would restart it): the port answered a fault,
+        # which stops the game with its words (IKA-460).
         from .portlp import PortFault
 
-        raise PortFault(answer)
+        raise PortFault("advanceTurn", answer)
     return answer
 
 

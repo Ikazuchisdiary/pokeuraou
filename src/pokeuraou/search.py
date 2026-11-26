@@ -1603,7 +1603,6 @@ def belief_solve(
     deepened, and is refused anywhere else.
     """
     from .beliefnode import belief_payoffs
-    from .equilibrium import solve_bayesian
 
     depths = (depth, depth) if isinstance(depth, int) else tuple(depth)
     deepen = deepen or {}
@@ -1659,19 +1658,13 @@ def belief_solve(
     ported: dict[int, Any] = {}
     # IKA-455 stage 1.2: the games the port solved with the node's fold.
     ported.update({side: nodes[side].solved[side] for side in wanted if side in nodes[side].solved})
-    if portlp.GEN[0]:
-        # IKA-455: the other sides' games in one crossing to the port, each
-        # `solve_bayesian`'s answer to the bit (`portlp`).
-        rest = [side for side in wanted if side not in ported]
-        if rest:
-            try:
-                with timing.region("lp.side"), timing.stage("lp"):
-                    got = portlp.solve_bayesian_many(reg, [games[side] for side in rest])
-            except portlp.PortFault as fault:
-                # Solved in Python below, as without the port.
-                portlp.faulted("lp", fault)
-            else:
-                ported.update(zip(rest, got, strict=True))
+    # IKA-455: the other sides' games in one crossing to the port, each `solve_bayesian`'s
+    # answer (`portlp`); a fault of the port is `portlp.PortFault` (IKA-460).
+    rest = [side for side in wanted if side not in ported]
+    if rest:
+        with timing.region("lp.side"), timing.stage("lp"):
+            got = portlp.solve_bayesian_many(reg, [games[side] for side in rest])
+        ported.update(zip(rest, got, strict=True))
     # The first error is the one the loop below meets first.
     for side in wanted:
         if isinstance(ported.get(side), Exception):
@@ -1680,11 +1673,7 @@ def belief_solve(
         built = nodes[side].matrices[side]
         items = completions_by_side[1 - side]
         matrices, weights = games[side]
-        if side in ported:
-            solved = ported[side]
-        else:
-            with timing.region("lp.side"):
-                solved = solve_bayesian(matrices, weights)
+        solved = ported[side]
         strategy = np.asarray(solved.row_strategy, dtype=np.float64)
         if select[side] != DEFAULT_EQ_SELECT:
             with timing.region("lp.select"):

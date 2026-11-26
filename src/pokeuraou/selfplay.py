@@ -51,7 +51,7 @@ from .actions import ally_targets as ally_scope
 from .actions import hold_baton as baton_scope
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN, deepen_spec
-from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select, reselect_bayesian
+from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select
 from .equilibrium import EquilibriumError
 from .fold import TurnLeaves
 from .hidden import (
@@ -849,10 +849,8 @@ def _decide(  # noqa: PLR0913 - the node's pieces
     (ours, theirs, the node) -- or None where the two are built apart, as before. The node is
     for `belief_solve(..., prebuilt=...)`, and stands for the one both sides share: the two
     sides search with one leaf over one menu pair, undeepened, at depth 1."""
-    from . import portlp
-
     if (
-        not portlp.DECIDE[0] or spreads is None or not same_menu or widened
+        spreads is None or not same_menu or widened
         or tuple(cells) != (0, 0) or own_leaf is not foe_leaf
         or tuple(depths) != (1, 1) or tuple(selects) != (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT)
         or policy is not None or not rank_by_leaf
@@ -975,16 +973,12 @@ def _menus(
         return [(ranking_view(pos, spreads, side, rank_view, used), 1.0)]
 
     if policy is None and is_q(rank_fill) and not widths and not cover:
-        # IKA-457 stage 2.3: both menus in one request to the port, where it is on.
-        from . import portlp, rootmenus
+        # IKA-457 stage 2.3: both menus in one request to the port, where its road goes.
+        from . import rootmenus
 
-        try:
-            built = rootmenus.menus(
-                reg, pos, (_one_view(views(0)), _one_view(views(1))), limits, rank_fill
-            )
-        except portlp.PortFault as fault:
-            portlp.faulted("rootMenus", fault)
-            built = None
+        built = rootmenus.menus(
+            reg, pos, (_one_view(views(0)), _one_view(views(1))), limits, rank_fill
+        )
         if built is not None:
             return built
 
@@ -1361,7 +1355,7 @@ def play_game(
     """
     # Closes the stretch since the last game's last record (IKA-98); the first one ends startup.
     timing.decided("between")
-    from . import hiddenstep, portlp
+    from . import hiddenstep
 
     limits = (search_limit, search_limit) if isinstance(search_limit, int) else search_limit
     depths = (depth, depth) if isinstance(depth, int) else depth
@@ -1579,14 +1573,11 @@ def play_game(
     # IKA-458 stage 3.6d: a game nobody prepared in the port (a board's) is defined to it here,
     # as the loop below would at its first step. `one_agent` only prices a side's search when no
     # hidden bench is solved for both, and a hidden bench is the only game this road plays.
-    if (
-        portlp.PLAY[0] and hidden_game is None and portlp.HIDDEN[0]
-        and not any(dex_bases) and not luck.active()
-    ):
+    if hidden_game is None and not any(dex_bases) and not luck.active():
         hidden_game = hiddenstep.Game.of(sheets, bench_prior if bench_prior is not None else (None, None))
     if (
-        portlp.PLAY[0] and hidden_game is not None
-        and portlp.HIDDEN[0] and not any(dex_bases) and first_action is None
+        hidden_game is not None
+        and not any(dex_bases) and first_action is None
         and all(f is None for f in forced_species) and all(h is None for h in holds)
         and allies == ("off", "off") and binaries == (None, None)
         and set(drops) == {DEFAULT_BENCH_DROP} and tuple(cells) == (0, 0)
@@ -1617,9 +1608,9 @@ def play_game(
             break
 
         # IKA-458 stage 3.4: the seen identities and slots and each side's completions from
-        # the port, where `portlp.HIDDEN` is on and nothing makes the belief another's.
+        # the port, where it holds positions and nothing makes the belief another's.
         stepped = None
-        if portlp.HIDDEN[0] and not any(dex_bases):
+        if not any(dex_bases):
             if hidden_game is None:
                 hidden_game = hiddenstep.Game.of(
                     sheets, bench_prior if bench_prior is not None else (None, None)
@@ -2187,44 +2178,31 @@ def _advance_turn(
     """
     from . import portlp
 
-    advanced = None
-    ready = None
     # IKA-458 stage 3.1: the weights, the draw and the drawn branch in one request, the draw
-    # being numpy's own from the generator's PCG64 state.
-    if portlp.ADVANCE[0] and type(rng.bit_generator).__name__ == "PCG64":
-        # IKA-458 stage 3.2: a drawn pause is carried on there too, where the leaves are the
-        # inference server's.
-        ready = _self_switch_request(leaves, hidden)
-        try:
-            advanced = port.advance(
-                reg, pos, chosen, Budget.exact(), rng,
-                None if ready is None else ready[0],
-            )
-        except portlp.PortFault as fault:
-            portlp.faulted("advanceTurn", fault)
-    if advanced is not None:
-        portlp.COUNTS["advanced"] += 1
-        weights = advanced
-        record.unmodelled.extend(weights.unmodelled)
-        counts = np.array(weights.branches + weights.suspended, dtype=np.float64)
-        if advanced.index is None:
-            return None
-        index = advanced.index
-        landed = advanced.position
-        if advanced.chain is not None:
-            return _apply_chain(record, advanced, ready[1])
-    else:
-        weights = port.weights(reg, pos, chosen, Budget.exact())
-        record.unmodelled.extend(weights.unmodelled)
-        counts = np.array(weights.branches + weights.suspended, dtype=np.float64)
-        if not counts.size or float(counts.sum()) <= 0:
-            return None
-        index = _sample_index(rng, counts)
-        landed = (
-            port.branch(reg, pos, chosen, Budget.exact(), index)
-            if index < len(weights.branches)
-            else None
+    # being numpy's own from the generator's PCG64 state (IKA-460: the only road; the draw in
+    # Python that sampled the same index from the same weights is gone).
+    if type(rng.bit_generator).__name__ != "PCG64":
+        raise TypeError(
+            "the port draws a turn's branch from numpy's PCG64 state; got "
+            f"{type(rng.bit_generator).__name__}"
         )
+    # IKA-458 stage 3.2: a drawn pause is carried on there too, where the leaves are the
+    # inference server's.
+    ready = _self_switch_request(leaves, hidden)
+    advanced = port.advance(
+        reg, pos, chosen, Budget.exact(), rng,
+        None if ready is None else ready[0],
+    )
+    portlp.COUNTS["advanced"] += 1
+    weights = advanced
+    record.unmodelled.extend(weights.unmodelled)
+    counts = np.array(weights.branches + weights.suspended, dtype=np.float64)
+    if advanced.index is None:
+        return None
+    index = advanced.index
+    landed = advanced.position
+    if advanced.chain is not None:
+        return _apply_chain(record, advanced, ready[1])
     if index < len(weights.branches):
         luck.saw_turn(reg, pos, chosen, counts, index, landed)
         return landed
@@ -2243,9 +2221,7 @@ def _self_switch_request(
     """IKA-458 stage 3.2: what the port needs to choose a self-switch and play the turn on --
     the inference server each side's leaf is, and where a hidden bench's completions are read
     from -- and the leaves it names; None where this road does not go (Python plays the pause)."""
-    from . import portlp
-
-    if not portlp.SELFSWITCH[0] or luck.active() or timing.DUPES:
+    if luck.active() or timing.DUPES:
         return None
     if hidden is not None and (hidden.game is None or any(hidden.dex_base)):
         return None
@@ -2975,41 +2951,8 @@ def _do_replacement_node(
             ]
         options.append(found)
 
-    def matrix(at: Position, evaluate: LeafEvaluator | None) -> np.ndarray:
-        """Every pair of replacements resolved from `at` and scored.
-
-        The replacement node used `hp-share` regardless of what the move nodes used, which
-        would leave a third of a game's decisions scored by the thing being replaced.
-
-        A learned leaf with an encoded form takes the phases' positions as the encoder's
-        rows from the port (IKA-350), the same rows in the same order, scored in the one
-        call `evaluate(flat)` made -- so the leaf sees the batch it saw.
-        """
-        plan = None if evaluate is None else port.encoded_leaf_plan([evaluate])
-        if plan is not None and plan[0][1] is not None:
-            from .encode import rules_of
-
-            scorer = plan[0][1]
-            filled = port.replacements_encoded(
-                reg, at, [(a, b) for a in options[0] for b in options[1]], rules=rules_of(scorer)
-            )
-            port.note_port_rule([scorer], filled)
-            values = np.asarray(scorer(filled.encoded), dtype=np.float64)
-            # A phase that draws is every outcome at its weight, its cell their mean
-            # (IKA-352); the port says which rows are whose only when one did.
-            branches = getattr(filled, "branches", None)
-            if branches:
-                owner = np.array([cell for cell, _weight in branches], dtype=np.int64)
-                weights = np.array([weight for _cell, weight in branches], dtype=np.float64)
-                values = np.bincount(
-                    owner, weights=weights * values, minlength=len(options[0]) * len(options[1])
-                )
-            return values.reshape(len(options[0]), len(options[1]))
-        return replacement_matrix(reg, at, options, evaluate)
-
     foe_value: float | None = None
     seen = shown or [frozenset(), frozenset()]
-    answers: dict[int, tuple[list[float], float]] = {}
     if stepped is not None:
         # The port made them with the step (IKA-458 stage 3.4).
         if stepped.error is not None:
@@ -3035,34 +2978,12 @@ def _do_replacement_node(
             record.unmodelled.append(f"hidden bench at a replacement: {problem}")
             spreads = {}
     if spreads:
-        from . import portlp, replacenode
-        from .equilibrium import solve_bayesian
+        from . import replacenode
 
-        # IKA-457 stage 2.2: the whole node in one request to the port, where it is on.
-        try:
-            ported = replacenode.solve(reg, options, spreads, leaves, selects)
-        except portlp.PortFault as fault:
-            portlp.faulted("replacementNode", fault)
-            ported = None
-        if ported is not None:
-            answers.update(ported)
-        for side in (0, 1) if ported is None else ():
-            items = spreads[1 - side]
-            leaf = leaves[side]
-            built = [matrix(item.position, leaf) for item in items]
-            weights = np.asarray([item.weight for item in items], dtype=np.float64)
-            # Side 1 minimises what side 0 maximises, so its game is the transpose of
-            # the negation -- the same turn read from the other end, as in the move
-            # node, rather than a second matrix that could drift from this one.
-            own_game = [m if side == 0 else -m.T for m in built]
-            solved = solve_bayesian(own_game, weights)
-            strategy = reselect_bayesian(
-                own_game, weights, float(solved.value), solved.row_strategy, selects[side]
-            )
-            answers[side] = (
-                [float(x) for x in strategy],
-                float(solved.value),
-            )
+        # IKA-457 stage 2.2: the whole node in one request to the port, on the inference
+        # server's leaf (IKA-460: the only road; side 1 minimises what side 0 maximises, so
+        # its game is the transpose of the negation, read over there from the same matrices).
+        answers = replacenode.solve(reg, options, spreads, leaves, selects)
         own_policy, value = answers[0]
         foe_policy = answers[1][0]
         # Side 1's game is the negated transpose: back into side 0's units.

@@ -1,17 +1,16 @@
-"""IKA-457 stage 2.2: a replacement node solved in one request to the port -- off by default.
+"""IKA-457 stage 2.2: a replacement node solved in one request to the port.
 
 `selfplay._do_replacement_node` with a hidden bench read the node one completion at a time: the
 port filled every pair of replacements (`port.replacements_encoded`), Python scored the rows on
 the inference server (`RemoteValue.from_encoded`), folded a phase that draws into its cell
-(`replacement_matrix`'s `np.bincount`), and then solved each side's Bayesian game. With
-`portlp.REPLACE` on, the port does all of it in one `replacementNode` request
-(`rust/src/replacenode.rs`): the same fills, the same requests to the server in the same order
-(side 0's completions, then side 1's), the same settling of the ended leaves, and the same
-games, the matrices and the answers to the bit.
+(`replacement_matrix`'s `np.bincount`), and then solved each side's Bayesian game. The port now
+does all of it in one `replacementNode` request (`rust/src/replacenode.rs`): the same fills, the
+same requests to the server in the same order (side 0's completions, then side 1's), the same
+settling of the ended leaves, and the same games.
 
-The road is the inference server's leaf and nothing else: any other leaf (hp-share, a local
-net), a position the port refuses, a binary that does not know the request and a fault the
-port answers leave the node to Python, which then meets the same refusal itself.
+The road is the inference server's leaf and nothing else (IKA-460 stage 4): any other leaf
+(hp-share, a local net) is `beliefnode.UnservedLeaf`, and a fault the port answers is
+`portlp.PortFault`.
 """
 
 from __future__ import annotations
@@ -35,26 +34,18 @@ def solve(  # noqa: PLR0913 - the node's pieces
     spreads: dict[int, list],
     leaves: Sequence[Any],  # noqa: ANN401 - each side's leaf
     selects: Sequence[str],
-) -> dict[int, tuple[list[float], float]] | None:
+) -> dict[int, tuple[list[float], float]]:
     """Each side's (strategy, value) for the replacement node, as `_do_replacement_node`'s
-    loop gives them -- or None where this road does not go (Python then does the node)."""
-    if not portlp.REPLACE[0] or timing.DUPES:
-        return None
+    loop gives them."""
+    from .beliefnode import served_leaf
     from .encode import rules_of
-    from .inference import RemoteValue, request_failed
+    from .inference import request_failed
 
     owners: list[Any] = []
-    scorers: list[Any] = []
     for side in (0, 1):
-        leaf = leaves[side]
-        owner = getattr(leaf, "__self__", leaf)
-        if leaf is None or type(owner) is not RemoteValue:
-            return None
+        owner = served_leaf(leaves[side], "the replacement node")
         if not any(owner is seen for seen in owners):
             owners.append(owner)
-            scorers.append(getattr(owner, "from_encoded", None))
-    if any(scorer is None for scorer in scorers):
-        return None
 
     m, n = len(options[0]), len(options[1])
     request: dict[str, Any] = {
@@ -104,7 +95,7 @@ def solve(  # noqa: PLR0913 - the node's pieces
     portlp.COUNTS["crossings"] += 1
     portlp.COUNTS["lps"] += int(answer.get("lps", 0))
     if "fault" in answer:
-        raise portlp.PortFault(str(answer["fault"]))
+        raise portlp.PortFault("replacementNode", str(answer["fault"]))
     if "serverError" in answer:
         raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
                               "capGb": answer.get("capGb")}, "inference failed")

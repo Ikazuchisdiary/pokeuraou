@@ -1,17 +1,17 @@
 """IKA-458 stage 3.6a: a game's replacement phase chosen and played in one request to the port
-(`replacementPhase`, `rust/src/replacephase.rs`) -- off by default (`portlp.PLAY`).
+(`replacementPhase`, `rust/src/replacephase.rs`).
 
 `selfplay._do_replacement_node` made its options, asked for the node (`replacenode.solve`), drew
 each side's replacement with numpy's `choice` and asked for the phase once more for each draw it
-opened. With `portlp.PLAY` on the port does all of it from the position, the generator's state
-and where the leaves and the hidden bench are: the same requests to the inference server, the
-same draws, the same position. This module builds the request and books what comes back; the
-record's `Decision` is written by the caller as before.
+opened. The port does all of it from the position, the generator's state and where the leaves and
+the hidden bench are: the same requests to the inference server, the same draws, the same
+position. This module builds the request and books what comes back; the record's `Decision` is
+written by the caller as before.
 
 Where this road does not go -- a leaf that is not the inference server's, another equilibrium
-selection, a game the port does not hold, a side whose completions it could not make, a binary
-that predates the request, a fault the port answers -- `play` returns None and the caller does the
-node itself, the generator untouched.
+selection, a game the port does not hold (the completions were Python's), luck gathered inside
+the process -- `play` returns None and the caller does the node itself (`replacenode.solve` over
+the same port), the generator untouched. A fault the port answers is `portlp.PortFault`.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def play(  # noqa: PLR0913 - the phase's pieces
     the state after the draws only once the answer is in."""
     from .selfplay import DEFAULT_EQ_SELECT, _HiddenBench, _self_switch_request
 
-    if not portlp.PLAY[0] or game is None or luck.active() or timing.DUPES:
+    if game is None or luck.active() or timing.DUPES:
         return None
     if type(rng.bit_generator).__name__ != "PCG64":
         return None
@@ -82,8 +82,7 @@ def play(  # noqa: PLR0913 - the phase's pieces
     portlp.COUNTS["crossings"] += 1
     portlp.COUNTS["lps"] += int(answer.get("lps", 0))
     if "fault" in answer:
-        portlp.faulted("replacementPhase", str(answer["fault"]))
-        return None
+        raise portlp.PortFault("replacementPhase", str(answer["fault"]))
     if "serverError" in answer:
         from .inference import request_failed
 

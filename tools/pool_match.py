@@ -63,7 +63,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou import actions, eqselect, qrank  # noqa: E402
+from pokeuraou import actions, eqselect, portlp, qrank  # noqa: E402
 from pokeuraou import narrow as narrowing  # noqa: E402
 from pokeuraou.actions import ALLY_TARGET_MODES, team_ally_benefits  # noqa: E402
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
@@ -434,10 +434,6 @@ def main(argv: list[str] | None = None) -> None:
                     "by the tested arm's leaf; `pokeuraou.luck`, IKA-193) into its record as "
                     "`aivat`. The games are the same with or without it")
     args = ap.parse_args(argv)
-    # IKA-455: the board is played with generation's roads; POKEURAOU_GEN_PORT_NODE=0 turns it off.
-    from pokeuraou import portlp
-
-    portlp.default_on_for_generation()
     require_bench(args)
     if (args.inference is None) == (args.value is None):
         ap.error("one of --inference or --value names the tested arm's leaf")

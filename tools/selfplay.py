@@ -415,10 +415,6 @@ def main() -> None:
         parse_deepen(args.deepen)
     except ValueError as problem:
         ap.error(str(problem))
-    # IKA-455: generation's default; POKEURAOU_GEN_PORT_NODE=0 turns it off.
-    from pokeuraou import portlp
-
-    portlp.default_on_for_generation()
     run_pool(args, ap)
 
 
