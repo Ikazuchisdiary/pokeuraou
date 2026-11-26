@@ -68,7 +68,9 @@ ON = [os.environ.get(ENV, "0").strip() == "1"]
 COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps": 0, "stacked": 0,
           "nodes": 0, "faults": 0,
           # IKA-457 stage 2.1: the whole-node requests of a node with nothing hidden.
-          "exact": 0}
+          "exact": 0,
+          # IKA-457 stage 2.2: the replacement nodes the port solved in one request.
+          "replaced": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -165,6 +167,23 @@ def set_exact(on: bool) -> None:
 
 set_exact(EXACT[0])
 
+REPLACE_ENV = "POKEURAOU_GEN_PORT_REPLACE"
+#: IKA-457 stage 2.2: whether a replacement node (a forced switch, `selfplay._do_replacement_node`)
+#: is one request to the port -- each completion's fills, the server's values, the fold of a phase
+#: that draws and the Bayesian games (`replacenode.py`, `rust/src/replacenode.rs`). Off by
+#: default, and off in `default_on_for_generation`. On includes `EXACT` (and so `NODE` and below).
+REPLACE = [os.environ.get(REPLACE_ENV, "0").strip() == "1"]
+
+
+def set_replace(on: bool) -> None:
+    """Turn stage 2.2 on or off in this process; on turns `EXACT` on too."""
+    REPLACE[0] = bool(on)
+    if on:
+        set_exact(True)
+
+
+set_replace(REPLACE[0])
+
 
 def default_on_for_generation() -> None:
     """Generation's, and its board's, default: stage 1.4's whole-node road, unless
@@ -187,7 +206,8 @@ def echo() -> str:
     return (
         f"port roads: lp {word[GEN[0]]}, fold {word[FOLD[0]]}, stack {word[STACK[0]]}, "
         f"node {word[NODE[0]]} (POKEURAOU_GEN_PORT_NODE={os.environ.get(NODE_ENV, '(unset)')}), "
-        f"exact {word[EXACT[0]]} ({EXACT_ENV}={os.environ.get(EXACT_ENV, '(unset)')}); "
+        f"exact {word[EXACT[0]]} ({EXACT_ENV}={os.environ.get(EXACT_ENV, '(unset)')}), "
+        f"replace {word[REPLACE[0]]} ({REPLACE_ENV}={os.environ.get(REPLACE_ENV, '(unset)')}); "
         f"faults solved in Python: {COUNTS['faults']}; {counts()}"
     )
 
@@ -412,7 +432,7 @@ def counts() -> dict[str, int]:
 
 
 __all__ = ["COUNTS", "ENV", "EXACT", "EXACT_ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "NODE",
-           "NODE_ENV", "ON", "PortFault", "STACK", "STACK_ENV", "bayesian_answer", "counts",
-           "default_on_for_generation", "echo", "faulted", "set_exact", "set_fold",
-           "set_gen", "set_node", "set_on", "set_stack", "solve_bayesian_many",
-           "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]
+           "NODE_ENV", "ON", "REPLACE", "REPLACE_ENV", "PortFault", "STACK", "STACK_ENV",
+           "bayesian_answer", "counts", "default_on_for_generation", "echo", "faulted",
+           "set_exact", "set_fold", "set_gen", "set_node", "set_on", "set_replace", "set_stack",
+           "solve_bayesian_many", "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]

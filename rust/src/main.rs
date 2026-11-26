@@ -48,6 +48,7 @@ mod par;
 mod position;
 mod reg;
 mod residual;
+mod replacenode;
 mod resolve;
 mod qfeatures;
 mod qmenus;

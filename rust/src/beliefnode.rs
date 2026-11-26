@@ -273,6 +273,19 @@ fn fold_with(value: &Value, values: Vec<f64>) -> Result<Value, String> {
         matrices.push(payoff);
     }
 
+    solve_games(value, &matrices, &sides, m, n)
+}
+
+/// The games `value["solve"]` names, over `matrices` (job k's, `sides[k]` its side), and the
+/// answer `beliefFold` gives: the matrices and the solved games. IKA-457 stage 2.2's replacement
+/// node uses it too.
+pub(crate) fn solve_games(
+    value: &Value,
+    matrices: &[Vec<f64>],
+    sides: &[i64],
+    m: usize,
+    n: usize,
+) -> Result<Value, String> {
     // The games Python names: side `s`'s is over the matrices of the jobs of side `1 - s`, side
     // 1's as the transpose of the negation (`search.belief_solve`).
     let before = LPS.load(Ordering::Relaxed);
@@ -281,7 +294,7 @@ fn fold_with(value: &Value, values: Vec<f64>) -> Result<Value, String> {
         let side = ask["side"].as_i64().ok_or("a solve without side")?;
         let weights = f64s(&ask["weights"])?;
         let mut mats: Vec<(Vec<f64>, usize, usize)> = Vec::new();
-        for (payoff, job_side) in matrices.iter().zip(&sides) {
+        for (payoff, job_side) in matrices.iter().zip(sides) {
             if 1 - job_side != side {
                 continue;
             }
@@ -536,7 +549,7 @@ fn patch(e: &mut Encoded, w: &Widths, at: &PatchAt, side: usize, slots: &[usize]
     Ok(())
 }
 
-fn server_failed(failed: crate::served::Failed) -> Value {
+pub(crate) fn server_failed(failed: crate::served::Failed) -> Value {
     match failed {
         crate::served::Failed::Refused { error, oom, cap_gb } => json!({ "serverError": error, "oom": oom, "capGb": cap_gb }),
         crate::served::Failed::Broken(error) => json!({ "serverError": error }),

@@ -2760,9 +2760,18 @@ def _do_replacement_node(
             record.unmodelled.append(f"hidden bench at a replacement: {problem}")
             spreads = {}
         if spreads:
+            from . import portlp, replacenode
             from .equilibrium import solve_bayesian
 
-            for side in (0, 1):
+            # IKA-457 stage 2.2: the whole node in one request to the port, where it is on.
+            try:
+                ported = replacenode.solve(reg, options, spreads, leaves, selects)
+            except portlp.PortFault as fault:
+                portlp.faulted("replacementNode", fault)
+                ported = None
+            if ported is not None:
+                answers.update(ported)
+            for side in (0, 1) if ported is None else ():
                 items = spreads[1 - side]
                 leaf = leaves[side]
                 built = [matrix(item.position, leaf) for item in items]

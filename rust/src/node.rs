@@ -1217,6 +1217,10 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("beliefNode") => {
             crate::beliefplan::belief_node(reg, encoder, &value)
         }
+        // IKA-457 stage 2.2: a replacement node's fills, scores, folds and games in one request.
+        Ok(value) if value["kind"].as_str() == Some("replacementNode") => {
+            crate::replacenode::replacement_node(reg, encoder, &value)
+        }
         Ok(value) if value["kind"].as_str() == Some("beliefServed") => {
             crate::beliefnode::belief_served(&encoder.widths, &value)
         }
