@@ -904,6 +904,12 @@ class RustNode:
         """IKA-381: an `lp` or `folds` request (`portlp`), its one header line back."""
         return self._exchange(request)
 
+    @timing.timed("rust.fill")
+    def belief_node(self, request: dict[str, Any]) -> dict[str, Any]:
+        """IKA-455 stage 1.4: a hidden bench's whole node (`beliefNode`) in one crossing. Timed
+        as a node asked of the child (`rust.fill`), as the fills it replaces were."""
+        return self._exchange(request)
+
     def parallel(self) -> dict[str, Any]:
         """The port's cell-thread counters (IKA-32): `threads`, and how many maps and items
         ran on the pool, `offMain` of them on a thread other than the one reading requests."""

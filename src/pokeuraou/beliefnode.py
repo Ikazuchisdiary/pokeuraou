@@ -902,9 +902,10 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
         "hp_scale": float(HP_SCALE),
     }
     started = timing.clock()
-    with timing.stage("rust.fill"):
-        answer = portlp._ask(reg, request)  # noqa: SLF001
+    answer = port.ask(reg, lambda node: node.belief_node(request))
     wall = timing.clock() - started
+    portlp.COUNTS["crossings"] += 1
+    portlp.COUNTS["lps"] += int(answer.get("lps", 0))
     if "error" in answer:
         raise RuntimeError(f"`beliefNode`: {answer['error']}")
     if "serverError" in answer:
