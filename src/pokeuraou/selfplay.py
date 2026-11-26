@@ -937,6 +937,20 @@ def _menus(
             used[side] = (index, tuple(items[index].species))
         return [(items[index].position, 1.0)]
 
+    if policy is None and is_q(rank_fill) and not widths and not cover:
+        # IKA-457 stage 2.3: both menus in one request to the port, where it is on.
+        from . import portlp, rootmenus
+
+        try:
+            built = rootmenus.menus(
+                reg, pos, (_one_view(views(0)), _one_view(views(1))), limits, rank_fill
+            )
+        except portlp.PortFault as fault:
+            portlp.faulted("rootMenus", fault)
+            built = None
+        if built is not None:
+            return built
+
     # IKA-274 stage 3: both sides' Q requests in one round trip, before either menu asks.
     q_given = (
         qrank.prefetch(

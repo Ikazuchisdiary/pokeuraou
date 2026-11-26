@@ -98,9 +98,16 @@ fn pool_arrays(
     Ok(Arrays { named, shape: (pools[0].len(), pools[1].len()) })
 }
 
+/// Which request the server is sent: `batched` (`q_batch`) or `matrices` (`q` / `q_many`).
+#[derive(Clone, Copy)]
+enum Op {
+    Batch,
+    Matrices,
+}
+
 /// `RemoteQ.batched` of one chunk: the arrays laid into the Q's block as `RemoteQ._lay`
 /// lays them, one `q_batch` request, and each child's matrix read back.
-fn ask_chunk(server: &Server, chunk: &[Arrays], stats: &mut Stats) -> Result<Vec<Vec<f64>>, Failed> {
+fn ask_chunk(server: &Server, chunk: &[Arrays], stats: &mut Stats, op: Op) -> Result<Vec<Vec<f64>>, Failed> {
     served::with_q_client(server, |client| {
         let broken = |e: std::io::Error| Failed::Broken(e.to_string());
         let copied = std::time::Instant::now();
@@ -134,12 +141,21 @@ fn ask_chunk(server: &Server, chunk: &[Arrays], stats: &mut Stats) -> Result<Vec
             items.push((json!({ "layout": layout, "shape": [n0, n1], "result_offset": result_offset }), result_offset, n0 * n1));
         }
         stats.copy_ns += copied.elapsed().as_nanos() as u64;
-        let request = json!({
-            "op": "q_batch",
-            "model": server.model,
-            "shm": server.shm,
-            "items": items.iter().map(|(item, _, _)| item.clone()).collect::<Vec<_>>(),
-        });
+        let listed: Vec<Value> = items.iter().map(|(item, _, _)| item.clone()).collect();
+        let request = match op {
+            // One forward pass for the children (`RemoteQ.batched`).
+            Op::Batch => json!({ "op": "q_batch", "model": server.model, "shm": server.shm, "items": listed }),
+            // `RemoteQ.matrices` (IKA-457 stage 2.3): one position as `q`, several as `q_many`,
+            // each answered as its own pass.
+            Op::Matrices if listed.len() == 1 => {
+                let mut one = json!({ "op": "q", "model": server.model, "shm": server.shm });
+                for (key, v) in listed[0].as_object().expect("an item is an object") {
+                    one[key] = v.clone();
+                }
+                one
+            }
+            Op::Matrices => json!({ "op": "q_many", "model": server.model, "shm": server.shm, "items": listed }),
+        };
         served::ask(client, &request, stats)?;
         let mut out = Vec::with_capacity(items.len());
         for (_, result_offset, cells) in &items {
@@ -250,7 +266,7 @@ pub fn q_menus(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
             }
         }
         arrays_ns += laid.elapsed().as_nanos() as u64;
-        let matrices = match ask_chunk(&server, &arrays, &mut stats) {
+        let matrices = match ask_chunk(&server, &arrays, &mut stats, Op::Batch) {
             Ok(got) => got,
             Err(failed) => {
                 return match failed {
@@ -386,4 +402,144 @@ pub fn scores_command(value: &Value) -> Value {
         out.push(json!({ "rows": bits(&both[0]), "cols": bits(&both[1]), "solved": solved }));
     }
     json!({ "kind": "qScores", "answers": out })
+}
+
+/// `narrow._slot_key` of one slot of an action: the identity of its option, for the cover.
+fn slot_key(k: usize, act: &legal::Act) -> String {
+    match act {
+        legal::Act::Move { move_id, target, mega, .. } => {
+            format!("{k}:move:{}:{target:?}:{}", move_id.as_str(), u8::from(*mega))
+        }
+        legal::Act::Switch { party, .. } => format!("{k}:switch:{party}"),
+        legal::Act::Pass { .. } => format!("{k}:pass"),
+    }
+}
+
+/// How many slot options of `pool` the `kept` actions leave off (`Narrowed.uncovered`'s length)
+/// when the pool was cut (a pool within the limit is whole and leaves none).
+fn uncovered(pool: &[SideAct], kept: &[usize], limit: usize) -> usize {
+    if pool.len() <= limit {
+        return 0;
+    }
+    let keys = |action: &SideAct| -> Vec<String> { action.iter().enumerate().map(|(k, a)| slot_key(k, a)).collect() };
+    let all: std::collections::HashSet<String> = pool.iter().flat_map(keys).collect();
+    let taken: std::collections::HashSet<String> = kept.iter().flat_map(|&i| keys(&pool[i])).collect();
+    all.difference(&taken).count()
+}
+
+/// IKA-457 stage 2.3 `rootMenus`: a move node's two menus by the Q, in one crossing.
+///
+/// `_menus` with a `q-nocover` fill built them in the worker's Python: both sides' legal pools,
+/// `qrank.prefetch`'s one or two requests (`RemoteQ.matrices`: side `s` asks its own pool on the
+/// node against the other side's pool on the view it ranks from, the arrays of that view), the
+/// Q's games (`portlp.solve_many`) and each side's ranking, `narrow(..., cover=False)` of it. Here
+/// the port lists the pools (`legal.rs`), lays the arrays into the Q's block, sends the same `q`
+/// or `q_many` request, solves the games, scores with numpy's BLAS and cuts each menu at its
+/// width. The same bits as the Python road (`tests/test_root_menus_port.py`).
+///
+/// ```text
+/// { "kind": "rootMenus", "position": P, "v0": P, "v1": P, "same": bool, "widths": [w0, w1],
+///   "properties": bool, "megaFromSlots": bool, "server": S, "blas": B }
+/// ```
+///
+/// `same` is whether the two sides rank from one view object (and so, with equal pools, from one
+/// request). An empty pool, or a position of another regulation, is a `fault`.
+pub fn root_menus(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
+    match root_menus_node(reg, encoder, value) {
+        Ok(answer) | Err(answer) => answer,
+    }
+}
+
+fn root_menus_node(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
+    let fault = |e: String| json!({ "fault": e });
+    let widths: Vec<usize> = value["widths"]
+        .as_array()
+        .filter(|w| w.len() == 2)
+        .and_then(|w| w.iter().map(|x| x.as_u64().map(|n| n as usize)).collect())
+        .ok_or_else(|| fault("`rootMenus` without two widths".into()))?;
+    if widths.iter().any(|w| *w < 1) {
+        return Err(fault("`rootMenus`: a width must be at least 1".into()));
+    }
+    let eps = value.get("eps").and_then(Value::as_f64).unwrap_or(1e-9);
+    let properties = value.get("properties").and_then(Value::as_bool).unwrap_or(true);
+    let rules = EncodeRules { mega_from_slots: value.get("megaFromSlots").and_then(Value::as_bool).unwrap_or(false) };
+    let server = Server::from_json(&value["server"]).map_err(fault)?;
+    let blas = Blas::from_json(&value["blas"]).map_err(fault)?;
+    let same = value.get("same").and_then(Value::as_bool).unwrap_or(false);
+    let pos = crate::held::position(&value["position"]);
+    let views: Vec<Position> = [&value["v0"], &value["v1"]].into_iter().map(crate::held::position).collect();
+    for p in std::iter::once(&pos).chain(views.iter()) {
+        if &*p.format != reg.format_id.as_str() {
+            return Err(fault(format!("position is {} but the regulation is {}", p.format, reg.format_id)));
+        }
+    }
+    let started = std::time::Instant::now();
+    // Side `s` ranks its pool on the node against the other side's pool on its view.
+    let mut pools: Vec<[Vec<SideAct>; 2]> = Vec::with_capacity(2);
+    for s in 0..2 {
+        let own = legal::legal_pool(reg, &pos, s);
+        let foe = legal::legal_pool(reg, &views[s], 1 - s);
+        if own.is_empty() || foe.is_empty() {
+            return Err(fault("a side has no legal action".into()));
+        }
+        pools.push(if s == 0 { [own, foe] } else { [foe, own] });
+    }
+    let legal_ns = started.elapsed().as_nanos() as u64;
+    let choices = |p: &[Vec<SideAct>; 2]| -> [Vec<String>; 2] {
+        [p[0].iter().map(legal::choice).collect(), p[1].iter().map(legal::choice).collect()]
+    };
+    let one_request = same && choices(&pools[0]) == choices(&pools[1]);
+    let request_of = [0usize, if one_request { 0 } else { 1 }];
+    let requests: Vec<usize> = if one_request { vec![0] } else { vec![0, 1] };
+    let lps_before = crate::lp::LPS.load(std::sync::atomic::Ordering::Relaxed);
+    let laid = std::time::Instant::now();
+    let mut arrays = Vec::with_capacity(requests.len());
+    for &r in &requests {
+        arrays.push(
+            pool_arrays(reg, encoder, rules, &views[r], &pools[r], properties).map_err(|e| json!({ "invalid": e }))?,
+        );
+    }
+    let arrays_ns = laid.elapsed().as_nanos() as u64;
+    let mut stats = Stats::default();
+    let matrices = ask_chunk(&server, &arrays, &mut stats, Op::Matrices).map_err(|failed| match failed {
+        Failed::Refused { error, oom, cap_gb } => json!({ "serverError": error, "oom": oom, "capGb": cap_gb }),
+        Failed::Broken(error) => match error.strip_prefix("\u{0}tooBig ") {
+            Some(text) => json!({ "tooBig": text }),
+            None => json!({ "serverError": error, "broken": true }),
+        },
+    })?;
+    let mut menus = Vec::with_capacity(2);
+    let mut cuts = Vec::with_capacity(2);
+    let mut cells = Vec::with_capacity(2);
+    let mut unsolved = 0u64;
+    let mut solved_once: Vec<Option<([Vec<f64>; 2], bool)>> = vec![None; requests.len()];
+    for s in 0..2 {
+        let r = request_of[s];
+        let (m, n) = (pools[r][0].len(), pools[r][1].len());
+        if solved_once[r].is_none() {
+            let got = scores(&blas, &matrices[r], m, n, eps);
+            unsolved += u64::from(!got.1);
+            solved_once[r] = Some(got);
+        }
+        let both = &solved_once[r].as_ref().expect("solved just above").0;
+        let kept = top(&pools[r][s], &both[s], widths[s]);
+        cuts.push(uncovered(&pools[r][s], &kept, widths[s]));
+        menus.push(Value::Array(
+            kept.iter().map(|&i| Value::Array(pools[r][s][i].iter().map(legal::Act::to_json).collect())).collect(),
+        ));
+        cells.push(m * n);
+    }
+    MENUS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(json!({
+        "kind": "rootMenus",
+        "menus": menus,
+        "uncovered": cuts,
+        "cells": cells,
+        "requests": requests.len(),
+        "unsolved": unsolved,
+        "lps": crate::lp::LPS.load(std::sync::atomic::Ordering::Relaxed) - lps_before,
+        "served": { "requests": stats.requests, "waitUs": stats.wait_ns as f64 / 1e3, "copyUs": stats.copy_ns as f64 / 1e3 },
+        "legalUs": legal_ns as f64 / 1e3,
+        "arraysUs": arrays_ns as f64 / 1e3,
+    }))
 }

@@ -774,7 +774,7 @@ def per_decision(reports: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 #: IKA-32: the stages a part's time is read by, in `print_regions`.
 REGION_PORT_WAIT = ("rust.fill", "rust.turn", "rust.score", "rust.resolve", "rust.needed",
                     "rust.replacements", "rust.leads", "rust.resume", "rust.alternatives",
-                    "rust.qfeatures")
+                    "rust.qfeatures", "rust.menus")
 
 
 def print_regions(found: dict[str, dict[str, Any]]) -> None:

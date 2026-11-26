@@ -70,7 +70,9 @@ COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps"
           # IKA-457 stage 2.1: the whole-node requests of a node with nothing hidden.
           "exact": 0,
           # IKA-457 stage 2.2: the replacement nodes the port solved in one request.
-          "replaced": 0}
+          "replaced": 0,
+          # IKA-457 stage 2.3: the move nodes whose menus the port built.
+          "menus": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -184,6 +186,24 @@ def set_replace(on: bool) -> None:
 
 set_replace(REPLACE[0])
 
+MENUS_ENV = "POKEURAOU_GEN_PORT_MENUS"
+#: IKA-457 stage 2.3: whether a move node's two menus by the Q (`selfplay._menus` with a
+#: `q-nocover` fill) are one request to the port -- the pools, the Q's request and games, the
+#: ranking and the cut at each width (`rootmenus.py`, `rust/src/qmenus.rs` `rootMenus`). Off by
+#: default, and off in `default_on_for_generation`. On includes `REPLACE` (and so `EXACT` and
+#: the whole-node road).
+MENUS = [os.environ.get(MENUS_ENV, "0").strip() == "1"]
+
+
+def set_menus(on: bool) -> None:
+    """Turn stage 2.3 on or off in this process; on turns `REPLACE` on too."""
+    MENUS[0] = bool(on)
+    if on:
+        set_replace(True)
+
+
+set_menus(MENUS[0])
+
 
 def default_on_for_generation() -> None:
     """Generation's, and its board's, default: stage 1.4's whole-node road, unless
@@ -207,7 +227,8 @@ def echo() -> str:
         f"port roads: lp {word[GEN[0]]}, fold {word[FOLD[0]]}, stack {word[STACK[0]]}, "
         f"node {word[NODE[0]]} (POKEURAOU_GEN_PORT_NODE={os.environ.get(NODE_ENV, '(unset)')}), "
         f"exact {word[EXACT[0]]} ({EXACT_ENV}={os.environ.get(EXACT_ENV, '(unset)')}), "
-        f"replace {word[REPLACE[0]]} ({REPLACE_ENV}={os.environ.get(REPLACE_ENV, '(unset)')}); "
+        f"replace {word[REPLACE[0]]} ({REPLACE_ENV}={os.environ.get(REPLACE_ENV, '(unset)')}), "
+        f"menus {word[MENUS[0]]} ({MENUS_ENV}={os.environ.get(MENUS_ENV, '(unset)')}); "
         f"faults solved in Python: {COUNTS['faults']}; {counts()}"
     )
 
@@ -432,7 +453,8 @@ def counts() -> dict[str, int]:
 
 
 __all__ = ["COUNTS", "ENV", "EXACT", "EXACT_ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "NODE",
-           "NODE_ENV", "ON", "REPLACE", "REPLACE_ENV", "PortFault", "STACK", "STACK_ENV",
-           "bayesian_answer", "counts", "default_on_for_generation", "echo", "faulted",
-           "set_exact", "set_fold", "set_gen", "set_node", "set_on", "set_replace", "set_stack",
-           "solve_bayesian_many", "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]
+           "NODE_ENV", "MENUS", "MENUS_ENV", "ON", "REPLACE", "REPLACE_ENV", "PortFault", "STACK",
+           "STACK_ENV", "bayesian_answer", "counts", "default_on_for_generation", "echo",
+           "faulted", "set_exact", "set_fold", "set_gen", "set_menus", "set_node", "set_on",
+           "set_replace", "set_stack", "solve_bayesian_many", "solve_bayesian_one", "solve_many",
+           "solve_one", "solve_subs"]

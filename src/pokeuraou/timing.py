@@ -97,6 +97,7 @@ WORKER_STAGES = (
     "rust.alternatives",  # a pause's alternatives, encoded or not
     "rust.bind",        # the bind columns Encoder.encode_positions asks the port for (IKA-429)
     # A Q rank fill's request (IKA-339), in the order a request makes them:
+    "rust.menus",       # a move node's two menus by the Q in one crossing (IKA-457 stage 2.3)
     "rust.qfeatures",   # the port's per-candidate features (RustNode.qfeatures, IKA-350), the wait included
     "q.arrays",         # the actions' encoding, the arrays and their copy into the block
     "serve.q",          # from sending the Q request to having the matrices (RemoteQ)

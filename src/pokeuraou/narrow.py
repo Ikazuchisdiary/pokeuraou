@@ -978,10 +978,16 @@ COVERLESS: dict[str, dict[str, int]] = {}
 
 def note_coverless(label: str, narrowed: Narrowed) -> None:
     """Adds one coverless menu to `COVERLESS` under `label`."""
+    note_coverless_count(label, len(narrowed.uncovered))
+
+
+def note_coverless_count(label: str, dropped: int) -> None:
+    """`note_coverless` of a menu that left `dropped` slot options off (IKA-457: the port built
+    the menu and counted them)."""
     got = COVERLESS.setdefault(label, {"menus": 0, "dropping": 0, "dropped": 0})
     got["menus"] += 1
-    got["dropping"] += int(bool(narrowed.uncovered))
-    got["dropped"] += len(narrowed.uncovered)
+    got["dropping"] += int(bool(dropped))
+    got["dropped"] += dropped
 
 
 def _count_kinds(reg: Regulation, kept: list[Candidate]) -> dict[str, int]:
