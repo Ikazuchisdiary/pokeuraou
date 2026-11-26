@@ -155,15 +155,15 @@ def test_a_child_read_once_is_every_one_read(kit, monkeypatch) -> None:  # noqa:
     assert got[True].ladder.here["sharedSubgames"] > 0
 
 
-def stackless_leaf(reg, path):  # noqa: ANN001, ANN201
-    """A ladder worker's leaf for `test_a_child_read_pass_by_pass_is_the_child_read_whole`:
-    the saved net on the CPU at one thread, a forward pass a child game (`ladder.STACK` off
-    in the worker too), so a value never depends on what it is scored with."""
-    from pokeuraou import humanplay
+def stackless_leaf(reg, address):  # noqa: ANN001, ANN201
+    """A ladder worker's leaf for `test_a_child_read_pass_by_pass_is_the_child_read_whole`: the
+    test's stand-in inference server (`tests/_served.py`, scoring with the test's own net on the
+    CPU), a forward pass a child game (`ladder.STACK` off in the worker too), so a value never
+    depends on what it is scored with."""
+    from pokeuraou.inference import RemoteValue
 
     ladder.STACK = False
-    torch.set_num_threads(1)
-    return humanplay.process_leaf(reg, [path], "cpu", False)
+    return RemoteValue(address, "value", Encoder(reg))
 
 
 @pytest.mark.parametrize("me", [0, 1])
@@ -180,13 +180,8 @@ def test_a_child_read_pass_by_pass_is_the_child_read_whole(kit, monkeypatch, tmp
     IKA-422: for side 1 as well (``me``), whose children are read as side 1 (`CHILD` ``seat``,
     each child's mirror and each cell's actions the other way round): the control is that its
     read differs from the one that reads them as side 0 (``guarantee``)."""
-    from pokeuraou.value import save_model
 
     reg, pos, leaf = kit
-    encoder = Encoder(reg)
-    path = tmp_path / "seed7.pt"
-    net = leaf.nets[0]
-    save_model(path, net, net.state_dict(), encoder.vocab, ValueConfig(), meta={})
     ours = narrow(reg, pos, 0, limit=5).actions
     theirs = narrow(reg, pos, 1, limit=5).actions
     stages = "d2r2b2n4x+d3r4ban4x/r2b2n3"
@@ -206,12 +201,16 @@ def test_a_child_read_pass_by_pass_is_the_child_read_whole(kit, monkeypatch, tmp
         finally:
             ladder._POOL = saved
 
-    assert ladder.start_pool(reg, 2, stackless_leaf, (str(path),)) == 2
+    from ._served import model_of, serve
+
+    server, address = serve({"value": model_of(leaf.from_encoded)})
+    assert ladder.start_pool(reg, 2, stackless_leaf, (address,)) == 2
     try:
         passes = solved(True, True)
         split = solved(False, True)
     finally:
         ladder.stop_pool()
+        server.shutdown()
     alone = solved(True, False)
     assert [r.stage for r in passes.ladder.rungs] == stages.split("+")
     monkeypatch.setattr(ladder, "CHILD", "guarantee")

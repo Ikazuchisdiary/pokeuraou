@@ -219,13 +219,13 @@ def test_a_persons_menus_fall_back_on_a_q_of_another_vocabulary(
     tool = load_tool("play_human")
     said: list[str] = []
     monkeypatch.setattr(qrank, "LocalQ", _VocabQ)
-    fill, files = tool.install_menus(None, q_file, _Encoder(), _stub, None, None, said.append)
+    fill, files = tool.install_menus(None, q_file, _Encoder(), None, said.append)
     assert (fill, files) == ("refs2", [])
     assert len(said) == 1 and "another vocabulary" in said[0] and "refs2" in said[0]
     assert qrank._INSTALLED == {}  # noqa: SLF001
     # Named, the fill is played or the tool stops: no fallback.
     with pytest.raises(qrank.QVocabularyError):
-        tool.install_menus("q-nocover", q_file, _Encoder(), _stub, None, None, said.append)
+        tool.install_menus("q-nocover", q_file, _Encoder(), None, said.append)
     # It is both errors the two Q classes raised before, so their callers still catch it.
     assert issubclass(qrank.QVocabularyError, ValueError)
     assert issubclass(qrank.QVocabularyError, RuntimeError)
@@ -235,14 +235,14 @@ def test_a_persons_menus_otherwise_as_before(monkeypatch, q_file, tmp_path, no_q
     tool = load_tool("play_human")
     said: list[str] = []
     monkeypatch.setattr(qrank, "LocalQ", _GoodQ)
-    assert tool.install_menus(None, q_file, _Encoder(), _stub, None, None, said.append) == (
+    assert tool.install_menus(None, q_file, _Encoder(), None, said.append) == (
         "q-nocover", ["q-mc0.pt"])
     assert said == [] and qrank.installed().path == q_file
     # No file, or no leaf's encoder: refs2 with a note.
-    assert tool.install_menus(None, tmp_path / "none.pt", _Encoder(), _stub, None, None,
+    assert tool.install_menus(None, tmp_path / "none.pt", _Encoder(), None,
                               said.append)[0] == "refs2"
-    assert tool.install_menus(None, q_file, None, None, None, None, said.append)[0] == "refs2"
+    assert tool.install_menus(None, q_file, None, None, said.append)[0] == "refs2"
     assert len(said) == 2 and all("note: menus ranked by refs2" in s for s in said)
     # Named refs2 asks for nothing.
-    assert tool.install_menus("refs2", tmp_path / "none.pt", None, None, None, None,
+    assert tool.install_menus("refs2", tmp_path / "none.pt", None, None,
                               said.append) == ("refs2", [])

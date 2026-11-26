@@ -17,15 +17,10 @@ without the Q, as a board does, IKA-338) and the bench belief. **The first --arm
 tested condition**: the Elo is its, and ``--sprt E0 E1`` tests it (`pokeuraou.sprt`: H1
 is "it is worth E1 or more"). ``--pairs`` is the cap.
 
-**The leaf on a server** (IKA-363). ``--served`` starts one inference server
-(`tools/inference_server.py`: the leaf and the Q) and every process sends its forward passes
-there; ``--inference HOST:PORT`` names a server already running. A process then holds no
-torch and no CUDA context (1.3-2 GB of the card each, locally), so the processes are limited
-by the CPU and the RAM rather than the card. ``--merge on`` asks the server's merged road: the
-requests of all processes waiting at once share a forward pass, which moves a value in the
-last places with the timing (a node-time game is then not replayed by seed); off (the
-default), a served node-time game is the local one to the byte (IKA-363: 32 of 32 games).
-Without a server the processes load the leaf themselves, as before.
+**The leaf on a server** (IKA-363, IKA-460). ``--served`` starts one inference server (the
+Rust one: the leaf and the Q) and every process sends its forward passes there;
+``--inference HOST:PORT`` names a server already running. A process holds no torch and no
+CUDA context, so the processes are limited by the CPU and the RAM rather than the card.
 
 The pairs are handed out by `workqueue.run_workers` to ``--parallel`` processes, one game at
 a time in each. Each process is held to its own share of the logical cores (``--cpu-sets``;
@@ -108,16 +103,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--q-model", type=Path, default=None, help=f"the Q. Default: {qrank.DEFAULT_Q}")
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP)
     ap.add_argument("--max-turns", type=int, default=MAX_TURNS)
-    ap.add_argument("--device", default=None)
     ap.add_argument("--served", action="store_true",
                     help="start one inference server for the leaf and the Q; the processes hold "
                     "no model (IKA-363)")
     ap.add_argument("--inference", default=None, metavar="HOST:PORT",
                     help="an inference server already running (its arms value and q must be the "
-                    "leaf's and the Q's files); default: none, the processes load the leaf")
-    ap.add_argument("--merge", default="off", choices=("on", "off"),
-                    help="the server's merged road (IKA-363; off: every answer is the one a local "
-                    "leaf gives, so a node-time game is the same game served or not)")
+                    "leaf's and the Q's files); --served starts one")
     ap.add_argument("--adjudicate", type=float, nargs=2, default=None,
                     metavar=("FIRST_TURN", "THRESHOLD"),
                     help="IKA-384: stop a game as decided when the mean of a turn's two reads' values "
@@ -133,12 +124,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     "(the positions, both sides' choices, the port's account of each turn, the "
                     "reads; `tools/show_game.py --transcript` shows it). The games, their lines "
                     "and the games files are the same with it on. Default: off")
-    ap.add_argument("--cpu-workers", type=int, default=0,
-                    help="the last N of the --parallel processes score the leaf and the Q on the "
-                    "CPU (node-time runs: more games at once than the card holds; each game is "
-                    "played on one device, both seats; IKA-362)")
-    ap.add_argument("--leaf-graphs", default="on", choices=("on", "off"))
-    ap.add_argument("--cuda-memory-gb", type=float, default=humanplay.PLAY_CUDA_MEMORY_GB)
     ap.add_argument("--max-rss-gb", type=float, default=analysis.Limits.rss_gb)
     ap.add_argument("--min-free-gb", type=float, default=analysis.Limits.free_gb)
     ap.add_argument("--max-gpu-gb", type=float, default=analysis.Limits.gpu_gb)
@@ -265,11 +250,6 @@ def cpu_sets(spec: str | None, parallel: int) -> list[list[int]]:
     return sets
 
 
-def merging(args: argparse.Namespace) -> bool:
-    """Whether the processes ask the server's merged road (`--merge`)."""
-    return bool(args.served or args.inference) and args.merge == "on"
-
-
 def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  # noqa: ANN001
     import hashlib
 
@@ -304,12 +284,9 @@ def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  
             "elo0": args.sprt[0], "elo1": args.sprt[1], "alpha": args.sprt_alpha,
             "beta": args.sprt_beta,
         },
-        "cudaMemoryGb": args.cuda_memory_gb,
         "limits": {"rssGb": args.max_rss_gb, "freeGb": args.min_free_gb, "gpuGb": args.max_gpu_gb},
-        "leafGraphs": args.leaf_graphs,
         # IKA-363: where the forward passes ran, and whether the server merged them.
         "served": bool(args.served or args.inference),
-        "merge": merging(args),
         # IKA-384: only when set, so a run without them keeps its settings.
         **({"adjudicate": [int(args.adjudicate[0]), args.adjudicate[1]]}
            if args.adjudicate is not None else {}),
@@ -353,52 +330,32 @@ def worker(args: argparse.Namespace) -> None:
     register_mega_stones(reg)
     threads = max(tested.threads, other.threads)
     timematch.PORT_THREADS = args.port_threads
-    if args.inference:
-        # IKA-363: the leaf and the Q on the server; no torch here.
-        merge = merging(args)
-        evaluate, encoder = humanplay.served_leaf(
-            reg, args.inference, values, merge=merge,
-            q_path=None if args.q_inference else q_path)
-        if args.q_inference:
-            qrank.install(humanplay.served_q(args.q_inference, q_path, encoder))
-        device = f"server {args.inference}" + (" (merged)" if merge else "")
-        q = qrank.installed()
-        if args.ladder_pool:
-            # play_human --ladder's form: the port's cells and the LPs here, the ladder's
-            # cells on threads-1 worker processes, each asking its own server (IKA-390).
-            humanplay.use_threads(threads)
-            spec = humanplay.ladder_spec(
-                leaf=evaluate, address=args.ladder_inference or args.inference, merge=merge,
-                values=values, device=None, graphs=False, cuda_memory_gb=args.cuda_memory_gb,
-                q_path=q_path)
-            pooled = humanplay.use_ladder_pool(threads, reg, spec)
-            if tested.selection is not None or other.selection is not None:
-                from pokeuraou import selection_deep
+    if not args.inference:
+        raise SystemExit("a leaf is the inference server's (IKA-460): --served or --inference")
+    # IKA-363: the leaf and the Q on the server; no torch here.
+    evaluate, encoder = humanplay.served_leaf(
+        reg, args.inference, values, q_path=None if args.q_inference else q_path)
+    if args.q_inference:
+        qrank.install(humanplay.served_q(args.q_inference, q_path, encoder))
+    device = f"server {args.inference}"
+    q = qrank.installed()
+    if args.ladder_pool:
+        # play_human --ladder's form: the port's cells and the LPs here, the ladder's
+        # cells on threads-1 worker processes, each asking its own server (IKA-390).
+        humanplay.use_threads(threads)
+        spec = humanplay.ladder_spec(
+            address=args.ladder_inference or args.inference, q_path=q_path)
+        pooled = humanplay.use_ladder_pool(threads, reg, spec)
+        if tested.selection is not None or other.selection is not None:
+            from pokeuraou import selection_deep
 
-                readers = os.cpu_count() or 2
-                selection_deep.use_reader(selection_deep.LazyPoolReader(
-                    reg, readers, spec, rank_fill=Q_FILL))
-            print(f"ladder pool: {pooled} worker process(es), servers "
-                  f"{args.ladder_inference or args.inference}", file=sys.stderr, flush=True)
-        else:
-            humanplay.use_threads(threads, reg, (args.inference, "value", merge),
-                                  factory=humanplay.served_process_leaf)
+            readers = os.cpu_count() or 2
+            selection_deep.use_reader(selection_deep.LazyPoolReader(
+                reg, readers, spec, rank_fill=Q_FILL))
+        print(f"ladder pool: {pooled} worker process(es), servers "
+              f"{args.ladder_inference or args.inference}", file=sys.stderr, flush=True)
     else:
-        humanplay.cap_cuda(args.cuda_memory_gb, args.device)
-        evaluate, encoder, device = humanplay.load_leaf(
-            reg, values, args.device, graphs=args.leaf_graphs == "on"
-        )
-        if str(device) == "cpu":
-            import torch
-
-            # One thread a process: the CPU processes sit beside the card's (--cpu-workers).
-            torch.set_num_threads(1)
-        q = qrank.LocalQ(q_path, encoder, device=device)
-        qrank.install(q)
-        humanplay.use_threads(
-            threads, reg,
-            ([str(v) for v in values], str(device), args.leaf_graphs == "on", args.cuda_memory_gb),
-        )
+        humanplay.use_threads(threads, reg, (args.inference, "value"))
     started_workers = deepen.workers(reg)
     halt = humanplay.MemoryBrake()  # the move's own growth, IKA-355
     watch = memory_watch(
@@ -408,8 +365,7 @@ def worker(args: argparse.Namespace) -> None:
     other_evaluate = None
     other_note = ""
     if other_values is not None:
-        other_evaluate, _ = humanplay.served_leaf(reg, args.other_inference, other_values,
-                                                  merge=merge)
+        other_evaluate, _ = humanplay.served_leaf(reg, args.other_inference, other_values)
         other_note = (f"  other condition's leaf {leaf_name(other_values)} "
                       f"({', '.join(str(v) for v in other_values)}) on server "
                       f"{args.other_inference}, Q on {args.q_inference or args.inference}\n")
@@ -433,7 +389,7 @@ def worker(args: argparse.Namespace) -> None:
         f"menus {Q_FILL} ({', '.join(q.describe())}), bench drop {args.bench_drop}\n"
         f"  deepening workers {started_workers}, threads {threads}, "
         f"port threads {args.port_threads or threads}, "
-        f"CUDA cap {args.cuda_memory_gb} GB, seed {args.seed}, max turns {args.max_turns}",
+        f"seed {args.seed}, max turns {args.max_turns}",
         file=sys.stderr, flush=True,
     )
     out = args.out / f"games-worker{args.worker}.jsonl"
@@ -692,12 +648,9 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
             raise SystemExit(f"the SPRT of {out} has decided already: {monitor.state()['decision']}")
     monitor.save()
 
-    if args.cpu_workers and any(
-        timematch.parse_condition(spec).clock == "wall" for spec in args.arm
-    ):
-        raise SystemExit("--cpu-workers is for node-time conditions: on the wall clock it is the agent")
-    if args.cpu_workers and (args.served or args.inference):
-        raise SystemExit("--cpu-workers is for a local leaf: with a server no process holds one")
+    if not (args.served or args.inference):
+        raise SystemExit("a leaf is the inference server's (IKA-460): --served starts one, or "
+                         "--inference names one that is running")
 
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT / "src")
@@ -715,11 +668,10 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
         from pokeuraou.pool import load_pool
 
         regulation = load_pool(args.pool).reg.meta.format_id
-        device = args.device or "cuda"
         if other_values is None:
             server, inference = start_server(
                 {"value": values}, q_arms={"q": q_path}, regulation=regulation,
-                log=out / "logs" / "inference.log", env=env, device=device,
+                log=out / "logs" / "inference.log", env=env,
             )
         else:
             # IKA-398: one server a leaf, and the Q on a third that the two conditions share
@@ -727,13 +679,13 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
             # own leaf's calls only.
             server, inference = start_server(
                 {"value": values}, regulation=regulation,
-                log=out / "logs" / "inference.log", env=env, device=device)
+                log=out / "logs" / "inference.log", env=env)
             other_server, other_inference = start_server(
                 {"value": other_values}, regulation=regulation,
-                log=out / "logs" / "inference-other.log", env=env, device=device)
+                log=out / "logs" / "inference-other.log", env=env)
             q_server, q_inference = start_server(
                 {"value": other_values}, q_arms={"q": q_path}, regulation=regulation,
-                log=out / "logs" / "inference-q.log", env=env, device=device)
+                log=out / "logs" / "inference-q.log", env=env)
             extra_servers = [other_server, q_server]
             print(f"  other leaf's server {other_inference}, Q's server {q_inference}",
                   file=sys.stderr, flush=True)
@@ -742,19 +694,17 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
             for k in range(1, args.ladder_servers):
                 extra, address = start_server(
                     {"value": values}, q_arms={"q": q_path}, regulation=regulation,
-                    log=out / "logs" / f"inference-ladder{k}.log", env=env, device=device)
+                    log=out / "logs" / f"inference-ladder{k}.log", env=env)
                 extra_servers.append(extra)
                 addresses.append(address)
             ladder_inference = ",".join(addresses)
             print(f"  ladder servers {ladder_inference}", file=sys.stderr, flush=True)
-        print(f"  inference server {inference} (the processes hold no model), merged road "
-              f"{'on' if merging(args) else 'off'}", file=sys.stderr, flush=True)
+        print(f"  inference server {inference} (the processes hold no model)",
+              file=sys.stderr, flush=True)
 
     def command(k: int, address: str) -> list[str]:
-        on_cpu = k >= args.parallel - args.cpu_workers
         return [sys.executable, str(Path(__file__).resolve()), *argv, "--worker", str(k),
                 "--address", address, "--cpus", ",".join(str(c) for c in sets[k]),
-                *(["--device", "cpu"] if on_cpu else []),
                 *(["--inference", inference] if inference and not args.inference else []),
                 *(["--other-inference", other_inference]
                   if other_inference and not args.other_inference else []),

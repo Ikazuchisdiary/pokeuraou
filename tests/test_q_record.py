@@ -101,7 +101,7 @@ def test_the_generation_worker_hands_over_the_q_it_installed(
 
 
 def test_a_served_q_is_named_by_the_server_s_sha256(pool) -> None:  # noqa: ANN001
-    from pokeuraou.inference import serve
+    from ._served import serve
 
     encoder = Encoder(pool.reg)
     served = _ServedStub(encoder.vocab.fingerprint())

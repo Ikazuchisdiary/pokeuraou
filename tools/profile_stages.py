@@ -1283,7 +1283,6 @@ def build(args: argparse.Namespace) -> list[str]:
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
             *(["--served", "--servers", str(args.servers)] if args.served else []),
-            *(["--python-server"] if getattr(args, "python_server", False) else []),
             *bench_argv(args.hide_bench),
             # A timing run stops at its first failed worker (IKA-336): generation's own
             # default lets a quarter fail, and the survivors replaying their games is
@@ -1374,9 +1373,6 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--served", action="store_true")
     ap.add_argument("--servers", type=int, default=2)
-    ap.add_argument("--python-server", action="store_true",
-                    help="generation: generate_queue.py's --python-server (IKA-461; the default "
-                    "server is the Rust one)")
     # For generation and match, passed on explicitly; one of the two is required there.
     add_bench_flags(ap)
     ap.add_argument("--no-bridge", action="store_true", help="POKEURAOU_RUST_NODE=0")

@@ -93,18 +93,18 @@ def real_solver(reg, args):  # noqa: ANN001, ANN201
     ph = _play_human()
     values = args.value or [args.data_dir_root / p for p in (
         "models/value-mc7.pt", "models/value-mc7-s1.pt")]
-    humanplay.cap_cuda(args.cuda_memory_gb, args.device)
-    evaluate, encoder, device = humanplay.load_leaf(reg, values, args.device, graphs=True)
-    name = ph.leaf_name(list(values))
     q_path = args.q_model or (args.data_dir_root / "models" / "q-mc6.pt")
 
     def say(text: str) -> None:
         print(text, file=sys.stderr)
 
-    fill, q_files = ph.install_menus(None, q_path, encoder, evaluate, None, device, say)
+    # IKA-460: the leaf is the Rust inference server's (it needs a CUDA card).
+    address = humanplay.inference_address_or_start(None, reg, values, q_path, say)
+    evaluate, encoder = humanplay.served_leaf(reg, address, values)
+    name = ph.leaf_name(list(values))
+    fill, q_files = ph.install_menus(None, q_path, encoder, address, say)
     threads = args.threads or humanplay.default_threads()
-    humanplay.use_threads(
-        threads, reg, ([str(v) for v in values], str(device or "cpu"), True, args.cuda_memory_gb))
+    humanplay.use_threads(threads, reg, (address, "value"))
     settings = analysis.Settings(
         width=analysis.DEFAULT_WIDTH, oracle=ph._oracle_width("sall"),
         levels=humanplay.PLAY_MAX_LEVELS or analysis.MAX_LEVELS, rank_fill=fill)
@@ -112,13 +112,11 @@ def real_solver(reg, args):  # noqa: ANN001, ANN201
     reader = make_reader(analyzer, analysis.Limits())
     reading, seconds = humanplay.PLAY_SELECTION_READING, humanplay.PLAY_SELECTION_SECONDS
     selection_deep.parse_reading(reading)
-    readers = min(args.selection_workers or (__import__("os").cpu_count() or 2),
-                  humanplay.LADDER_LOCAL_WORKERS_MAX)
+    readers = args.selection_workers or (__import__("os").cpu_count() or 2)
     if readers > 1:
         selection_deep.use_reader(selection_deep.LazyPoolReader(
             reg, readers,
-            humanplay.ladder_spec(leaf=evaluate, address=None, merge=False, values=values,
-                                  device=device, graphs=True, cuda_memory_gb=args.cuda_memory_gb,
+            humanplay.ladder_spec(address=address,
                                   q_path=q_path if fill != ph.NO_Q_FILL else None),
             rank_fill=fill))
     say(f"leaf {name} / menus {fill} {q_files} / selection read {reading} for {seconds:g} s "
@@ -146,8 +144,6 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--stub", action="store_true", help="a stand-in leaf, no model, no reading")
     ap.add_argument("--value", type=Path, nargs="+", default=None)
     ap.add_argument("--q-model", type=Path, default=None)
-    ap.add_argument("--device", default=None)
-    ap.add_argument("--cuda-memory-gb", type=float, default=humanplay.PLAY_CUDA_MEMORY_GB)
     ap.add_argument("--selection-workers", type=int, default=None)
     ap.add_argument("--read-seconds", type=float, default=40.0,
                     help="how long the typed-in position is read for (a person's move: 30-45)")

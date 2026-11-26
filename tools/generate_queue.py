@@ -160,17 +160,6 @@ def main() -> None:
         "configuration that loses to not serving at all.",
     )
     ap.add_argument(
-        "--python-server",
-        action="store_true",
-        help="with --served, the servers are tools/inference_server.py (Python, torch). Without "
-        "it (IKA-461) the value arm and the Q arm are answered by `pokeuraou-damage "
-        "inference-server` (the nets exported as .rnet files, run on the card by cudarc): 2,040 "
-        "against 1,372 games/min in 16 ABBA runs, the answers within float32 noise of torch's "
-        "(about 3e-7), and SPRT(-10, 0) H1 on the board. The Rust server takes one --value file "
-        "and a CUDA device; a net it does not implement (attention, move properties) stops the "
-        "launcher and asks for this flag.",
-    )
-    ap.add_argument(
         "--uniform-selection",
         action="store_true",
         help="draw the four of six uniformly (a reference) instead of solving each pair's "
@@ -273,24 +262,17 @@ def main() -> None:
         server_log.mkdir(parents=True, exist_ok=True)
         for index in range(args.servers):
             errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
-            if not args.python_server and args.device == "cuda":
-                # IKA-461: the value arm and the Q arm both in the Rust server.
-                from pokeuraou.rustnet import server_command
+            if args.device != "cuda":
+                raise SystemExit("the inference server is the Rust one and needs CUDA (IKA-460)")
+            # IKA-461: the value arm and the Q arm both in the Rust server.
+            from pokeuraou.rustnet import server_command
 
-                command = server_command(
-                    pool_regulation,
-                    {"value": [args.value]},
-                    {"q": args.q_model} if args.q_model else {},
-                    out_dir,
-                )
-            else:
-                command = [
-                    sys.executable, str(ROOT / "tools" / "inference_server.py"),
-                    "--device", args.device,
-                    "--regulation", pool_regulation,
-                    "--arm", "value", args.value,
-                    *(["--q-arm", "q", args.q_model] if args.q_model else []),
-                ]
+            command = server_command(
+                pool_regulation,
+                {"value": [args.value]},
+                {"q": args.q_model} if args.q_model else {},
+                out_dir,
+            )
             process = subprocess.Popen(  # noqa: S603
                 command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors, text=True,
             )

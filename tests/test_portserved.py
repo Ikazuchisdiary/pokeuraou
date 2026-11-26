@@ -23,10 +23,11 @@ from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.hidden import completions
-from pokeuraou.inference import ARRAYS, RemoteValue, serve
+from pokeuraou.inference import ARRAYS, RemoteValue
 from pokeuraou.setup import parse_scenario
 from pokeuraou.teams import load_roster
 
+from ._served import serve
 from .test_ladder import _played
 from .test_ladder_pool import _node, _same
 

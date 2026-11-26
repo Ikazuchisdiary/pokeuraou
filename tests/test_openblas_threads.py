@@ -25,7 +25,6 @@ SCRIPTS = [
     "tools/match_queue.py",
     "tools/pool_match.py",
     "tools/q_teach.py",
-    "tools/inference_server.py",
 ]
 
 #: Imports the script named by argv[1] (not as __main__, so nothing runs), or nothing for

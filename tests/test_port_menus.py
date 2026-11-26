@@ -25,10 +25,10 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.equilibrium import EquilibriumError, solve
 from pokeuraou.hidden import completions
-from pokeuraou.inference import serve
 from pokeuraou.position import Position
 from pokeuraou.teams import load_roster
 
+from ._served import serve
 from .test_ladder import LEAF, _played
 from .test_ladder_pool import _node, _same
 from .test_portserved import _chomp_gambit

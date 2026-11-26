@@ -171,12 +171,15 @@ def test_the_ports_encoded_leaves_carry_the_end(game) -> None:
 
 
 def test_the_served_leaf_substitutes_too(game) -> None:
-    from pokeuraou.inference import RemoteValue, serve, served_model
+    from pokeuraou.inference import RemoteValue
+
+    from ._served import model_of, serve
 
     reg, pos, encoder, net, leaf, row, col = game
     budget = Budget.matrix()
     local, _n, _e = port.batched_payoffs(reg, pos, row, col, [leaf], budget=budget)
-    server, address = serve({"value": served_model(BatchedValue(net, encoder, device=torch.device("cpu")))})
+    value = BatchedValue(net, encoder, device=torch.device("cpu"))
+    server, address = serve({"value": model_of(value.from_encoded)})
     try:
         with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
             got, _n, _e = port.batched_payoffs(reg, pos, row, col, [remote], budget=budget)
@@ -251,8 +254,10 @@ def test_the_depth_two_cell_hidden_depth_two_reads_is_its_result(served: bool) -
     """`search._refined_value`, which IKA-111's `_restricted_belief` calls per cell and per bench
     determinization: with one Sucker Punch left, Swords Dance into Sucker Punch leaves a turn in
     which every cell ends -- Earthquake wins whatever Kingambit does -- so the cell is exactly 1."""
-    from pokeuraou.inference import RemoteValue, serve, served_model
+    from pokeuraou.inference import RemoteValue
     from pokeuraou.search import _refined_value
+
+    from ._served import model_of, serve
 
     reg, pos = _chomp_gambit(1)
     encoder = Encoder(reg)
@@ -270,7 +275,7 @@ def test_the_depth_two_cell_hidden_depth_two_reads_is_its_result(served: bool) -
     if not served:
         value, _notes, solved = refined(local)
     else:
-        server, address = serve({"value": served_model(local)})
+        server, address = serve({"value": model_of(local.from_encoded)})
         try:
             with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
                 value, _notes, solved = refined(remote)

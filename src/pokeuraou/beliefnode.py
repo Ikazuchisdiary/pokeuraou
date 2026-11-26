@@ -479,7 +479,6 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
         "shm": leaf._block.name,  # noqa: SLF001 - the leaf's own block, idle while the port asks
         "bytes": int(leaf._block.size),  # noqa: SLF001
         "batch": int(leaf.batch_size),
-        "merge": bool(leaf.merge),
     }
     request["netScoresEnds"] = bool(leaf.encoder.rules.net_scores_ends)
     request["patch"] = {

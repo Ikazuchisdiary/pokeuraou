@@ -31,8 +31,9 @@ torch = pytest.importorskip("torch")
 
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
-from pokeuraou.inference import RemoteValue, serve, served_model  # noqa: E402
+from pokeuraou.inference import RemoteValue  # noqa: E402
 from pokeuraou.value import BatchedValue, ValueConfig, build  # noqa: E402
+from tests._served import model_of, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,8 +76,8 @@ def test_it_never_encodes_more_rows_than_it_sends(reg, monkeypatch):
 
     monkeypatch.setattr(encoder, "encode_positions", watched)
 
-    server, address = serve({"value": served_model(
-        BatchedValue(net.to(device), encoder, device=device, batch_size=9)
+    server, address = serve({"value": model_of(
+        BatchedValue(net.to(device), encoder, device=device, batch_size=9).from_encoded
     )})
     try:
         with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20,
@@ -131,8 +132,8 @@ def test_a_worker_that_scores_remotely_does_not_import_torch(reg):
     torch.manual_seed(7)
     net = build(encoder, ValueConfig()).eval()
 
-    server, address = serve({"value": served_model(
-        BatchedValue(net.to(torch.device("cpu")), encoder, device=torch.device("cpu"))
+    server, address = serve({"value": model_of(
+        BatchedValue(net.to(torch.device("cpu")), encoder, device=torch.device("cpu")).from_encoded
     )})
     try:
         result = subprocess.run(  # noqa: S603

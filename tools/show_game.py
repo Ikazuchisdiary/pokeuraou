@@ -1136,7 +1136,7 @@ def main() -> None:
 
             sheets, leaf = reread.load_inputs(
                 reg, record, models=args.models, pools=args.pools, values=args.value,
-                q_model=args.q_model, device=args.device,
+                q_model=args.q_model,
             )
             rereads = reread.reread_game(reg, record, sheets=sheets, evaluate=leaf)
             for index, got in sorted(rereads.items()):

@@ -126,7 +126,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915 - the sweep's steps
     ap.add_argument("--inference", default=None)
     ap.add_argument("--value", type=Path, nargs="+", default=None)
     ap.add_argument("--q-model", type=Path, default=None)
-    ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
     from pokeuraou.selection_deep import parse_reading
@@ -146,11 +145,11 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915 - the sweep's steps
 
         server, address = start_server(
             {"value": values}, q_arms={"q": q_path}, regulation=reg.meta.format_id,
-            log=args.out / "inference.log", env=env, device=args.device)
+            log=args.out / "inference.log", env=env)
     if not address:
         raise SystemExit("the sweep reads through an inference server: --served or --inference")
-    evaluate, _encoder = humanplay.served_leaf(reg, address, values, merge=False, q_path=q_path)
-    spec = ("served", address, "value", False, str(q_path), "q")
+    evaluate, _encoder = humanplay.served_leaf(reg, address, values, q_path=q_path)
+    spec = ("served", address, "value", str(q_path), "q")
     humanplay.use_threads(1, reg, None)
     base_reading = parse_reading(args.reading)
     reader = (PoolReader(reg, args.workers, spec) if args.workers > 1

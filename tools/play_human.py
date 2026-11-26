@@ -94,8 +94,8 @@ NO_Q_FILL = DEFAULT_RANK_FILL
 
 
 def install_menus(
-    named: str | None, q_path: Path, encoder, evaluate, address: str | None,  # noqa: ANN001
-    device: str | None, say: Callable[[str], None],
+    named: str | None, q_path: Path, encoder, address: str | None,  # noqa: ANN001
+    say: Callable[[str], None],
 ) -> tuple[str, list[str]]:
     """The fill a person's opponent (or a reading) ranks its menus by, and the Q files it
     installed (`qrank.install`).
@@ -120,8 +120,10 @@ def install_menus(
     if not q_path.exists():
         raise SystemExit(f"{fill} needs a Q: no file at {q_path}")
     try:
-        model = (humanplay.served_q(address, q_path, encoder) if address and evaluate is not None
-                 else qrank.LocalQ(q_path, encoder, device=device or "cpu"))
+        # A person's game and a reading read the server's Q arm (`address`); only a tool with no
+        # server (a test, a research read of the Q alone) loads it here.
+        model = (humanplay.served_q(address, q_path, encoder) if address
+                 else qrank.LocalQ(q_path, encoder, device="cpu"))
     except qrank.QVocabularyError as problem:
         if named is not None:
             raise
@@ -327,8 +329,7 @@ def main(argv: list[str] | None = None) -> None:
                     "a name in ladder.LADDERS such as L5, or stages joined by +), the answer the "
                     "last stage completed in the budget (L6 fills the budget on the wall clock "
                     "and its stages do not run out, IKA-376). With --threads N its cells are read by "
-                    "N-1 worker processes (IKA-364; with a server, each asks it; without, at "
-                    f"most {humanplay.LADDER_LOCAL_WORKERS_MAX} load the leaf and the Q). "
+                    "N-1 worker processes (IKA-364; each asks the inference server)."
                     "Default: none (the deepening)")
     ap.add_argument("--selection-reading", default=None,
                     help="how the AI reads the selection (IKA-392, selection_deep): `none` (the "
@@ -344,8 +345,7 @@ def main(argv: list[str] | None = None) -> None:
                     f"{humanplay.PLAY_SELECTION_SECONDS:g} s for the default reading)")
     ap.add_argument("--selection-workers", type=int, default=None,
                     help="worker processes reading the selection's cells (default: every logical "
-                    "core with an inference server, else at most "
-                    f"{humanplay.LADDER_LOCAL_WORKERS_MAX}, each with a leaf of its own)")
+                    "core)")
     ap.add_argument("--child-q", type=int, default=None,
                     help="the deepening's child menus: each side's k best by the Q (IKA-307), "
                     "instead of narrow's damage-ranked 8")
@@ -361,9 +361,6 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the agent's leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
     ap.add_argument("--hp-share", action="store_true", help="no leaf: the hp-share proxy")
-    ap.add_argument("--leaf-graphs", default="on", choices=("on", "off"),
-                    help="score the leaf's small blocks by CUDA-graph replays (humanplay.GraphLeaf, "
-                    "the eager answer to the bit; on a card only)")
     ap.add_argument("--rank-fill", default=None,
                     help=f"how the agent's menus are ranked. Default: {Q_FILL} when a Q is there, "
                     f"else {NO_Q_FILL} with a note")
@@ -376,17 +373,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--max-turns", type=int, default=MAX_TURNS)
     ap.add_argument("--out", type=Path, default=Path("data/human/games.jsonl"))
     ap.add_argument("--locale", default="ja")
-    ap.add_argument("--device", default=None)
     ap.add_argument("--inference", default=None, metavar="HOST:PORT",
                     help="the machine's inference server to send the forward passes to (IKA-363; "
                     "its arms value and q must be the leaf's and the Q's files). Default: "
-                    "POKEURAOU_INFERENCE, else none: the leaf is loaded here. local: here")
-    ap.add_argument("--merge", default="off", choices=("on", "off"),
-                    help="with a server: share its forward passes with other processes' requests "
-                    "(the merged road; a value moves in the last places with the timing, and "
-                    "IKA-363 measured no speed from it: the processes are bound by the CPU)")
-    ap.add_argument("--cuda-memory-gb", type=float, default=humanplay.PLAY_CUDA_MEMORY_GB,
-                    help="cap this process's CUDA allocator and each worker's (IKA-334); 0: no cap")
+                    "POKEURAOU_INFERENCE, else the Rust server is started (it needs a CUDA card)")
     ap.add_argument("--max-rss-gb", type=float, default=analysis.Limits.rss_gb,
                     help="the memory watch (IKA-337): a move stops deepening before this process "
                     "and its workers hold this much (0: off)")
@@ -431,73 +421,48 @@ def main(argv: list[str] | None = None) -> None:
     say = (lambda text: None) if args.quiet else (lambda text: print(text, file=sys.stderr))
 
     # The leaf.
-    evaluate = None
-    name = "hp-share"
-    encoder = None
-    device = args.device
+    if args.hp_share:
+        raise SystemExit("--hp-share is stopped: the hp-share leaf returns as an arm of the Rust "
+                         "inference server in IKA-460 step 4")
     values = args.value
-    if values is None and not args.hp_share:
+    if values is None:
         found = [repo_root() / p for p in DEFAULT_VALUE]
-        if all(p.exists() for p in found):
-            values = found
-        else:
-            say(f"note: no {DEFAULT_VALUE[0]} here, so the agent plays hp-share (--value names a leaf)")
+        if not all(p.exists() for p in found):
+            raise SystemExit(f"no {DEFAULT_VALUE[0]} here: --value names the agent's leaf")
+        values = found
     address = humanplay.inference_address_or_start(
-        args.inference, reg, None if args.hp_share else values,
-        args.q_model or (repo_root() / DEFAULT_Q), device, say)
-    if values and not args.hp_share and address:
-        # IKA-363: the forward passes on the machine's server; no CUDA context here.
-        evaluate, encoder = humanplay.served_leaf(reg, address, values,
-                                                  merge=args.merge == "on")
-        name = leaf_name(values)
-        say(f"leaf on the inference server {address} (merged road {args.merge})")
-    elif values and not args.hp_share:
-        address = None
-        humanplay.cap_cuda(args.cuda_memory_gb, args.device)
-        evaluate, encoder, device = humanplay.load_leaf(
-            reg, values, device, graphs=args.leaf_graphs == "on"
-        )
-        name = leaf_name(values)
+        args.inference, reg, values, args.q_model or (repo_root() / DEFAULT_Q), say)
+    # IKA-363: the forward passes on the machine's server; no CUDA context here.
+    evaluate, encoder = humanplay.served_leaf(reg, address, values)
+    name = leaf_name(values)
+    say(f"leaf on the inference server {address}")
 
     # The menus.
     q_path = args.q_model or (repo_root() / DEFAULT_Q)
-    fill, q_files = install_menus(args.rank_fill, q_path, encoder, evaluate, address, device, say)
+    fill, q_files = install_menus(args.rank_fill, q_path, encoder, address, say)
 
     threads, cores = resolve_cores(args.threads, args.cores, args.clock)
     if args.ladder is not None:
         # IKA-364: the ladder's cells on the workers; the port's cells and the LPs here.
         humanplay.use_threads(threads)
         spec = humanplay.ladder_spec(
-            leaf=evaluate, address=address, merge=args.merge == "on", values=values,
-            device=device, graphs=args.leaf_graphs == "on", cuda_memory_gb=args.cuda_memory_gb,
-            q_path=q_path if qrank.is_q(fill) else None)
+            address=address, q_path=q_path if qrank.is_q(fill) else None)
         workers = humanplay.use_ladder_pool(threads, reg, spec)
         say(f"ladder {args.ladder}: cells on {workers} worker process(es)")
-    elif address and evaluate is not None:
-        humanplay.use_threads(threads, reg, (address, "value", args.merge == "on"),
-                              factory=humanplay.served_process_leaf)
     else:
-        humanplay.use_threads(
-            threads, reg,
-            ([str(v) for v in values] if values and not args.hp_share else None,
-             str(device or "cpu"), args.leaf_graphs == "on", args.cuda_memory_gb),
-        )
+        humanplay.use_threads(threads, reg, (address, "value"))
     selection_reading, selection_seconds = resolve_selection(args, evaluate)
     if selection_reading is not None:
         from pokeuraou import selection_deep
 
         readers = args.selection_workers if args.selection_workers is not None else (
-            (os.cpu_count() or 2) if address else min(os.cpu_count() or 2,
-                                                       humanplay.LADDER_LOCAL_WORKERS_MAX))
+            os.cpu_count() or 2)
         if readers > 1:
             # Made for each selection and closed after it: no idle workers through the moves.
             selection_deep.use_reader(selection_deep.LazyPoolReader(
                 reg, readers,
                 humanplay.ladder_spec(
-                    leaf=evaluate, address=address, merge=args.merge == "on", values=values,
-                    device=device, graphs=args.leaf_graphs == "on",
-                    cuda_memory_gb=args.cuda_memory_gb,
-                    q_path=q_path if qrank.is_q(fill) else None),
+                    address=address, q_path=q_path if qrank.is_q(fill) else None),
                 rank_fill=fill))
         say(f"selection read {selection_reading} on {max(readers, 1)} process(es)"
             + (f" for {selection_seconds:g} s" if selection_seconds else " (its stages)"))

@@ -1,45 +1,29 @@
-"""The server has one job beyond being a server: it must not change any answer.
+"""The client of the inference server (`inference.RemoteValue`) against the tests' own stand-in
+server (`tests/_served.py`, the protocol of the Rust server).
 
-A leaf differing by 1.9e-06 moves an equilibrium, so "about as good" is not a thing this
-can be. The test is equality, not closeness, and it is equality against the local
-`BatchedValue` the search uses today.
-
-The second test is the one the design turns on. A CUDA answer depends on how many rows were
-in the call -- 5.96e-08 between a row alone and the same row among eight -- so the server
-must chunk on the same boundary `BatchedValue` does, and must not merge one worker's
-request with another's. Two clients asking at once must get what they would have got alone.
+The Python server this file used to test (`served_model` on a torch net, its CUDA graphs, its
+eager-pass gate) is gone (IKA-460); the Rust server's answers against torch are
+`tests/test_rust_inference_server.py`'s. What stays is the client's side: a batch cut where
+`BatchedValue` cuts it, blocks scored as their own requests, an arm that says what it holds, a
+named refusal, a worker that dies without taking the server with it.
 """
 
 from __future__ import annotations
 
-import os
-import threading
-
 import numpy as np
 import pytest
 
-torch = pytest.importorskip("torch")
+from pokeuraou.damage import register_mega_stones
+from pokeuraou.encode import Encoder
+from pokeuraou.inference import RemoteValue
 
-from pokeuraou import rustnode  # noqa: E402
-from pokeuraou.damage import register_mega_stones  # noqa: E402
-from pokeuraou.encode import Encoder  # noqa: E402
-from pokeuraou.inference import RemoteValue, serve  # noqa: E402
-from pokeuraou.value import BatchedValue, ValueConfig, build  # noqa: E402
-
-DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
-#: Set by a machine that declares its CPU kernels let a row's answer depend on the batch
-#: it came in. GitHub's runner does (one float32 ulp, torch 2.11.0 and 2.14.0 alike); the
-#: AVX512 box this project runs on does not. `tools/ci_skip_audit.py` counts the skip.
-CPU_BATCH_VARIES = "POKEURAOU_CPU_BATCH_VARIES"
+from ._served import encoded_of, hp_share_model, serve, subset
 
 
 @pytest.fixture(scope="module")
 def parts(reg):
     register_mega_stones(reg)
-    encoder = Encoder(reg)
-    torch.manual_seed(7)
-    net = build(encoder, ValueConfig()).eval()
-    return reg, encoder, net
+    return reg, Encoder(reg)
 
 
 def _positions(regulation, count: int):
@@ -56,143 +40,58 @@ def _positions(regulation, count: int):
     return out
 
 
-@pytest.mark.parametrize("device_name", DEVICES)
-def test_the_server_returns_exactly_what_the_local_leaf_returns(parts, device_name):
-    regulation, encoder, net = parts
-    device = torch.device(device_name)
-    local = BatchedValue(net.to(device), encoder, device=device)
-    positions = _positions(regulation, 40)
-    expected = local(positions)
+def _server(encoder, **kwargs):  # noqa: ANN202
+    share = hp_share_model(encoder)
 
-    from pokeuraou.inference import served_model
+    def model(arrays, rows):  # noqa: ANN001, ANN202
+        return share(encoded_of(arrays))
 
-    server, address = serve({"value": served_model(BatchedValue(net.to(device), encoder, device=device))})
+    return serve({"value": model}, **kwargs), share
+
+
+def test_the_client_returns_what_the_server_scored(parts):
+    regulation, encoder = parts
+    (server, address), share = _server(encoder)
+    positions = _positions(regulation, 9)
     try:
-        with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+        with RemoteValue(address, "value", encoder, buffer_bytes=4 << 20) as remote:
             got = remote(positions)
-            assert remote.evaluated == len(positions)
     finally:
         server.shutdown()
-
-    assert np.array_equal(got, expected), (
-        f"max difference {np.abs(got - expected).max():.3e} -- the server must not change "
-        f"an answer, because 1.9e-06 moves an equilibrium"
-    )
+    assert np.array_equal(got, share(encoder.encode_positions(positions)))
+    # A control that can fail: a model answering a constant is not what comes back.
+    assert not np.array_equal(got, np.full(len(got), 0.25))
 
 
-@pytest.mark.parametrize("device_name", DEVICES)
-def test_two_workers_at_once_get_what_they_would_get_alone(parts, device_name):
-    """The whole reason requests are not merged across workers."""
-    regulation, encoder, net = parts
-    device = torch.device(device_name)
-    local = BatchedValue(net.to(device), encoder, device=device)
-    # Deliberately different row counts: merging them would make one batch of 52, and a
-    # CUDA answer depends on the count.
-    first = _positions(regulation, 12)
-    second = _positions(regulation, 40)
-    alone = {12: local(first), 40: local(second)}
+def test_a_batch_longer_than_one_chunk_is_cut_at_batch_size(parts):
+    """The server is asked in chunks of the client's `batch_size` (a card's answer depends on
+    the row count of its call, so the cut is part of the leaf)."""
+    regulation, encoder = parts
+    sizes: list[int] = []
+    share = hp_share_model(encoder)
 
-    from pokeuraou.inference import served_model
+    def model(arrays, rows):  # noqa: ANN001, ANN202
+        sizes.append(rows)
+        return share(encoded_of(arrays))
 
-    server, address = serve({"value": served_model(BatchedValue(net.to(device), encoder, device=device))})
-    results: dict[int, np.ndarray] = {}
-    try:
-
-        def ask(positions):
-            # A worker is a process of its own in generation, with its own port process.
-            # Here it is a thread, and `RemoteValue.__call__` encodes in it, which asks the
-            # port for the bind columns (IKA-429); a process answers one line at a time, so
-            # two threads on the module's one process crossed their answers and hung.
-            with rustnode.own_node(regulation), RemoteValue(
-                address, "value", encoder, buffer_bytes=8 << 20
-            ) as remote:
-                for _ in range(6):
-                    results[len(positions)] = remote(positions)
-
-        threads = [
-            threading.Thread(target=ask, args=(first,)),
-            threading.Thread(target=ask, args=(second,)),
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-    finally:
-        server.shutdown()
-
-    for rows, expected in alone.items():
-        assert np.array_equal(results[rows], expected), (
-            f"{rows} rows changed when another worker was asking at the same time"
-        )
-
-
-@pytest.mark.parametrize("device_name", DEVICES)
-def test_blocks_from_several_workers_at_once_get_what_they_would_get_alone(parts, device_name):
-    """IKA-291: six workers at once, four sending blocks (CUDA-graph replays on the card,
-    captured while the others run) and two sending whole batches (eager), each answer the
-    one it gets alone. The graphs share buffers and one stream with the eager threads, so
-    this is where a replay reading another's inputs, or a copy out before the replay
-    finished, would show."""
-    regulation, encoder, net = parts
-    device = torch.device(device_name)
-    local = BatchedValue(net.to(device), encoder, device=device)
-
-    from pokeuraou.inference import served_model
-
-    block_sets = [
-        _blocks(encoder, regulation, sizes)
-        for sizes in ([3, 17, 9, 1], [40, 2, 33], [5, 5, 5, 5, 5], [64, 7])
-    ]
-    block_alone = [[local.from_encoded(block) for block in blocks] for blocks in block_sets]
-    whole = [_positions(regulation, 30), _positions(regulation, 45)]
-    whole_alone = [local(positions) for positions in whole]
-
-    model = served_model(BatchedValue(net.to(device), encoder, device=device))
     server, address = serve({"value": model})
-    wrong: list[str] = []
+    positions = _positions(regulation, 45)
     try:
-
-        def send_blocks(index):
-            with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
-                for _ in range(8):
-                    got = remote.from_encoded_segments(block_sets[index])
-                    for block, (a, b) in enumerate(zip(got, block_alone[index], strict=True)):
-                        if not np.array_equal(a, b):
-                            wrong.append(f"blocks {index}/{block}")
-
-        def send_whole(index):
-            # A port process of this thread's own, as in `ask` above (IKA-429).
-            with rustnode.own_node(regulation), RemoteValue(
-                address, "value", encoder, buffer_bytes=8 << 20
-            ) as remote:
-                for _ in range(8):
-                    if not np.array_equal(remote(whole[index]), whole_alone[index]):
-                        wrong.append(f"whole {index}")
-
-        threads = [threading.Thread(target=send_blocks, args=(i,)) for i in range(4)]
-        threads += [threading.Thread(target=send_whole, args=(i,)) for i in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20, batch_size=7) as remote:
+            got = remote(positions)
     finally:
         server.shutdown()
-    assert not wrong, wrong[:5]
-    if device_name == "cuda":
-        assert model.replays >= 4 * 8 * 3
+    assert sizes == [7] * 6 + [3]
+    assert np.array_equal(got, share(encoder.encode_positions(positions)))
 
 
 def test_a_worker_dying_leaves_the_server_up(parts):
-    regulation, encoder, net = parts
-    device = torch.device("cpu")
-    from pokeuraou.inference import served_model
-
-    server, address = serve({"value": served_model(BatchedValue(net.to(device), encoder, device=device))})
+    regulation, encoder = parts
+    (server, address), _share = _server(encoder)
     try:
         casualty = RemoteValue(address, "value", encoder, buffer_bytes=4 << 20)
         casualty(_positions(regulation, 4))
         casualty._sock.close()  # noqa: SLF001 -- the ungraceful kind of departure
-
         with RemoteValue(address, "value", encoder, buffer_bytes=4 << 20) as survivor:
             got = survivor(_positions(regulation, 4))
         assert len(got) == 4
@@ -200,24 +99,9 @@ def test_a_worker_dying_leaves_the_server_up(parts):
         server.shutdown()
 
 
-def test_a_batch_too_large_for_the_buffer_refuses_rather_than_splitting(parts):
-    """A single chunk that does not fit is refused; a long batch is cut like BatchedValue.
-
-    The refusal used to be for any batch larger than the buffer, on the grounds that
-    splitting changes a batch's size and a CUDA answer depends on that. But the model
-    behind the server splits at 8,192 whatever happens, so the rule forbade work without
-    protecting anything -- a self-switch node of 1,048,576 leaves killed a worker in a real
-    match while the direct path had been evaluating that node in 128 pieces all along. What
-    is left is the case the buffer genuinely cannot serve: one chunk that does not fit.
-    """
-    regulation, encoder, net = parts
-    from pokeuraou.inference import served_model
-
-    server, address = serve(
-        {"value": served_model(
-            BatchedValue(net.to(torch.device("cpu")), encoder, device=torch.device("cpu"))
-        )}
-    )
+def test_a_chunk_too_large_for_the_buffer_is_refused(parts):
+    regulation, encoder = parts
+    (server, address), _share = _server(encoder)
     try:
         with (
             RemoteValue(address, "value", encoder, buffer_bytes=1 << 16) as remote,
@@ -229,14 +113,8 @@ def test_a_batch_too_large_for_the_buffer_refuses_rather_than_splitting(parts):
 
 
 def test_an_unknown_model_is_named_rather_than_guessed(parts):
-    regulation, encoder, net = parts
-    from pokeuraou.inference import served_model
-
-    server, address = serve(
-        {"value": served_model(
-            BatchedValue(net.to(torch.device("cpu")), encoder, device=torch.device("cpu"))
-        )}
-    )
+    regulation, encoder = parts
+    (server, address), _share = _server(encoder)
     try:
         with (
             RemoteValue(address, "baseline", encoder, buffer_bytes=4 << 20) as remote,
@@ -248,21 +126,16 @@ def test_an_unknown_model_is_named_rather_than_guessed(parts):
 
 
 def test_an_arm_says_what_it_holds_rather_than_what_it_is_called(parts):
-    """`describe` is how a match can record its leaf honestly.
+    """`describe` is how a match can record its leaf honestly: a worker is told which arm to
+    play and never what that arm holds."""
+    _regulation, encoder = parts
+    share = hp_share_model(encoder)
 
-    A worker is told which arm to play and never what that arm holds, so a name taken
-    from its own command line is a name that can be wrong -- and the record it writes is
-    what a rating is fitted from. This is the same failure the policy's position
-    representation had: the file knew it wanted 408 numbers and not whose.
-    """
-    _regulation, encoder, net = parts
-    device = torch.device("cpu")
+    def model(arrays, rows):  # noqa: ANN001, ANN202
+        return share(encoded_of(arrays))
 
-    from pokeuraou.inference import served_model
-
-    scorer = served_model(BatchedValue(net.to(device), encoder, device=device))
     server, address = serve(
-        {"value": scorer, "baseline": scorer},
+        {"value": model, "baseline": model},
         arms={"value": ["value-all.pt", "value-all-s1.pt"], "baseline": ["value-gen8.pt"]},
     )
     try:
@@ -270,8 +143,6 @@ def test_an_arm_says_what_it_holds_rather_than_what_it_is_called(parts):
             assert remote.describe() == ["value-all.pt", "value-all-s1.pt"]
         with RemoteValue(address, "baseline", encoder, buffer_bytes=1 << 20) as remote:
             assert remote.describe() == ["value-gen8.pt"]
-        # An arm the server does not have is named, not guessed at -- the same rule the
-        # score path already follows.
         with (
             RemoteValue(address, "nope", encoder, buffer_bytes=1 << 20) as remote,
             pytest.raises(RuntimeError, match="no arm named 'nope'"),
@@ -281,265 +152,22 @@ def test_an_arm_says_what_it_holds_rather_than_what_it_is_called(parts):
         server.shutdown()
 
 
-def test_arms_with_the_same_files_share_one_model(parts, tmp_path):
-    """IKA-431: a board between two Q's names one value model as both arms, and each arm
-    kept its own nets and CUDA graphs. Arms whose files have the same bytes share one
-    served model; an arm with other bytes, or the same files in another order, gets its own.
-    The shared arm answers as the arm it shares with."""
-    from pokeuraou.inference import load_models
-    from pokeuraou.value import save_model
-
-    regulation, encoder, net = parts
-    one, copy, other = tmp_path / "one.pt", tmp_path / "copy.pt", tmp_path / "other.pt"
-    save_model(one, net, net.state_dict(), encoder.vocab, ValueConfig(), meta={})
-    copy.write_bytes(one.read_bytes())
-    torch.manual_seed(8)
-    second = build(encoder, ValueConfig()).eval()
-    save_model(other, second, second.state_dict(), encoder.vocab, ValueConfig(), meta={})
-    models = load_models(
-        {"value": [one], "baseline": [copy], "else": [other],
-         "pair": [one, other], "reversed": [other, one], "pair2": [copy, other]},
-        encoder, "cpu",
-    )
-    assert models["baseline"] is models["value"]
-    assert models["pair2"] is models["pair"]
-    assert len({id(m) for m in models.values()}) == 4
-    # The control: the shared object is an answer, not a stand-in -- the arms with other
-    # bytes answer otherwise on the same rows.
-    batch = encoder.encode_positions(_positions(regulation, 6))
-    rows = {name: models[name](
-        {k: getattr(batch, k) for k in ("species", "ability", "item", "moves", "mon", "mask",
-                                        "side", "field")}, len(batch))
-        for name in ("value", "baseline", "else")}
-    assert np.array_equal(rows["value"], rows["baseline"])
-    assert not np.array_equal(rows["value"], rows["else"])
-
-
-def test_the_leaf_has_no_operation_that_couples_rows(parts):
-    """Nothing in the leaf lets one row of a batch change another's answer.
-
-    The design rests on this twice over. It is why the server may serve one worker's
-    batch while another's is in flight, and it is what would make padding sound if
-    batches were ever merged -- cuda's answer depends on the batch *length*, so a fixed
-    length is the fix, and a fixed length is only safe while the extra rows are inert.
-
-    A `BatchNorm` added later would break both silently: the code would run, the numbers
-    would be wrong, and no test but this one would notice.
-    """
-    _regulation, _encoder, net = parts
-    coupling = (
-        torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d,
-        torch.nn.SyncBatchNorm, torch.nn.InstanceNorm1d, torch.nn.InstanceNorm2d,
-    )
-    found = [
-        f"{name or '<root>'}: {type(module).__name__}"
-        for name, module in net.named_modules()
-        if isinstance(module, coupling)
-    ]
-    assert not found, (
-        f"these couple rows within a batch: {found}. The inference server serves batches "
-        f"as they arrive, so a row's answer must not depend on what it was batched with."
-    )
-
-
-@pytest.mark.parametrize("device_name", DEVICES)
-def test_a_rows_answer_does_not_depend_on_what_it_was_batched_with(parts, device_name):
-    """The property above, measured rather than inferred from the module list.
-
-    Same rows, same count, different neighbours and different order: the server is
-    allowed to change none of it. Held to `array_equal` rather than a tolerance, because
-    a difference of 1.9e-06 moves an equilibrium and this is the floor every measurement
-    on the board stands on.
-    """
-    if device_name == "cpu" and os.environ.get(CPU_BATCH_VARIES):
-        pytest.skip("this machine's CPU kernels let a row's answer depend on its batch (IKA-51)")
-    regulation, encoder, net = parts
-    device = torch.device(device_name)
-
-    from pokeuraou.inference import served_model
-
-    positions = _positions(regulation, 24)
-    server, address = serve({"value": served_model(BatchedValue(net.to(device), encoder, device=device))})
-    try:
-        with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
-            straight = remote(positions)
-            # The same 24 positions, reversed. Row i of the answer moves with its row.
-            reversed_answer = remote(positions[::-1])
-    finally:
-        server.shutdown()
-
-    assert np.array_equal(straight, reversed_answer[::-1]), (
-        f"max difference {np.abs(straight - reversed_answer[::-1]).max():.3e} -- a row's "
-        f"answer moved because its neighbours changed"
-    )
-
-
-@pytest.mark.parametrize("device_name", DEVICES)
-def test_an_ensemble_arm_matches_the_ensemble_a_worker_would_have_built(parts, device_name):
-    """The path that was not covered, and the one that was wrong.
-
-    Every other test here uses a single net, and a single net has only one way to be
-    evaluated. An ensemble has two: `stack_module_state` with `vmap`, which is what
-    `BatchedValue` does, and `torch.stack([net(batch) for net in nets]).mean(0)`, which is
-    what the server did. They sum a float32 in different orders. `value.py` refuses to keep
-    both paths and says why in a comment; the server had restored the second one, and a
-    real match through it produced identical menus and identical draws with mixed
-    strategies differing at 4e-08 -- a different equilibrium, so a different agent.
-
-    So this builds the ensemble both ways and demands they agree exactly.
-    """
-    _regulation, encoder, net = parts
-    device = torch.device(device_name)
-    torch.manual_seed(11)
-    from pokeuraou.value import ValueConfig, build
-
-    second = build(encoder, ValueConfig()).eval()
-    nets = [net.to(device), second.to(device)]
-
-    from pokeuraou.inference import served_model
-
-    local = BatchedValue(nets, encoder, device=device)
-    positions = _positions(_regulation, 24)
-    expected = local(positions)
-
-    server, address = serve({"value": served_model(BatchedValue(nets, encoder, device=device))})
-    try:
-        with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
-            got = remote(positions)
-    finally:
-        server.shutdown()
-
-    assert np.array_equal(got, expected), (
-        f"max difference {np.abs(got - expected).max():.3e} -- an ensemble served is not "
-        f"the ensemble a worker builds, and 1.9e-06 moves an equilibrium"
-    )
-
-
-@pytest.mark.parametrize("device_name", DEVICES)
-def test_an_ensemble_arm_survives_several_workers_at_once(parts, device_name):
-    """Concurrency and ensembles, which were each covered and never together.
-
-    The two-worker test above uses a single net, so it never reaches
-    `torch.func.functional_call`; the ensemble test above uses one caller, so it never has
-    two threads in it at once. The intersection is what production is: ten workers against
-    an arm of two members. It failed five seconds in with `Tensor on device meta is not on
-    the expected device cuda:0`, because `functional_call` swaps a module's parameters in
-    place and two threads doing that to the same module race.
-
-    Four callers rather than two, and several rounds each, because a race that needs an
-    unlucky interleaving will not show up in one.
-    """
-    regulation, encoder, net = parts
-    device = torch.device(device_name)
-    torch.manual_seed(23)
-    from pokeuraou.value import ValueConfig, build
-
-    nets = [net.to(device), build(encoder, ValueConfig()).eval().to(device)]
-
-    from pokeuraou.inference import served_model
-
-    local = BatchedValue(nets, encoder, device=device)
-    sizes = [8, 20, 33, 41]
-    batches = {n: _positions(regulation, n) for n in sizes}
-    alone = {n: local(batches[n]) for n in sizes}
-
-    server, address = serve({"value": served_model(BatchedValue(nets, encoder, device=device))})
-    results: dict[int, np.ndarray] = {}
-    failures: list[BaseException] = []
-    try:
-
-        def ask(rows: int) -> None:
-            try:
-                # A worker is a process with its own port process in generation. Four
-                # threads on the module's one process cross their answers, and one thread's
-                # protocol failure resets the module's table under the others (a KeyError
-                # on the format id, CI 10/6); see `own_node`.
-                with rustnode.own_node(regulation), RemoteValue(
-                    address, "value", encoder, buffer_bytes=8 << 20
-                ) as remote:
-                    for _ in range(8):
-                        results[rows] = remote(batches[rows])
-            except BaseException as error:  # noqa: BLE001 -- reported on the main thread
-                failures.append(error)
-
-        threads = [threading.Thread(target=ask, args=(n,)) for n in sizes]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-    finally:
-        server.shutdown()
-
-    assert not failures, f"a caller raised: {failures[0]!r}"
-    for rows, expected in alone.items():
-        assert np.array_equal(results[rows], expected), (
-            f"{rows} rows changed when three other workers were asking at the same time"
-        )
-
-
-@pytest.mark.parametrize("device_name", DEVICES)
-def test_a_batch_longer_than_one_chunk_is_cut_where_batchedvalue_cuts(parts, device_name):
-    """More rows than fit in one call, answered identically to the direct path.
-
-    `BatchedValue` cuts at `batch_size` and the server's client now cuts at the same
-    number, so the two make the same calls with the same row counts. That is the only
-    reason the answers can be equal on CUDA, where the count is part of the arithmetic --
-    and it is the property that lets a 1,048,576-leaf node go through at all.
-
-    A small `batch_size` here so the cut happens over a few dozen positions instead of a
-    few thousand; the boundary being small changes nothing about whether the two agree.
-    """
-    regulation, encoder, net = parts
-    device = torch.device(device_name)
-
-    from pokeuraou.inference import served_model
-
-    local = BatchedValue(net.to(device), encoder, device=device, batch_size=7)
-    positions = _positions(regulation, 45)
-    expected = local(positions)
-
-    server, address = serve({"value": served_model(local)})
-    try:
-        with RemoteValue(
-            address, "value", encoder, buffer_bytes=8 << 20, batch_size=7
-        ) as remote:
-            got = remote(positions)
-    finally:
-        server.shutdown()
-
-    assert len(got) == 45
-    assert np.array_equal(got, expected), (
-        f"max difference {np.abs(got - expected).max():.3e} -- the server cut a long batch "
-        f"somewhere BatchedValue does not"
-    )
-
-
-def _blocks(encoder, regulation, sizes):
-    """Encoded blocks of the given row counts, cut from one encoding."""
-    from ._served import subset as _subset
-
-    encoded = encoder.encode_positions(_positions(regulation, sum(sizes)))
-    out, at = [], 0
-    for size in sizes:
-        out.append(_subset(encoded, list(range(at, at + size))))
-        at += size
-    return out
-
-
 def test_blocks_in_one_round_trip_are_scored_as_their_own_requests(parts):
-    """IKA-291: `from_encoded_segments` sends many blocks at once, and the server must
-    still score each at its own size. The stand-in model's answer moves with the row count
-    of its call (as a card's does), so equality with one request per block says the blocks
-    were not merged -- and the stacked request, the positive control, is not equal."""
-    regulation, encoder, _net = parts
+    """IKA-291: `from_encoded_segments` sends many blocks at once, and each is scored at its own
+    size. The stand-in's answer moves with the row count of its call (as a card's does), so
+    equality with one request per block says the blocks were not merged -- and the stacked
+    request, the positive control, is not equal."""
+    regulation, encoder = parts
 
-    def sized(arrays, rows):
+    def sized(arrays, rows):  # noqa: ANN001, ANN202
         base = arrays["species"].reshape(rows, -1).sum(axis=1).astype(np.float64)
         return base * 1e-3 + rows * 1e-9
 
-    from pokeuraou.beliefnode import _stacked
-
-    blocks = _blocks(encoder, regulation, [1, 5, 7, 12, 3, 2])
+    encoded = encoder.encode_positions(_positions(regulation, 30))
+    blocks, at = [], 0
+    for size in [1, 5, 7, 12, 3, 2]:
+        blocks.append(subset(encoded, list(range(at, at + size))))
+        at += size
     server, address = serve({"value": sized})
     try:
         with RemoteValue(address, "value", encoder, buffer_bytes=4 << 20) as remote:
@@ -547,504 +175,11 @@ def test_blocks_in_one_round_trip_are_scored_as_their_own_requests(parts):
             before = remote.calls
             together = remote.from_encoded_segments(blocks)
             round_trips = remote.calls - before
-            stacked, _starts = _stacked(
-                [(len(b.species), (lambda b=b: b)) for b in blocks], blocks[0]
-            )
-            merged = remote.from_encoded(stacked)
+            merged = remote.from_encoded(subset(encoded, list(range(30))))
     finally:
         server.shutdown()
-
     assert round_trips == 1
     assert [len(t) for t in together] == [len(b.species) for b in blocks]
     for got, want in zip(together, alone, strict=True):
         assert np.array_equal(got, want)
     assert not np.array_equal(np.concatenate(together), merged)
-
-
-@pytest.mark.parametrize("device_name", DEVICES)
-def test_blocks_scored_together_are_what_each_block_gets_alone(parts, device_name):
-    """The real net, served and local: `from_encoded_segments` is `from_encoded` per block
-    to the bit, including a block longer than one chunk (cut where `BatchedValue` cuts) and
-    a buffer too small for all of them at once (several round trips, same answers)."""
-    regulation, encoder, net = parts
-    device = torch.device(device_name)
-
-    from pokeuraou.inference import served_model
-
-    local = BatchedValue(net.to(device), encoder, device=device, batch_size=8)
-    blocks = _blocks(encoder, regulation, [3, 11, 1, 8, 6, 2, 5])
-    # Two rows marked as ended (IKA-253): their results go on after the pass, per block.
-    blocks[1].decided[9] = 0.0
-    blocks[4].decided[0] = 1.0
-    alone = [local.from_encoded(block) for block in blocks]
-    assert alone[1][9] == 0.0 and alone[4][0] == 1.0
-    together = local.from_encoded_segments(blocks)
-    for got, want in zip(together, alone, strict=True):
-        assert np.array_equal(got, want)
-    # The positive control: the same rows in blocks of other sizes are other answers here
-    # (every block one row longer, the next block's first row borrowed).
-    from pokeuraou.beliefnode import _stacked
-
-    from ._served import subset as _subset
-
-    stacked, starts = _stacked([(len(b.species), (lambda b=b: b)) for b in blocks], blocks[0])
-    shifted = [
-        local.from_encoded(_subset(stacked, list(range(start, start + len(b.species) + 1))))
-        for start, b in zip(starts[:-1], blocks[:-1], strict=True)
-    ]
-    assert any(
-        not np.array_equal(longer[: len(want)], want)
-        for longer, want in zip(shifted, alone, strict=False)
-    )
-
-    row_bytes = sum(
-        np.asarray(getattr(blocks[0], name))[0].nbytes
-        for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
-    )
-    model = served_model(local)
-    server, address = serve({"value": model})
-    trips = []
-    try:
-        for buffer_bytes in (8 << 20, row_bytes * 12):
-            with RemoteValue(
-                address, "value", encoder, buffer_bytes=buffer_bytes, batch_size=8
-            ) as remote:
-                served = remote.from_encoded_segments(blocks)
-                trips.append(remote.calls)
-            for got, want in zip(served, alone, strict=True):
-                assert np.array_equal(got, want)
-    finally:
-        server.shutdown()
-    # [3] alone (the 11 cuts the group), the 11 in two chunks of 8 and 3, then the other
-    # five together; a buffer of about 12 rows needs more trips for those five.
-    assert trips[0] == 4
-    assert trips[1] > trips[0]
-    # On the card the small blocks were CUDA-graph replays (`_Graphs`), and the equality
-    # above is against eager `from_encoded`: the graph is the eager answer to the bit.
-    if device_name == "cuda":
-        assert model.graphs is not None and model.graphs.captured > 0
-        assert model.replays > 0
-    else:
-        assert model.graphs is None
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
-def test_graphs_dropped_from_a_full_cache_are_captured_again_to_the_same_answer(
-    parts, monkeypatch
-):
-    """A cache of three graphs asked for five sizes in turn: every size is captured again
-    after it is dropped, and every replay is still the eager answer."""
-    regulation, encoder, net = parts
-    device = torch.device("cuda")
-    from pokeuraou import inference
-    from pokeuraou.encode import Encoded
-
-    monkeypatch.setattr(inference, "GRAPH_CACHE", 3)
-    local = BatchedValue(net.to(device), encoder, device=device)
-    model = inference.served_model(BatchedValue(net.to(device), encoder, device=device))
-    encoded = encoder.encode_positions(_positions(regulation, 40))
-    for _round in range(3):
-        for size in (7, 12, 19, 25, 33):
-            arrays = {name: np.asarray(getattr(encoded, name))[:size] for name in inference.ARRAYS}
-            want = local.from_encoded(Encoded(**arrays, unknown_volatiles={}))
-            assert np.array_equal(model.block(arrays, size), want)
-    assert model.graphs.captured == 15
-    assert model.graphs.evicted == 12
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
-def test_a_failed_capture_leaves_the_eager_road(parts, monkeypatch):
-    """A capture that raises gives the graphs up for good, and the block is answered
-    eagerly -- the same answer, never an error to the worker."""
-    regulation, encoder, net = parts
-    device = torch.device("cuda")
-    from pokeuraou import inference
-    from pokeuraou.encode import Encoded
-
-    def broken(self, inputs, pool):  # noqa: ANN001, ANN202
-        raise RuntimeError("capture refused")
-
-    monkeypatch.setattr(inference._Graphs, "_capture", broken)
-    local = BatchedValue(net.to(device), encoder, device=device)
-    model = inference.served_model(BatchedValue(net.to(device), encoder, device=device))
-    encoded = encoder.encode_positions(_positions(regulation, 20))
-    for size in (5, 9):
-        arrays = {name: np.asarray(getattr(encoded, name))[:size] for name in inference.ARRAYS}
-        want = local.from_encoded(Encoded(**arrays, unknown_volatiles={}))
-        assert np.array_equal(model.block(arrays, size), want)
-    assert model.graphs.failed and model.replays == 0
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
-def test_a_graph_replay_is_the_eager_answer_for_an_ensemble_too(parts):
-    """IKA-291's `_Graphs` on the ensemble road (`vmap` over stacked members), at every
-    size from 1 to 40 and a few larger ones, with the port's int32 index arrays and the
-    encoder's int64 ones: each replay equals eager `from_encoded` to the bit."""
-    regulation, encoder, net = parts
-    device = torch.device("cuda")
-    torch.manual_seed(11)
-    second = build(encoder, ValueConfig()).eval()
-    nets = [net.to(device), second.to(device)]
-
-    from pokeuraou.inference import ARRAYS, served_model
-
-    local = BatchedValue(nets, encoder, device=device)
-    model = served_model(BatchedValue(nets, encoder, device=device))
-    encoded = encoder.encode_positions(_positions(regulation, 300))
-    sizes = [*range(1, 41), 63, 64, 65, 128, 257, 300]
-    for index_type in (np.int64, np.int32):
-        for size in sizes:
-            arrays = {name: np.asarray(getattr(encoded, name))[:size] for name in ARRAYS}
-            for name in ("species", "ability", "item", "moves"):
-                arrays[name] = arrays[name].astype(index_type)
-            from pokeuraou.encode import Encoded
-
-            want = local.from_encoded(Encoded(**arrays, unknown_volatiles={}))
-            got = model.block(arrays, size)
-            assert np.array_equal(got, want), (size, index_type)
-    assert model.graphs.captured == 2 * len(sizes)
-    assert model.replays == 2 * len(sizes)
-    # The positive control: on this net and card a row's answer does move with the size of
-    # its call (16 of these 45 sizes on the RTX 5070 when one row is added), so a replay
-    # at the wrong size would have been seen.
-    from ._served import subset as _subset
-
-    moved = 0
-    for size in sizes[:45]:
-        alone = local.from_encoded(_subset(encoded, list(range(size))))
-        longer = local.from_encoded(_subset(encoded, list(range(size + 1))))[:size]
-        moved += int(not np.array_equal(alone, longer))
-    assert moved > 0
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
-def test_a_lone_request_is_a_graph_replay_and_the_eager_answer(parts, monkeypatch):
-    """IKA-107: depth 1's requests -- one `score` each, never `score_segments` -- are CUDA
-    graph replays on the card when they are short enough, and eager past that; either way
-    the answer is local eager `from_encoded` to the bit. Both index widths come through:
-    the port's int32 (`from_encoded`) and the encoder's int64 (`__call__`).
-
-    The replay count is the positive control that the new road was taken (it is 0 where
-    lone requests go eager), and the one-row-longer check is the control that a replay
-    at the wrong size would be seen on this net and card."""
-    regulation, encoder, net = parts
-    device = torch.device("cuda")
-    from pokeuraou import inference
-
-    from ._served import subset as _subset
-
-    # A small ceiling, so a few rows cover both roads.
-    monkeypatch.setattr(inference, "GRAPH_ROWS", 24)
-    local = BatchedValue(net.to(device), encoder, device=device)
-    model = inference.served_model(BatchedValue(net.to(device), encoder, device=device))
-    positions = _positions(regulation, 60)
-    encoded = encoder.encode_positions(positions)
-    short, long = [1, 2, 3, 8, 13, 24], [25, 40, 60]
-    server, address = serve({"value": model})
-    try:
-        with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
-            for size in short + long:
-                block = _subset(encoded, list(range(size)))
-                for name in ("species", "ability", "item", "moves"):
-                    setattr(block, name, np.asarray(getattr(block, name)).astype(np.int32))
-                want = local.from_encoded(_subset(encoded, list(range(size))))
-                assert np.array_equal(remote.from_encoded(block), want), ("int32", size)
-                assert np.array_equal(remote(positions[:size]), local(positions[:size])), (
-                    "int64", size,
-                )
-    finally:
-        server.shutdown()
-    assert model.replays == 2 * len(short)
-    assert model.calls - model.replays == 2 * len(long)
-    assert model.graphs.captured == 2 * len(short)
-
-    moved = 0
-    for size in short:
-        alone = local.from_encoded(_subset(encoded, list(range(size))))
-        longer = local.from_encoded(_subset(encoded, list(range(size + 1))))[:size]
-        moved += int(not np.array_equal(alone, longer))
-    assert moved > 0
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
-def test_two_arms_capturing_at_once_answer_as_eager(parts):
-    """IKA-306: a server with two arms (a leaf-vs-leaf match's `--baseline`) meets sizes
-    neither has seen, from several workers per arm at once. Each arm has its own graphs,
-    but torch captures on one process-wide side stream and allows one capture at a time
-    in the process, so two arms capturing together broke each other: the match lost two
-    workers a run to `operation failed due to a previous error during capture`, and here
-    the arms gave the graphs up, answered errors, and replayed wrong rows.
-
-    Every answer must be the eager one, no arm may give its graphs up, and both must have
-    captured and replayed (the positive control that the graph road was the one taken)."""
-    regulation, encoder, net = parts
-    device = torch.device("cuda")
-    from pokeuraou import inference
-
-    from ._served import subset as _subset
-
-    local = BatchedValue(net.to(device), encoder, device=device)
-    encoded = encoder.encode_positions(_positions(regulation, 48))
-    sizes = list(range(1, 49))
-    blocks = {}
-    want = {}
-    for size in sizes:
-        block = _subset(encoded, list(range(size)))
-        want[size] = local.from_encoded(block)
-        for name in ("species", "ability", "item", "moves"):
-            setattr(block, name, np.asarray(getattr(block, name)).astype(np.int32))
-        blocks[size] = block
-    arms = {
-        name: inference.served_model(BatchedValue(net.to(device), encoder, device=device))
-        for name in ("value", "baseline")
-    }
-    server, address = serve(arms)
-    per_arm = 4
-    ready = threading.Barrier(per_arm * len(arms))
-    wrong: list[str] = []
-    try:
-
-        def ask(name: str, index: int) -> None:
-            order = list(sizes)
-            np.random.default_rng(index).shuffle(order)
-            with RemoteValue(address, name, encoder, buffer_bytes=8 << 20) as remote:
-                ready.wait()
-                for size in order:
-                    try:
-                        got = remote.from_encoded(blocks[size])
-                    except Exception as error:  # noqa: BLE001 - reported below
-                        wrong.append(f"{name} {size}: {str(error).splitlines()[0]}")
-                        continue
-                    if not np.array_equal(got, want[size]):
-                        wrong.append(f"{name} {size}: not the eager answer")
-
-        threads = [
-            threading.Thread(target=ask, args=(name, index))
-            for name in arms
-            for index in range(per_arm)
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-    finally:
-        server.shutdown()
-    assert not wrong, (len(wrong), wrong[:5])
-    for name, model in arms.items():
-        assert model.graphs.failed is None, (name, model.graphs.failed)
-        assert model.graphs.captured == len(sizes), name
-        assert model.replays == per_arm * len(sizes), name
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
-def test_graphs_met_on_many_threads_hold_memory_on_one_side_stream(parts):
-    """IKA-377: cuBLAS keeps a workspace for every (thread's handle, stream) it ran on, for
-    the life of the process. Each capture used to warm up on a fresh pool stream on the
-    serving thread that met the shape, and a 16-thread ladder read left all 32 pool streams
-    holding workspaces (1,034 MiB of a 3.26 GiB cap) when the server ran out of memory.
-    Eight threads each meeting new sizes must leave the card's segments on the default
-    stream and one side stream (the process's graph thread), and every answer the eager one.
-    """
-    regulation, encoder, net = parts
-    device = torch.device("cuda")
-    from pokeuraou import inference
-
-    from ._served import subset as _subset
-
-    local = BatchedValue(net.to(device), encoder, device=device)
-    model = inference.served_model(BatchedValue(net.to(device), encoder, device=device))
-    encoded = encoder.encode_positions(_positions(regulation, 64))
-    threads_n = 8
-    ready = threading.Barrier(threads_n)
-    wrong: list[str] = []
-
-    def ask(index: int) -> None:
-        ready.wait()
-        for size in range(1 + 8 * index, 9 + 8 * index):
-            block = _subset(encoded, list(range(size)))
-            arrays = {name: np.asarray(getattr(block, name)) for name in inference.ARRAYS}
-            if not np.array_equal(model.block(arrays, size), local.from_encoded(block)):
-                wrong.append(f"{size}: not the eager answer")
-
-    threads = [threading.Thread(target=ask, args=(k,)) for k in range(threads_n)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    torch.cuda.synchronize()
-    assert not wrong, wrong[:5]
-    assert model.graphs.failed is None and model.graphs.captured == 8 * threads_n
-    side = {seg["stream"] for seg in torch.cuda.memory_snapshot() if seg["stream"] != 0}
-    assert len(side) <= 1, f"{len(side)} side streams hold card memory"
-
-
-def test_an_eager_pass_out_of_memory_runs_again_alone(monkeypatch):
-    """IKA-377: a 16-thread ladder read stopped on the server's out-of-memory reply to a
-    value pass, with another thread's pass holding its activations. A pass that runs out of
-    memory now waits for the whole gate -- no other eager pass on the card -- and runs
-    again, and the worker gets the answer. A slow pass is inside the gate when a second
-    one (in the gate's other place) runs out of memory: its second run must start only when
-    it is alone, after the slow one. Any other error is the request's, unretried."""
-    from types import SimpleNamespace
-
-    import pokeuraou.inference as inference
-    import pokeuraou.value as value_module
-
-    class OutOfMemoryError(RuntimeError):
-        """torch's name for it (`inference.is_out_of_memory` reads the name)."""
-
-    inside = {"now": 0}
-    count = threading.Lock()
-    seen: dict[str, list] = {"alone": [], "calls": [], "order": []}
-    slow_in = threading.Barrier(2)
-
-    class Pass:
-        def __init__(self, nets, encoder, device=None, batch_size=None):  # noqa: ANN001
-            pass
-
-        def from_encoded(self, encoded):  # noqa: ANN001, ANN202
-            kind = int(encoded.species[0, 0, 0])
-            with count:
-                inside["now"] += 1
-                seen["calls"].append(kind)
-                now = inside["now"]
-            try:
-                if kind == 1:  # slow: holds the card a while
-                    slow_in.wait()
-                    threading.Event().wait(0.2)
-                    seen["order"].append("slow done")
-                elif kind == 2:  # out of memory the first time
-                    if seen["calls"].count(2) == 1:
-                        seen["order"].append("out of memory")
-                        raise OutOfMemoryError("CUDA out of memory. Tried to allocate 80.00 MiB")
-                    seen["alone"].append(now)
-                    seen["order"].append("again")
-                elif kind == 3:
-                    raise ValueError("not a memory error")
-            finally:
-                with count:
-                    inside["now"] -= 1
-            return np.full(len(encoded.species), float(kind))
-
-    monkeypatch.setattr(value_module, "BatchedValue", Pass)
-    monkeypatch.setattr(inference, "EAGER_RETRIES", [0, 0])
-    stand_in = SimpleNamespace(nets=[object(), object()], encoder=None, device=None, batch_size=4096)
-    score = inference.served_model(stand_in)
-
-    def arrays(kind: int) -> dict:
-        return {name: np.full((3, 2, 4), kind) for name in inference.ARRAYS}
-
-    got: dict[int, np.ndarray] = {}
-    slow = threading.Thread(target=lambda: got.setdefault(1, score(arrays(1), 3)))
-    slow.start()
-
-    def failing() -> None:
-        slow_in.wait()  # the slow pass is inside the gate, and the other place is free
-        got[2] = score(arrays(2), 3)
-
-    second = threading.Thread(target=failing)
-    second.start()
-    for thread in (slow, second):
-        thread.join()
-    assert np.array_equal(got[2], np.full(3, 2.0))
-    assert np.array_equal(got[1], np.full(3, 1.0))
-    assert seen["calls"].count(2) == 2
-    assert seen["order"] == ["out of memory", "slow done", "again"], seen["order"]
-    assert seen["alone"] == [1], seen["alone"]
-    assert inference.EAGER_RETRIES == [1, 0]
-    with pytest.raises(ValueError, match="not a memory error"):
-        score(arrays(3), 3)
-    assert seen["calls"].count(3) == 1
-    assert inference.EAGER_RETRIES == [1, 0]
-
-
-def test_q_eager_passes_go_through_the_process_gate(monkeypatch):
-    """IKA-377: Q's eager passes (a ``q_batch`` past the graphs' cells: 0.1-0.3 GB of
-    activations) had no gate, beside the value arms' two. They go through the same one:
-    eight threads asking at once put two inside, and with the gate lifted more (the control
-    that the count sees an overlap)."""
-    import contextlib
-    from types import SimpleNamespace
-
-    import pokeuraou.inference as inference
-    from pokeuraou import qhead, qrank
-
-    inside = {"now": 0, "most": 0}
-    count = threading.Lock()
-
-    def q_matrices(net, requests, device):  # noqa: ANN001, ANN202
-        with count:
-            inside["now"] += 1
-            inside["most"] = max(inside["most"], inside["now"])
-        threading.Event().wait(0.05)
-        with count:
-            inside["now"] -= 1
-        return [np.zeros((2, 3)) for _ in requests]
-
-    monkeypatch.setattr(qhead, "q_matrices", q_matrices)
-    net = SimpleNamespace(config=SimpleNamespace(properties=False), vocab_fingerprint="v")
-    answer = qrank.served_q(net, torch.device("cpu"), ["q.pt"])
-    assert answer.batch_graphs is None
-
-    def most_at_once() -> int:
-        inside["most"] = 0
-        threads = [threading.Thread(target=answer.batch, args=([{}],)) for _ in range(8)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        return inside["most"]
-
-    assert most_at_once() == 2
-    monkeypatch.setattr(inference, "_EAGER_GATE", contextlib.nullcontext())
-    assert most_at_once() > 2
-
-
-def test_the_eager_passes_go_through_the_process_gate(monkeypatch):
-    """IKA-334: twelve serving threads each holding an eager pass's activations at once
-    filled the card (4.6 GB a server), and on WDDM that hung the card instead of failing.
-    `served_model` admits `EAGER_PASSES` forward passes at a time, process-wide. The
-    stand-in pass sleeps and counts how many are inside it; with the gate lifted the same
-    threads overlap more than that, so the count can see an overlap (the control)."""
-    import contextlib
-    from types import SimpleNamespace
-
-    import pokeuraou.inference as inference
-    import pokeuraou.value as value_module
-
-    inside = {"now": 0, "most": 0}
-    count = threading.Lock()
-
-    class Pass:
-        def __init__(self, nets, encoder, device=None, batch_size=None):  # noqa: ANN001
-            pass
-
-        def from_encoded(self, encoded):  # noqa: ANN001, ANN202
-            with count:
-                inside["now"] += 1
-                inside["most"] = max(inside["most"], inside["now"])
-            threading.Event().wait(0.05)
-            with count:
-                inside["now"] -= 1
-            return np.zeros(len(encoded.species))
-
-    monkeypatch.setattr(value_module, "BatchedValue", Pass)
-    stand_in = SimpleNamespace(nets=[object(), object()], encoder=None, device=None, batch_size=4096)
-    rows = 3
-    arrays = {name: np.zeros((rows, 2, 4)) for name in inference.ARRAYS}
-
-    def most_at_once() -> int:
-        score = inference.served_model(stand_in)
-        assert score.graphs is None
-        inside["most"] = 0
-        threads = [threading.Thread(target=score, args=(arrays, rows)) for _ in range(8)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        return inside["most"]
-
-    assert most_at_once() == 2
-    assert inference.EAGER_PASSES == 2
-    monkeypatch.setattr(inference, "_EAGER_GATE", contextlib.nullcontext())
-    assert most_at_once() > 2

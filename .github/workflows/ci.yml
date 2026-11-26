@@ -168,19 +168,21 @@ jobs:
       #              tests/test_slotswap.py); the `learn` job below runs them with torch
       #              present and allows none of these.
       #   cuda       none here (the modules that need a card skip for torch first); the
-      #              `learn` job has no card either and allows the seven CUDA-graph tests
-      #              (five in tests/test_inference.py, IKA-274's graphed Q, IKA-373's
-      #              batch-graphed Q) and, IKA-461, the twenty-one tests of the Rust inference
-      #              server (tests/test_rust_inference_server.py, which skips as a module
-      #              for torch in this job: one more torch skip, 36). IKA-460 removed M-B and
-      #              the open game, and their tests with three torch skips, and added one
-      #              (tests/test_play_roads.py): 34; stage 4 removed that file (its one torch
-      #              skip) with the Python roads' tests: 33.
+      #              `learn` job has no card either and allows the twenty-one tests of the
+      #              Rust inference server (IKA-461, tests/test_rust_inference_server.py, which
+      #              skips as a module for torch in this job: one more torch skip, 36).
+      #              IKA-460 removed M-B and the open game, and their tests with three torch
+      #              skips, and added one (tests/test_play_roads.py): 34; stage 4 removed that
+      #              file (its one torch skip) with the Python roads' tests: 33; step 2 removed
+      #              the Python server's tests (the whole of tests/test_inference.py, which
+      #              skipped as a module, and the two graphed-Q tests in tests/test_q_rank.py):
+      #              30. The seven CUDA-graph tests of the Python server went with it, and so
+      #              did the CPU-batch skip of its test.
       - name: what the suite skipped, and whether it was allowed to
         if: always()
         run: >
           uv run python tools/ci_skip_audit.py --junit reports/pytest.xml
-          --absent standings=9 --absent torch=33 --absent cuda=0
+          --absent standings=9 --absent torch=30 --absent cuda=0
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -250,12 +252,7 @@ jobs:
           uv run --no-sync python tools/fetch_priors.py
           --month "$PRIORS_MONTH" --format "$PRIORS_FORMAT" --cutoff "$PRIORS_CUTOFF"
 
-      # GitHub's runner moves a row's answer by one float32 ulp when its batch changes on
-      # CPU (torch 2.11.0 and 2.14.0 alike); the box this project runs on does not. The
-      # CPU variant of that test is skipped here and counted below; CUDA is not on a runner.
       - name: pytest
-        env:
-          POKEURAOU_CPU_BATCH_VARIES: "1"
         run: uv run --no-sync pytest --junitxml=reports/pytest-learn.xml
 
       # No `--absent torch`: with the learn group installed, a torch skip here means the
@@ -264,7 +261,7 @@ jobs:
         if: always()
         run: >
           uv run --no-sync python tools/ci_skip_audit.py --junit reports/pytest-learn.xml
-          --absent standings=9 --absent cpu-batch=1 --absent cuda=29
+          --absent standings=9 --absent cuda=21
 
       - uses: actions/upload-artifact@v4
         if: always()

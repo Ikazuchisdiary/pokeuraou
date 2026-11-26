@@ -20,6 +20,7 @@ What it needs that the record does not hold: the leaf (the model files behind
 from __future__ import annotations
 
 import hashlib
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,14 +218,11 @@ def load_inputs(
     pools: Path,
     values: list[Path] | None = None,
     q_model: Path | None = None,
-    device: str = "cpu",
 ) -> tuple[tuple[list[Any], list[Any]], Any]:  # noqa: ANN401
     """The sheets and the leaf a record was played with, found under ``models`` / ``pools``
     by the record's own names and checked against its hashes; the Q installed when the ranking
     is a q fill. ``values`` overrides the leaf's files (their label must still be the record's)."""
-    from pokeuraou import qrank
-    from pokeuraou.encode import Encoder
-    from pokeuraou.humanplay import load_leaf
+    from pokeuraou import humanplay, qrank
     from pokeuraou.pool import load_pool
 
     pool_info = record.get("pool") or {}
@@ -254,8 +252,8 @@ def load_inputs(
     made = f"value:{first}" if len(values) == 1 else f"value:{first}x{len(values)}"
     if made != label:
         raise ValueError(f"the files {[str(p) for p in values]} make {made!r}, the record's {label!r}")
-    leaf, encoder, _device = load_leaf(reg, values, device=device, graphs=False)
     fill = (record.get("rankFill") or [LEGACY_RANK_FILL])[0]
+    q_here = None
     if qrank.is_q(fill):
         names = record.get("qModel") or []
         if q_model is None:
@@ -265,5 +263,10 @@ def load_inputs(
         wanted = (record.get("qModelSha256") or [None])[0]
         if wanted and _sha256(q_model) != wanted:
             raise ValueError(f"{q_model} is not the record's Q (sha256 {wanted[:12]})")
-        qrank.install(qrank.LocalQ(q_model, encoder or Encoder(reg), device=device), "")
+        q_here = q_model
+    # IKA-460: the leaf (and the Q) are the Rust inference server's, started here (it needs a
+    # CUDA card).
+    address = humanplay.inference_address_or_start(
+        None, reg, values, q_here, lambda text: print(text, file=sys.stderr, flush=True))
+    leaf, encoder = humanplay.served_leaf(reg, address, values, q_path=q_here)
     return sheets, leaf

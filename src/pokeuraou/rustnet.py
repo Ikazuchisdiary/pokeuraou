@@ -238,8 +238,7 @@ def server_command(
             command += ["--q-arm", name, str(ensure_exported_q(file, Path(out_dir) / "rnet"))]
     except ValueError as problem:
         raise SystemExit(
-            f"the Rust inference server cannot take this net: {problem}. "
-            "Use the Python server (--python-server)."
+            f"the Rust inference server cannot take this net: {problem}."
         ) from None
     spec = importlib.util.find_spec("torch")
     if spec and spec.origin and not os.environ.get("POKEURAOU_CUDA_DLLS"):

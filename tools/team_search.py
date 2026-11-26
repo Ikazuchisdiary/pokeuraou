@@ -284,7 +284,7 @@ def _value(args: argparse.Namespace) -> int:
     from pokeuraou.inference import start_server
 
     for i in range(args.servers):
-        # IKA-461: the Rust server unless POKEURAOU_PYTHON_SERVER=1.
+        # IKA-461: the Rust server.
         p, address = start_server(
             {"value": args.model}, regulation=reg, log=out / f"server{i}.log", env=env)
         servers.append(p)

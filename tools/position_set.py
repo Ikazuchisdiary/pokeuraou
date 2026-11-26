@@ -212,7 +212,7 @@ class _Kit:
     """The regulation, the leaf, the Q, and the positions of a set."""
 
     def __init__(self, args: argparse.Namespace) -> None:
-        from pokeuraou import humanplay, qrank
+        from pokeuraou import humanplay
         from pokeuraou.damage import register_mega_stones
         from pokeuraou.pool import load_pool
 
@@ -221,31 +221,18 @@ class _Kit:
         register_mega_stones(self.reg)
         values = args.value or [repo_root() / p for p in DEFAULT_VALUE]
         q_path = Path(args.q_model or repo_root() / DEFAULT_Q)
-        address = humanplay.inference_address(args.inference)
-        if address:
-            # IKA-363: the leaf and the Q on the machine's server; no CUDA context here.
-            self.leaf, encoder = humanplay.served_leaf(
-                self.reg, address, values, merge=args.merge == "on", q_path=q_path)
-            self.device = f"server {address}"
-            #: A ladder worker's leaf and Q (IKA-364, `humanplay.ladder_process_leaf`).
-            # IKA-390: with --ladder-inference, the workers' servers (a list, one per worker
-            # in turn, `ladder.start_pool`); this process's own leaf stays on ``address``.
-            self.spec: tuple = ("served", getattr(args, "ladder_inference", None) or address,
-                                "value", args.merge == "on", str(q_path), "q")
-        else:
-            humanplay.cap_cuda(args.cuda_memory_gb, args.device)
-            self.leaf, encoder, self.device = humanplay.load_leaf(
-                self.reg, [Path(v) for v in values], args.device,
-                # CUDA graphs as a person's game loads the leaf (IKA-367's timing), else off.
-                graphs=bool(getattr(args, "leaf_graphs", False)))
-            if str(self.device) == "cpu":
-                import torch
-
-                torch.set_num_threads(1)
-            qrank.install(qrank.LocalQ(q_path, encoder, device=self.device))
-            self.spec = ("local", [str(v) for v in values], str(self.device),
-                         bool(getattr(args, "leaf_graphs", False)), args.cuda_memory_gb,
-                         str(q_path))
+        # IKA-460: the leaf and the Q are the machine's Rust server's (started here when none is
+        # named; it needs a CUDA card); no CUDA context here.
+        address = humanplay.inference_address_or_start(
+            args.inference, self.reg, values, q_path,
+            lambda text: print(text, file=sys.stderr, flush=True))
+        self.leaf, encoder = humanplay.served_leaf(self.reg, address, values, q_path=q_path)
+        self.device = f"server {address}"
+        #: A ladder worker's leaf and Q (IKA-364, `humanplay.ladder_process_leaf`).
+        # IKA-390: with --ladder-inference, the workers' servers (a list, one per worker
+        # in turn, `ladder.start_pool`); this process's own leaf stays on ``address``.
+        self.spec: tuple = ("served", getattr(args, "ladder_inference", None) or address,
+                            "value", str(q_path), "q")
         humanplay.use_threads(1, self.reg, None)
         threads = int(getattr(args, "threads", 1) or 1)
         if threads > 1:
@@ -1290,18 +1277,13 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--pool", default="regmc-matchupweb")
         s.add_argument("--value", type=Path, nargs="+", default=None)
         s.add_argument("--q-model", type=Path, default=None)
-        s.add_argument("--device", default=None)
-        s.add_argument("--cuda-memory-gb", type=float, default=0.8)
         s.add_argument("--inference", default=None, metavar="HOST:PORT",
                        help="the machine's inference server (IKA-363; arms value and q). "
-                       "Default: POKEURAOU_INFERENCE, else the leaf is loaded here")
+                       "Default: POKEURAOU_INFERENCE, else the Rust server is started")
         s.add_argument("--ladder-inference", default=None, metavar="HOST:PORT[,HOST:PORT...]",
                        help="IKA-390: the servers the ladder's worker processes ask, worker i "
                        "the (i mod n)th (the same models as --inference; this process keeps "
                        "asking --inference). Default: all ask --inference")
-        s.add_argument("--merge", default="off", choices=("on", "off"),
-                       help="the server's merged road: the values move in the last places "
-                       "with the timing (off: the answers a local leaf gives)")
         if name == "reference3":
             s.add_argument("--name", required=True)
             s.add_argument("--base", required=True, help="the depth-2 reference it deepens")

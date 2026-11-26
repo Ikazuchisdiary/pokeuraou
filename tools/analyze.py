@@ -26,8 +26,7 @@ the same answer, bit for bit, at any speed and thread count. ``--out`` appends e
 
 Memory: the host's free memory, this process's and its workers', and the card's are read
 twice a second; a read stops before ``--max-rss-gb`` / ``--min-free-gb`` / ``--max-gpu-gb``
-and the page says which. The leaf's own CUDA allocator is capped at ``--cuda-memory-gb``
-(IKA-334's server cap; the cap moves no answer).
+and the page says which.
 """
 
 from __future__ import annotations
@@ -102,23 +101,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
     ap.add_argument("--hp-share", action="store_true", help="no leaf: the hp-share proxy")
-    ap.add_argument("--leaf-graphs", default="on", choices=("on", "off"))
     ap.add_argument("--rank-fill", default=None,
                     help=f"how the menus are ranked. Default: {Q_FILL} when a Q is there, "
                     f"else {NO_Q_FILL} with a note")
     ap.add_argument("--q-model", type=Path, default=None, help=f"the Q. Default: {DEFAULT_Q}")
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP)
-    ap.add_argument("--device", default=None)
     ap.add_argument("--inference", default=None, metavar="HOST:PORT",
                     help="the machine's inference server to send the forward passes to (IKA-363; "
                     "its arms value and q must be the leaf's and the Q's files). Default: "
-                    "POKEURAOU_INFERENCE, else none: the leaf is loaded here. local: here")
-    ap.add_argument("--merge", default="off", choices=("on", "off"),
-                    help="with a server: share its forward passes with other processes' requests "
-                    "(the merged road; a value moves in the last places with the timing, and "
-                    "IKA-363 measured no speed from it: the processes are bound by the CPU)")
-    ap.add_argument("--cuda-memory-gb", type=float, default=humanplay.PLAY_CUDA_MEMORY_GB,
-                    help="cap this process's CUDA allocator and each worker's (IKA-334); 0: no cap")
+                    "POKEURAOU_INFERENCE, else the Rust server is started (it needs a CUDA card)")
     ap.add_argument("--open-browser", action="store_true",
                     help="open the page in the browser once it is served")
     ap.add_argument("--max-steps", type=int, default=None,
@@ -157,55 +148,35 @@ def main(argv: list[str] | None = None) -> None:
     loc = localiser(reg, args.locale)
     say = lambda text: print(text, file=sys.stderr)  # noqa: E731
 
-    # The leaf, as play_human loads it.
-    evaluate = None
-    name = "hp-share"
-    encoder = None
-    device = args.device
+    # The leaf, as play_human loads it: the inference server's.
+    if args.hp_share:
+        raise SystemExit("--hp-share is stopped: the hp-share leaf returns as an arm of the Rust "
+                         "inference server in IKA-460 step 4")
     values = args.value
-    if values is None and not args.hp_share:
+    if values is None:
         found = [repo_root() / p for p in DEFAULT_VALUE]
-        if all(p.exists() for p in found):
-            values = found
-        else:
-            say(f"note: no {DEFAULT_VALUE[0]} here, so the read uses hp-share (--value names a leaf)")
+        if not all(p.exists() for p in found):
+            raise SystemExit(f"no {DEFAULT_VALUE[0]} here: --value names the leaf")
+        values = found
     address = humanplay.inference_address_or_start(
-        args.inference, reg, None if args.hp_share else values,
-        args.q_model or (repo_root() / DEFAULT_Q), device, say)
-    if values and not args.hp_share and address:
-        # IKA-363: the forward passes on the machine's server; no CUDA context here.
-        evaluate, encoder = humanplay.served_leaf(reg, address, values,
-                                                  merge=args.merge == "on")
-        name = leaf_name(values)
-        say(f"leaf on the inference server {address} (merged road {args.merge})")
-    elif values and not args.hp_share:
-        address = None
-        humanplay.cap_cuda(args.cuda_memory_gb, args.device)
-        evaluate, encoder, device = humanplay.load_leaf(
-            reg, values, device, graphs=args.leaf_graphs == "on"
-        )
-        name = leaf_name(values)
+        args.inference, reg, values, args.q_model or (repo_root() / DEFAULT_Q), say)
+    # IKA-363: the forward passes on the machine's server; no CUDA context here.
+    evaluate, encoder = humanplay.served_leaf(reg, address, values)
+    name = leaf_name(values)
+    say(f"leaf on the inference server {address}")
     # The menus, as play_human picks them (IKA-341: the same fallback, one function).
     q_path = args.q_model or (repo_root() / DEFAULT_Q)
-    fill, q_files = install_menus(args.rank_fill, q_path, encoder, evaluate, address, device, say)
+    fill, q_files = install_menus(args.rank_fill, q_path, encoder, address, say)
     if args.ladder is not None:
         # IKA-364: the ladder's cells on threads - 1 worker processes.
         humanplay.use_threads(args.threads)
         workers = humanplay.use_ladder_pool(args.threads, reg, humanplay.ladder_spec(
-            leaf=evaluate, address=address, merge=args.merge == "on", values=values,
-            device=device, graphs=args.leaf_graphs == "on", cuda_memory_gb=args.cuda_memory_gb,
+            address=address,
             # The workers install the Q this process did (none: its fill needs none).
             q_path=q_path if q_files else None))
         say(f"ladder {args.ladder}: cells on {workers} worker process(es)")
-    elif address and evaluate is not None:
-        humanplay.use_threads(args.threads, reg, (address, "value", args.merge == "on"),
-                              factory=humanplay.served_process_leaf)
     else:
-        humanplay.use_threads(
-            args.threads, reg,
-            ([str(v) for v in values] if values and not args.hp_share else None,
-             str(device or "cpu"), args.leaf_graphs == "on", args.cuda_memory_gb),
-        )
+        humanplay.use_threads(args.threads, reg, (address, "value"))
 
     settings = analysis.Settings(
         width=args.width, oracle=_oracle_width(args.oracle), levels=args.max_levels,

@@ -2162,7 +2162,6 @@ def _self_switch_request(
             "shm": owner._block.name,  # noqa: SLF001 - the leaf's own block, idle while the port asks
             "bytes": int(owner._block.size),  # noqa: SLF001
             "batch": int(owner.batch_size),
-            "merge": bool(owner.merge),
             "netScoresEnds": bool(owner.encoder.rules.net_scores_ends),
         }
         rules = rules_of(owner)

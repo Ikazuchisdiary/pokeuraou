@@ -139,7 +139,9 @@ def test_the_error_is_the_traceback_s_last_line_and_oom_comes_first(tmp_path: Pa
 def test_a_server_oom_reaches_the_worker_as_what_it_is(capsys) -> None:  # noqa: ANN001
     """The server says an OOM is one, counts it in its log, and the worker raises
     `ServerOutOfMemory` rather than a RuntimeError like any other."""
-    from pokeuraou.inference import RemoteValue, ServerOutOfMemory, serve
+    from pokeuraou.inference import RemoteValue, ServerOutOfMemory
+
+    from ._served import serve
 
     class OutOfMemoryError(RuntimeError):  # torch.OutOfMemoryError's name
         pass

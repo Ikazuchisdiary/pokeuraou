@@ -491,7 +491,7 @@ def run_fill(args: argparse.Namespace) -> None:
     from pokeuraou.inference import start_server
 
     for s in range(args.served):
-        # IKA-461: the Rust server unless POKEURAOU_PYTHON_SERVER=1.
+        # IKA-461: the Rust server.
         process, address = start_server(
             {"value": args.value}, regulation=args.regulation, log=out / f"inference{s}.log",
             env=env,

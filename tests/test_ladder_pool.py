@@ -45,10 +45,19 @@ def roster():  # noqa: ANN201
 
 @pytest.fixture(scope="module")
 def pool(roster):  # noqa: ANN001, ANN201
-    got = humanplay.use_ladder_pool(WORKERS + 1, roster.reg, ("hp-share",))
+    # IKA-460: a worker's leaf is the inference server's; here the tests' stand-in, answering
+    # `payoff.HP_SHARE` off the encoding (the same leaf as `LEAF` here).
+    from pokeuraou.encode import Encoder
+
+    from ._served import hp_share_model, model_of, serve
+
+    server, address = serve({"stub": model_of(hp_share_model(Encoder(roster.reg)))})
+    got = humanplay.use_ladder_pool(
+        WORKERS + 1, roster.reg, ("served", address, "stub", None, "q"))
     assert got == WORKERS
     yield got
     ladder.stop_pool()
+    server.shutdown()
 
 
 def _node(reg, pos, width, spreads=None, side=0):  # noqa: ANN001, ANN202

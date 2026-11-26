@@ -110,7 +110,6 @@ def prepare(  # noqa: PLR0913 - the loop's settings
         "shm": leaf._block.name,  # noqa: SLF001 - the leaf's own block, idle while the port asks
         "bytes": int(leaf._block.size),  # noqa: SLF001
         "batch": int(leaf.batch_size),
-        "merge": bool(leaf.merge),
     }
     node["netScoresEnds"] = bool(leaf.encoder.rules.net_scores_ends)
     node["patch"] = {

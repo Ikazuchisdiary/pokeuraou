@@ -54,7 +54,7 @@ MAX_ATTEMPTS = 3
 RUN_RECORD = "workers.json"
 
 #: What an inference server prints for every out-of-memory reply it sends (IKA-336), so a
-#: driver can count them in the server's log. `tools/inference_server.py` writes it.
+#: driver can count them in the server's log. The Rust server writes it.
 SERVER_OOM_MARK = "out-of-memory reply"
 
 #: The last line of a Python traceback: an exception's (dotted) name, then its message.

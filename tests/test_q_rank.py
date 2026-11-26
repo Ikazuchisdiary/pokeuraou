@@ -19,10 +19,10 @@ Stage 3:
 - **one round trip**: both sides' requests of a menu go together (`qrank.prefetch`, op
   ``q_many``), and the games are the games of one request per ranking;
 - **a Q per arm**: ``q-nocover.NAME`` ranks by the Q of that name, so two arms of a match
-  can rank by two Qs;
-- **CUDA graphs**: the server's graphed forward pass (`qrank.QGraphs`) is the eager
-  pass's matrix to the bit; so is the batched one (`qrank.QBatchGraphs`, op ``q_batch``,
-  IKA-373), through dropped and recaptured graphs.
+  can rank by two Qs.
+
+The Python server's CUDA graphs of the Q (`QGraphs`, `QBatchGraphs`) and their two tests are gone
+(IKA-460); the Rust server's Q arm is `tests/test_rust_inference_server.py`'s.
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ class _ServedStub:
 
 
 def test_a_served_q_answers_what_the_worker_would_compute(pool, pos) -> None:  # noqa: ANN001
-    from pokeuraou.inference import serve
+    from ._served import serve
 
     reg = pool.reg
     encoder = Encoder(reg)
@@ -345,7 +345,7 @@ def _untrained_q(reg, encoder, path):  # noqa: ANN001, ANN202
 
 def test_a_q_loaded_here_and_served_answer_alike(pool, pos, tmp_path) -> None:  # noqa: ANN001
     pytest.importorskip("torch")
-    from pokeuraou.inference import serve
+    from ._served import load_q_arms, serve
 
     reg = pool.reg
     encoder = Encoder(reg)
@@ -355,7 +355,7 @@ def test_a_q_loaded_here_and_served_answer_alike(pool, pos, tmp_path) -> None:  
     here = local.matrix(reg, pos, pools)
     assert here.shape == (len(pools[0]), len(pools[1]))
     assert np.all((here > 0) & (here < 1))
-    server, address = serve({}, q_models=qrank.load_q_arms({"q": path}, "cpu"))
+    server, address = serve({}, q_models=load_q_arms({"q": path}, "cpu"))
     try:
         remote = qrank.RemoteQ(address, "q", encoder)
         try:
@@ -368,101 +368,3 @@ def test_a_q_loaded_here_and_served_answer_alike(pool, pos, tmp_path) -> None:  
     finally:
         server.shutdown()
 
-
-def test_the_graphed_q_is_the_eager_q_to_the_bit(pool, tmp_path) -> None:  # noqa: ANN001
-    """Stage 3: `QGraphs` (trunk graph, a graph per side and pool size, eager pair head)
-    answers `qhead.q_matrix`'s matrix to the bit, over pool sizes met in any order."""
-    torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA graphs need a card")
-    reg = pool.reg
-    encoder = Encoder(reg)
-    net = qhead.load_q(_untrained_q(reg, encoder, tmp_path / "q.pt"), "cuda")
-    device = torch.device("cuda")
-    graphs = qrank.QGraphs(net, device)
-    teams = [list(t.sets) for t in pool.teams]
-    requests = []
-    for i in range(3):
-        pos = selfplay.position_from_sets(
-            reg, teams[i % len(teams)][:4], teams[(i + 1) % len(teams)][:4],
-            rng=np.random.default_rng(i),
-        )
-        full = (qhead.legal_pool(reg, pos, 0), qhead.legal_pool(reg, pos, 1))
-        # Every pair of a few sizes, met in a shuffled order, so a side's graph is often
-        # captured after the other side's graph of a size it meets later: the case a pool
-        # shared between the graphs got wrong (a later capture's output under an earlier
-        # one's scratch).
-        for c0 in (None, 3, 9, 17, 30):
-            for c1 in (None, 3, 9, 17, 30):
-                pools = tuple(p[:c] if c else p for p, c in zip(full, (c0, c1), strict=True))
-                requests.append(qrank._pool_arrays(reg, encoder, pos, pools, True))  # noqa: SLF001
-    order = np.random.default_rng(274).permutation(len(requests))
-    requests = [requests[i] for i in order]
-    for arrays in requests + requests[::-1]:
-        want = qhead.q_matrix(net, arrays, device)
-        got = graphs.matrix(arrays)
-        assert got is not None and np.array_equal(got, want)
-    assert graphs.failed is None
-    assert graphs.replays == 2 * len(requests)
-    assert graphs.captured == 1 + len({(s, len(a[f"acts{s}"])) for a in requests for s in (0, 1)})
-
-
-def test_the_batch_graphed_q_is_the_eager_batch_to_the_bit(pool, tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    """IKA-373: `QBatchGraphs` (a graph per batch size, per side and padded pool, per pair of
-    side graphs) answers `qhead.q_matrices`' matrices to the bit, over batches of several
-    sizes met in any order, with a cache small enough that side and pair graphs are
-    dropped and captured again. A batch past `Q_BATCH_GRAPHS` positions is left to the
-    eager pass, and the server's ``q_batch`` (`served_q`'s ``batch``) takes the graphs."""
-    torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA graphs need a card")
-    monkeypatch.setattr(qrank, "Q_BATCH_GRAPH_CACHE", 3)
-    # Every batch here to the graphs, the 16 full pools too (the cap is a memory bound).
-    monkeypatch.setattr(qrank, "Q_BATCH_GRAPH_CELLS", 16 * 256 * 256)
-    reg = pool.reg
-    encoder = Encoder(reg)
-    path = _untrained_q(reg, encoder, tmp_path / "q.pt")
-    net = qhead.load_q(path, "cuda")
-    device = torch.device("cuda")
-    teams = [list(t.sets) for t in pool.teams]
-    requests = []
-    for i in range(4):
-        pos = selfplay.position_from_sets(
-            reg, teams[i % len(teams)][:4], teams[(i + 2) % len(teams)][:4],
-            rng=np.random.default_rng(373 + i),
-        )
-        full = (qhead.legal_pool(reg, pos, 0), qhead.legal_pool(reg, pos, 1))
-        for c0, c1 in ((None, None), (3, 9), (9, 3), (17, None), (5, 5)):
-            pools = tuple(p[:c] if c else p for p, c in zip(full, (c0, c1), strict=True))
-            requests.append(qrank._pool_arrays(reg, encoder, pos, pools, True))  # noqa: SLF001
-    rng = np.random.default_rng(373)
-    # Mostly small batches, as the ladder asks (a median of three positions), in an order
-    # that meets a shape's graphs after others' of the same piece were captured over the
-    # scratch it had used: the case one pool shared by the pieces got wrong.
-    sizes = [16, *(int(s) for s in rng.integers(1, 9, size=300))]
-    batches = [
-        [requests[i] for i in rng.choice(len(requests), size, replace=False)] for size in sizes
-    ]
-    graphs = qrank.QBatchGraphs(net, device)
-    for batch in batches + batches[::-1]:
-        want = qhead.q_matrices(net, batch, device)
-        got = graphs.matrices(batch)
-        assert got is not None
-        assert len(got) == len(want)
-        assert all(np.array_equal(g, w) for g, w in zip(got, want, strict=True))
-        # A pair graph reads its side graphs' outputs: none outlives them.
-        serials = {entry[0] for entry in graphs.sides.values()}
-        assert all(set(key) <= serials for key in graphs.pairs)
-    assert graphs.failed is None
-    assert graphs.replays == 2 * len(batches)
-    assert graphs.evicted > 0
-    assert graphs.matrices(requests[:17]) is None
-    with monkeypatch.context() as m:
-        m.setattr(qrank, "Q_BATCH_GRAPH_CELLS", 2 * 3 * 3 - 1)
-        assert graphs.matrices(requests[1:3]) is None  # 3 x 9 and 9 x 3: 2 x 9 x 9 cells
-    served = qrank.served_q(net, device, ["q.pt"])
-    assert served.batch_graphs is not None
-    for batch in (batches[3], requests[:17]):
-        assert all(np.array_equal(g, w) for g, w in zip(
-            served.batch(batch), qhead.q_matrices(net, batch, device), strict=True))
-    assert served.batch_graphs.replays == 1

@@ -322,10 +322,13 @@ def load_analyzer(args):  # noqa: ANN001, ANN201
     reg = load_pool(args.data / "pool" / "regmc-matchupweb.json").reg
     register_mega_stones(reg)
     values = [args.data / "models" / m for m in ("value-mc7.pt", "value-mc7-s1.pt")]
-    evaluate, encoder, device = humanplay.load_leaf(reg, values, "cpu", graphs=False)
+    q_path = args.data / "models" / "q-mc6.pt"
+    say = lambda t: print(t, file=sys.stderr)  # noqa: E731
+    # IKA-460: the leaf is the Rust inference server's (it needs a CUDA card).
+    address = humanplay.inference_address_or_start(None, reg, values, q_path, say)
+    evaluate, encoder = humanplay.served_leaf(reg, address, values)
     ph = ranked_entry._play_human()
-    fill, _files = ph.install_menus(None, args.data / "models" / "q-mc6.pt", encoder, evaluate, None,
-                                    device, lambda t: print(t, file=sys.stderr))
+    fill, _files = ph.install_menus(None, q_path, encoder, address, say)
     settings = analysis.Settings(width=analysis.DEFAULT_WIDTH, oracle=ph._oracle_width("sall"),
                                  levels=humanplay.PLAY_MAX_LEVELS or analysis.MAX_LEVELS, rank_fill=fill)
     return reg, analysis.Analyzer(reg, evaluate, "value-mc7x2", settings=settings)

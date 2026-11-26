@@ -545,20 +545,6 @@ def default_threads(cpus: int | None = None) -> int:
     return max(1, min(PLAY_THREADS, logical // 2))
 
 
-def cap_cuda(gb: float, device: str | None = None) -> bool:
-    """Caps this process's CUDA allocator at ``gb`` (IKA-334; the cap moves no answer).
-    False when there is no card, the device is not CUDA, or ``gb`` is 0."""
-    if gb <= 0 or (device is not None and not str(device).startswith("cuda")):
-        return False
-    import torch
-
-    if not torch.cuda.is_available():
-        return False
-    total = torch.cuda.mem_get_info()[1]
-    torch.cuda.set_per_process_memory_fraction(min(1.0, gb * 1e9 / total))
-    return True
-
-#: From how many cells a game's two LPs are solved at once when the agent has more than
 #: one core (`equilibrium.set_lp_pair`): the root's Bayesian game of a wide menu, not the
 #: 8 x 8 children, whose LPs are mostly Python (IKA-32 stage 2).
 LP_PAIR_CELLS = 1024
@@ -572,105 +558,18 @@ AHEAD_HELPERS = 2
 AHEAD_DEEPER = 0
 
 
-class GraphLeaf:
-    """The agent's leaf with its small blocks scored by CUDA-graph replays (IKA-32 stage 2).
-
-    The inference server has scored blocks of up to `inference.GRAPH_ROWS` rows this way
-    since IKA-107 (`inference._Graphs`): a graph captured for n rows replays the kernels the
-    eager pass chose for n rows, so the answer is the eager answer to the bit, and a
-    two-net ensemble's forward pass stops being bound by launching its kernels. A person's
-    opponent scores its leaves in this process; the deepening's children are 8 x 8 blocks of
-    a few hundred rows, one eager pass each (2.2 ms of CPU for a fraction of that on the
-    card, 22% of a step). Positions, larger blocks and a card-less leaf go to the leaf as
-    before; an ended leaf is settled as `BatchedValue.from_encoded` settles it.
-    """
-
-    def __init__(self, value: Any) -> None:  # noqa: ANN401 - BatchedValue
-        from .inference import _Graphs
-
-        self.value = value
-        self.encoder = value.encoder
-        self.graphs = _Graphs(value) if _Graphs.usable(value) else None
-        #: Blocks answered by a replay (the positive control).
-        self.replays = 0
-
-    def __call__(self, positions: list[Any]) -> np.ndarray:
-        return self.value(positions)
-
-    def from_encoded(self, encoded: Any) -> np.ndarray:  # noqa: ANN401 - encode.Encoded
-        from .encode import settle
-        from .inference import ARRAYS
-
-        rows = len(encoded.species)
-        if self.graphs is not None and rows:
-            out = self.graphs.score({name: getattr(encoded, name) for name in ARRAYS}, rows)
-            if out is not None:
-                self.value.ended += settle(out, encoded, self.encoder.rules)
-                self.value.evaluated += rows
-                self.replays += 1
-                return out
-        return self.value.from_encoded(encoded)
-
-    def from_encoded_segments(self, segments: Sequence[Any]) -> list[np.ndarray]:
-        return [self.from_encoded(segment) for segment in segments]
-
 
 #: Worker processes expanding the deepening's cells ahead, at most (IKA-32 stage 2). Each
 #: holds a CUDA context and the leaf (about 0.5 GB of the card) and a port.
 AHEAD_WORKERS_MAX = 6
 
 
-def process_leaf(
-    reg: Regulation, values: Sequence[str] | None, device: str, graphs: bool,
-    cuda_memory_gb: float = 0.0,
-) -> Any:  # noqa: ANN401
-    """The agent's leaf built again in a worker process (`deepen.start_workers`): the same
-    files on the same device, as `tools/play_human.py` builds it; hp-share without files.
-    ``cuda_memory_gb`` caps the worker's CUDA allocator as the tool caps its own
-    (`cap_cuda`)."""
-    if not values:
-        return HP_SHARE.batch
-    import torch
-
-    cap_cuda(cuda_memory_gb, device)
-
-    from .encode import Encoder
-    from .value import BatchedValue, load_ensemble
-
-    encoder = Encoder(reg)
-    nets, _ = load_ensemble([Path(v) for v in values], encoder)
-    leaf = BatchedValue([n.to(device) for n in nets], encoder, device=torch.device(device))
-    return GraphLeaf(leaf) if graphs else leaf
-
-
-def load_leaf(
-    reg: Regulation, values: Sequence[Path], device: str | None = None, graphs: bool = True,
-) -> tuple[Any, Any, str]:
-    """The agent's leaf from model files (one, or an ensemble averaged): the leaf (a
-    `GraphLeaf` when ``graphs``), its encoder, and the device it is on (CUDA when there is
-    a card and ``device`` is not given). What `tools/play_human.py` and `tools/analyze.py`
-    load."""
-    import torch
-
-    from .encode import Encoder
-    from .value import BatchedValue, load_ensemble
-
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    encoder = Encoder(reg)
-    nets, _ = load_ensemble(list(values), encoder)
-    leaf: Any = BatchedValue([n.to(device) for n in nets], encoder, device=torch.device(device))
-    if graphs:
-        leaf = GraphLeaf(leaf)
-    return leaf, encoder, device
-
-
 def inference_address(given: str | None = None) -> str | None:
     """The machine's inference server to send the reading's requests to (IKA-363), or None.
 
     ``given`` (a tool's ``--inference``) or else `inference.ENV_SERVER`
-    (``POKEURAOU_INFERENCE=host:port``); ``local`` or empty means none. A server that is
-    named and does not answer stops the tool: a read that quietly fell back to a CUDA
-    context of its own would be another memory budget than the one asked for.
+    (``POKEURAOU_INFERENCE=host:port``). A server that is named and does not answer stops the
+    tool. ``local`` (the leaf in this process) is gone (IKA-460): every leaf is the server's.
     """
     import os
     import socket
@@ -678,7 +577,12 @@ def inference_address(given: str | None = None) -> str | None:
     from .inference import ENV_SERVER
 
     address = given if given is not None else os.environ.get(ENV_SERVER, "")
-    if not address or address == "local":
+    if address == "local":
+        raise SystemExit(
+            "--inference local is gone (IKA-460): a node's leaf is the inference server's. "
+            "Leave --inference out to start the Rust server (it needs a CUDA card)"
+        )
+    if not address:
         return None
     host, _, port = address.rpartition(":")
     try:
@@ -686,43 +590,34 @@ def inference_address(given: str | None = None) -> str | None:
     except (OSError, ValueError) as problem:
         raise SystemExit(
             f"no inference server answers at {address!r} ({problem}); start one "
-            f"(`pokeuraou-damage inference-server`, IKA-461; or tools/inference_server.py) or "
-            f"pass --inference local to read here"
+            f"(`pokeuraou-damage inference-server`, IKA-461) or leave --inference out"
         ) from None
     return address
 
 
 def inference_address_or_start(
     given: str | None, reg: Regulation, values: Sequence[Path | str] | None,
-    q_path: Path | None, device: str | None, say: Any,  # noqa: ANN401 - a callable
-) -> str | None:
+    q_path: Path | None, say: Any,  # noqa: ANN401 - a callable
+) -> str:
     """`inference_address`, and where none is named, the Rust inference server started for
     this process (IKA-460): the value arm on ``values`` and the Q arm on ``q_path`` (when it
     exists), on the card. Stops with the process (`atexit`).
 
-    Named -- ``given``, or `inference.ENV_SERVER` -- the answer is `inference_address`'s, and
-    ``local`` is still the leaf loaded here. Without a leaf, a CPU device, no card or a net
-    the Rust server cannot take (it stops, naming why) the leaf is loaded here as before and
-    ``say`` tells why.
+    A person's game and a reading need CUDA and the Rust server: without a leaf, a card or a
+    net the server can take, the tool stops and says why (there is no leaf in this process).
     """
     import atexit
-    import os
 
-    from .inference import ENV_SERVER, start_server
+    from .inference import start_server
 
-    named = given if given is not None else os.environ.get(ENV_SERVER, "")
+    named = inference_address(given)
     if named:
-        return inference_address(given)
-    if not values or (device or "cuda") != "cuda":
-        return None
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            say("note: no card, so the leaf is loaded here (no Rust inference server)")
-            return None
-    except ImportError:
-        return None
+        return named
+    if not values:
+        raise SystemExit(
+            "no leaf: --value names the model files the inference server loads (the hp-share leaf "
+            "returns as an arm of the Rust server in IKA-460 step 4)"
+        )
     from .regulation import repo_root
 
     arms_q = {"q": q_path} if q_path is not None and Path(q_path).exists() else None
@@ -730,18 +625,20 @@ def inference_address_or_start(
     try:
         process, address = start_server(
             {"value": [Path(v) for v in values]}, q_arms=arms_q,
-            regulation=reg.meta.format_id, log=log, device="cuda",
+            regulation=reg.meta.format_id, log=log,
         )
-    except (SystemExit, OSError) as problem:
-        say(f"note: no Rust inference server ({problem}); the leaf is loaded here")
-        return None
+    except (SystemExit, OSError, ImportError) as problem:
+        raise SystemExit(
+            f"the Rust inference server did not start ({problem}); it needs a CUDA card and "
+            f"torch to write the .rnet files. Log: {log}"
+        ) from None
     atexit.register(process.terminate)
     say(f"inference server {address} started (the Rust one, log {log})")
     return address
 
 
 def served_leaf(
-    reg: Regulation, address: str, values: Sequence[Path | str], *, merge: bool = False,
+    reg: Regulation, address: str, values: Sequence[Path | str], *,
     arm: str = "value", q_path: Path | None = None, q_arm: str = "q",
 ) -> tuple[Any, Any]:
     """The agent's leaf on the machine's inference server (IKA-363): a `RemoteValue` on arm
@@ -757,7 +654,7 @@ def served_leaf(
     from .inference import RemoteValue
 
     encoder = Encoder(reg)
-    leaf = RemoteValue(address, arm, encoder, merge=merge)
+    leaf = RemoteValue(address, arm, encoder)
     # The Rust server holds the nets as `.rnet` files named for the `.pt` they came from
     # (IKA-461), so the files are told apart by stem.
     wanted = [Path(v).stem for v in values]
@@ -783,81 +680,45 @@ def served_q(address: str, q_path: Path, encoder: Any, *, arm: str = "q") -> Any
     return q
 
 
-def served_process_leaf(reg: Regulation, address: str, arm: str, merge: bool) -> Any:  # noqa: ANN401
-    """`process_leaf` for a deepening worker process when the agent's leaf is served
-    (IKA-363): the same server arm, its own connection, no CUDA context."""
+def served_process_leaf(reg: Regulation, address: str, arm: str) -> Any:  # noqa: ANN401
+    """The leaf of a deepening worker process (`deepen.start_workers`): the same server arm, its
+    own connection, no CUDA context."""
     from .encode import Encoder
     from .inference import RemoteValue
 
-    return RemoteValue(address, arm, Encoder(reg), merge=merge)
-
-
-#: Ladder workers with a leaf and a Q of their own (no inference server), at most: each
-#: holds torch, a CUDA context and both models (IKA-363: 1.3-1.4 GB of RSS a process).
-LADDER_LOCAL_WORKERS_MAX = AHEAD_WORKERS_MAX
+    return RemoteValue(address, arm, Encoder(reg))
 
 
 def ladder_process_leaf(reg: Regulation, kind: str, *args: Any) -> Any:  # noqa: ANN401
     """A ladder worker's leaf, with the Q its children's menus are ranked by installed
-    (`ladder.start_pool`, IKA-364). ``kind``:
-
-    * ``served`` (address, arm, merge, Q path or None, Q arm): the machine's inference
-      server's arms (IKA-363); the worker imports no torch;
-    * ``local`` (values, device, graphs, CUDA cap, Q path or None): the files loaded here
-      (`process_leaf`, `qrank.LocalQ`);
-    * ``hp-share``: no leaf, no Q."""
+    (`ladder.start_pool`, IKA-364). ``kind`` is ``served`` (address, arm, Q path or None,
+    Q arm): the machine's inference server's arms; the worker imports no torch."""
     from . import qrank
     from .encode import Encoder
+    from .inference import RemoteValue
 
-    if kind == "served":
-        from .inference import RemoteValue
-
-        address, arm, merge, q_path, q_arm = args
-        encoder = Encoder(reg)
-        leaf = RemoteValue(address, arm, encoder, merge=merge)
-        if q_path is not None:
-            qrank.install(qrank.RemoteQ(address, q_arm, encoder))
-        return leaf
-    if kind == "local":
-        values, device, graphs, cuda_memory_gb, q_path = args
-        leaf = process_leaf(reg, values, device, graphs, cuda_memory_gb)
-        if q_path is not None:
-            qrank.install(qrank.LocalQ(Path(q_path), Encoder(reg), device=device))
-        return leaf
-    if kind == "hp-share":
-        return HP_SHARE.batch
-    raise ValueError(f"a ladder worker's leaf is served, local or hp-share, not {kind!r}")
+    if kind != "served":
+        raise ValueError(f"a ladder worker's leaf is the server's, not {kind!r}")
+    address, arm, q_path, q_arm = args
+    encoder = Encoder(reg)
+    leaf = RemoteValue(address, arm, encoder)
+    if q_path is not None:
+        qrank.install(qrank.RemoteQ(address, q_arm, encoder))
+    return leaf
 
 
-def ladder_spec(  # noqa: PLR0913 - what a tool loaded its leaf and Q from
-    *, leaf: Any, address: str | None, merge: bool, values: Sequence[Any] | None,  # noqa: ANN401
-    device: str | None, graphs: bool, cuda_memory_gb: float, q_path: Any,  # noqa: ANN401
-) -> tuple[Any, ...]:
-    """`ladder_process_leaf`'s arguments for a tool's leaf (None: hp-share) and Q path
-    (None: no Q): the server's arms when ``address`` is given, else the same files here."""
-    if leaf is None:
-        return ("hp-share",)
-    q = None if q_path is None else str(q_path)
-    if address:
-        return ("served", address, "value", merge, q, "q")
-    return ("local", [str(v) for v in values or ()], str(device or "cpu"), graphs,
-            cuda_memory_gb, q)
+def ladder_spec(*, address: str, q_path: Any) -> tuple[Any, ...]:  # noqa: ANN401
+    """`ladder_process_leaf`'s arguments for the server's arms and a Q path (None: no Q)."""
+    return ("served", address, "value", None if q_path is None else str(q_path), "q")
 
 
 def use_ladder_pool(threads: int, reg: Regulation, spec: tuple[Any, ...] | None) -> int:
     """Read a ladder's cells on ``threads`` cores (IKA-364): ``threads - 1`` worker
     processes (`ladder.start_pool`), each with the leaf `ladder_process_leaf(reg, *spec)`,
-    the reader the one left. With a leaf of their own (``local``) at most
-    `LADDER_LOCAL_WORKERS_MAX`; 1 or no ``spec`` reads every cell here. Returns the
-    workers."""
+    the reader the one left. 1 or no ``spec`` reads every cell here. Returns the workers."""
     from . import ladder
 
-    if spec is None or threads <= 1:
-        wanted = 0
-    elif spec[0] == "local":
-        wanted = min(threads - 1, LADDER_LOCAL_WORKERS_MAX)
-    else:
-        wanted = threads - 1
+    wanted = 0 if spec is None or threads <= 1 else threads - 1
     # IKA-370: the count of workers named apart from the threads (a measurement's knob).
     named = os.environ.get("POKEURAOU_LADDER_WORKERS")
     if wanted and named:
@@ -871,17 +732,16 @@ def use_threads(
     threads: int,
     reg: Regulation | None = None,
     leaf: tuple[Any, ...] | None = None,
-    factory: Any = None,  # noqa: ANN401 - a module-level function, as `process_leaf`
+    factory: Any = served_process_leaf,  # noqa: ANN401 - a module-level function
 ) -> None:
     """Spread one move over `threads` cores (IKA-32): the port's cell pool (stage 1), the
     deepening's cells expanded ahead and a big game's two LPs at once (stage 2). With
-    `reg` and `leaf` (`process_leaf`'s files, device, graphs and optionally the CUDA
-    cap) the cells ahead are
-    expanded by ``threads - 1`` worker processes (at most `AHEAD_WORKERS_MAX`), each with
-    its own leaf, port and GIL; without, by helper threads in this process. None of them
-    changes a move -- only how long it takes -- so a game on the count clock is the same
-    game at any count; 1 turns them all off. ``factory`` builds a worker's leaf from
-    ``leaf`` in place of `process_leaf` (`served_process_leaf` for a served leaf)."""
+    `reg` and `leaf` (the arguments of ``factory``: the server's address and arm) the cells
+    ahead are expanded by ``threads - 1`` worker processes (at most `AHEAD_WORKERS_MAX`), each
+    with its own connection, port and GIL; without, by helper threads in this process. None of
+    them changes a move -- only how long it takes -- so a game on the count clock is the same
+    game at any count; 1 turns them all off. ``factory`` builds a worker's leaf from ``leaf``
+    (`served_process_leaf`)."""
     from . import deepen, equilibrium, rustnode
 
     if threads < 1:
@@ -891,7 +751,7 @@ def use_threads(
     if reg is not None:
         wanted = 0 if threads == 1 or leaf is None else min(threads - 1, AHEAD_WORKERS_MAX)
         if deepen.workers(reg) != wanted:
-            deepen.start_workers(reg, wanted, factory or process_leaf, tuple(leaf or ()),
+            deepen.start_workers(reg, wanted, factory, tuple(leaf or ()),
                                  port_threads=1)
     # Without worker processes: two helper threads from four cores up, each with a port of
     # `threads` cell threads (the helpers' Python and the loop's LPs share one GIL, so more
@@ -2974,7 +2834,6 @@ __all__ = [
     "WallCost",
     "agent_pick",
     "board_view",
-    "cap_cuda",
     "default_threads",
     "sprite_id",
     "species_types",

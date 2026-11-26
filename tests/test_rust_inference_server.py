@@ -478,33 +478,22 @@ def test_a_q_arm_on_fuzzed_positions(reg, encoder, q_served):
     assert worst < 5e-6, worst
 
 
-def test_start_server_is_the_rust_server_unless_asked_for_python(encoder, tmp_path, monkeypatch):
-    """IKA-461: the default of every tool that starts a server is the Rust one; `python=True`
-    and POKEURAOU_PYTHON_SERVER=1 are the ways back."""
+def test_start_server_is_the_rust_server(encoder, tmp_path):
+    """IKA-461, IKA-460: the only server `inference.start_server` starts is the Rust one."""
     from pokeuraou.inference import start_server
     from pokeuraou.value import save_model
 
     net = _net(encoder, CONFIGS["bind"], seed=3)
     pt = tmp_path / "v.pt"
     save_model(pt, net, net.state_dict(), encoder.vocab, CONFIGS["bind"], {})
-    started = []
+    process, address = start_server(
+        {"value": [pt]}, regulation=FORMAT_ID, log=tmp_path / "log" / "s.log",
+    )
     try:
-        for python, env in ((False, None), (True, None), (False, "1")):
-            if env:
-                monkeypatch.setenv("POKEURAOU_PYTHON_SERVER", env)
-            process, address = start_server(
-                {"value": [pt]}, regulation=FORMAT_ID, log=tmp_path / f"log{len(started)}" / "s.log",
-                python=python,
-            )
-            started.append(process)
-            args = " ".join(str(a) for a in process.args)
-            assert ("inference_server.py" in args) == (python or bool(env)), args
-            assert ("inference-server" in args) == (not python and not env), args
-            assert _ask(address, {"op": "ping"})["models"] == ["value"]
-            process.terminate()
+        assert "inference-server" in " ".join(str(a) for a in process.args)
+        assert _ask(address, {"op": "ping"})["models"] == ["value"]
     finally:
-        for process in started:
-            process.terminate()
+        process.terminate()
 
 
 def test_describe_q_and_a_missing_q_arm(q_served):

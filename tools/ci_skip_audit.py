@@ -30,7 +30,6 @@ file that decides what CI provides is also the file that lists what it does not.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -168,16 +167,9 @@ CLASSES: tuple[Class, ...] = (
     Class(
         "cuda",
         re.compile(r"CUDA graphs need a card"),
-        "a CUDA card; the server's CUDA-graph replays (IKA-291) have nothing to replay on "
+        "a CUDA card; the Rust inference server's tests (IKA-461) have nothing to run on "
         "without one, and GitHub's runner has none",
         probe=_cuda_present,
-    ),
-    Class(
-        "cpu-batch",
-        re.compile(r"CPU kernels let a row's answer depend on its batch"),
-        "a CPU whose torch kernels keep a row's answer independent of its batch; the "
-        "AVX512 box does, GitHub's runner does not (IKA-51)",
-        probe=lambda: not os.environ.get("POKEURAOU_CPU_BATCH_VARIES"),
     ),
     Class(
         "fixtures",

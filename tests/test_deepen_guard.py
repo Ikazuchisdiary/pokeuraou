@@ -226,7 +226,7 @@ def test_the_childrens_q_needs_a_q(roster) -> None:  # noqa: ANN001
 
 
 def test_a_served_batch_is_one_round_trip(roster) -> None:  # noqa: ANN001
-    from pokeuraou.inference import serve
+    from ._served import serve
 
     reg = roster.reg
     encoder = Encoder(reg)

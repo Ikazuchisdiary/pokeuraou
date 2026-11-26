@@ -17,16 +17,223 @@ no torch and no GPU, so the search and the game's roads run in CI.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+import contextlib
+import json
+import socketserver
+import sys
+import threading
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from multiprocessing import shared_memory
 from typing import Any
 
 import numpy as np
 
 from pokeuraou.encode import HP_SCALE, Encoded, Encoder
-from pokeuraou.inference import RemoteValue, serve
+from pokeuraou.inference import RemoteValue, is_out_of_memory
+from pokeuraou.workqueue import SERVER_OOM_MARK
 
 _ARRAYS = ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
+
+
+def _views(buffer: memoryview, layout: Sequence[dict[str, Any]]) -> dict[str, np.ndarray]:
+    out: dict[str, np.ndarray] = {}
+    for item in layout:
+        start = int(item["offset"])
+        stop = start + int(item["nbytes"])
+        out[item["name"]] = np.frombuffer(
+            buffer[start:stop], dtype=np.dtype(item["dtype"])
+        ).reshape(tuple(item["shape"]))
+    return out
+
+
+class _Handler(socketserver.StreamRequestHandler):
+    """One connection of the stand-in server: the protocol of the Rust inference server
+    (`pokeuraou-damage inference-server`) as a test needs it. The Python server this was cut
+    from (IKA-460 step 2) is gone; its ``merge`` road and its CUDA graphs never were the Rust
+    server's."""
+
+    def handle(self) -> None:
+        attached: dict[str, shared_memory.SharedMemory] = {}
+        server = self.server
+        try:
+            for raw in self.rfile:
+                line = raw.decode("utf-8").strip()
+                if not line:
+                    continue
+                request = json.loads(line)
+                try:
+                    reply = self._serve(request, attached)
+                except Exception as error:  # noqa: BLE001 -- reported, never fatal
+                    reply = {"ok": False, "error": f"{type(error).__name__}: {error}"}
+                    if is_out_of_memory(error):
+                        reply["oom"] = True
+                        reply["capGb"] = getattr(server, "memory_cap_gb", None)
+                        server.note_oom(request.get("op"), reply["error"])  # type: ignore[attr-defined]
+                self.wfile.write((json.dumps(reply) + "\n").encode("utf-8"))
+                self.wfile.flush()
+        except (ConnectionError, OSError, json.JSONDecodeError):
+            pass
+        finally:
+            for block in attached.values():
+                with contextlib.suppress(OSError):
+                    block.close()
+
+    def _serve(self, request: dict[str, Any], attached: dict) -> dict[str, Any]:
+        server = self.server
+        op = request.get("op")
+        if op == "ping":
+            return {"ok": True, "models": sorted(server.models)}  # type: ignore[attr-defined]
+        if op == "describe":
+            return {
+                "ok": True,
+                "arms": {name: list(group) for name, group in server.arms.items()},  # type: ignore[attr-defined]
+            }
+        if op in ("q", "q_many", "q_batch", "describe_q"):
+            return _serve_q(server, request, attached)
+        if op not in ("score", "score_segments"):
+            raise ValueError(f"unknown op {op!r}")
+        name = request["model"]
+        models = server.models  # type: ignore[attr-defined]
+        if name not in models:
+            raise KeyError(f"no model named {name!r}; have {sorted(models)}")
+        handle = request["shm"]
+        if handle not in attached:
+            attached[handle] = shared_memory.SharedMemory(name=handle)
+        buffer = attached[handle].buf
+        arrays = _views(buffer, request["layout"])
+        rows = int(request["rows"])
+        model = models[name]
+        if op == "score_segments":
+            parts: list[np.ndarray] = []
+            at = 0
+            for size in request["segments"]:
+                size = int(size)
+                block = {key: value[at : at + size] for key, value in arrays.items()}
+                parts.append(np.asarray(model(block, size), dtype=np.float64))
+                at += size
+            if at != rows:
+                raise ValueError(f"segments add up to {at} rows, the request says {rows}")
+            scores = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float64)
+        else:
+            scores = model(arrays, rows)
+        out = int(request["result_offset"])
+        buffer[out : out + scores.nbytes] = scores.tobytes()
+        return {"ok": True, "rows": int(scores.shape[0])}
+
+
+def _serve_q(server: Any, request: dict[str, Any], attached: dict) -> dict[str, Any]:  # noqa: ANN401
+    name = request["model"]
+    q_models = getattr(server, "q_models", {})
+    if name not in q_models:
+        raise KeyError(f"no Q arm named {name!r}; have {sorted(q_models)}")
+    model = q_models[name]
+    if request["op"] == "describe_q":
+        return {"ok": True, "files": list(model.files), "fingerprint": model.fingerprint,
+                "properties": bool(model.properties),
+                "sha256": list(getattr(model, "digests", []))}
+    handle = request["shm"]
+    if handle not in attached:
+        attached[handle] = shared_memory.SharedMemory(name=handle)
+    buffer = attached[handle].buf
+    if request["op"] == "q_batch":
+        items = request["items"]
+        got = model.batch([_views(buffer, item["layout"]) for item in items])
+        for item, matrix in zip(items, got, strict=True):
+            if list(matrix.shape) != [int(n) for n in item["shape"]]:
+                raise ValueError(f"Q answered {matrix.shape}, asked {item['shape']}")
+            out = int(item["result_offset"])
+            buffer[out : out + matrix.nbytes] = np.ascontiguousarray(
+                matrix, dtype=np.float64
+            ).tobytes()
+        return {"ok": True}
+    for item in request["items"] if request["op"] == "q_many" else [request]:
+        matrix = model(_views(buffer, item["layout"]))
+        if list(matrix.shape) != [int(n) for n in item["shape"]]:
+            raise ValueError(f"Q answered {matrix.shape}, asked {item['shape']}")
+        out = int(item["result_offset"])
+        buffer[out : out + matrix.nbytes] = np.ascontiguousarray(
+            matrix, dtype=np.float64
+        ).tobytes()
+    return {"ok": True}
+
+
+class _Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, address, handler, models: dict, arms: dict | None = None) -> None:  # noqa: ANN001
+        super().__init__(address, handler)
+        self.models = models
+        self.q_models: dict = {}
+        self.arms = arms or {name: [] for name in models}
+        self.oom_replies = 0
+        self.memory_cap_gb: float | None = None
+        self._lock = threading.Lock()
+
+    def note_oom(self, op: Any, error: str) -> None:  # noqa: ANN401
+        with self._lock:
+            self.oom_replies += 1
+            count = self.oom_replies
+        cap = f"{self.memory_cap_gb:g} GB" if self.memory_cap_gb else "no cap"
+        print(f"  {SERVER_OOM_MARK} #{count} to a {op!r} request (cuda memory cap: {cap}): "
+              f"{' '.join(error.split())[:400]}", file=sys.stderr, flush=True)
+
+
+def served_q(
+    net: Any, device: Any, files: Sequence[str], digests: Sequence[str] = ()  # noqa: ANN401
+) -> Callable[..., np.ndarray]:
+    """A Q arm of the stand-in server on a torch net, eager (the Rust server's Q arm is
+    `tests/test_rust_inference_server.py`'s): (arrays) -> the N0 x N1 matrix, with ``batch``."""
+    from pokeuraou import qhead
+
+    def answer(arrays: dict[str, np.ndarray]) -> np.ndarray:
+        return qhead.q_matrix(net, arrays, device)
+
+    def batch(requests: list[dict[str, np.ndarray]]) -> list[np.ndarray]:
+        return qhead.q_matrices(net, requests, device)
+
+    answer.batch = batch  # type: ignore[attr-defined]
+    answer.fingerprint = net.vocab_fingerprint  # type: ignore[attr-defined]
+    answer.properties = bool(net.config.properties)  # type: ignore[attr-defined]
+    answer.files = list(files)  # type: ignore[attr-defined]
+    answer.digests = list(digests)  # type: ignore[attr-defined]
+    return answer
+
+
+def load_q_arms(paths: dict, device_name: str) -> dict[str, Any]:
+    """Each named Q arm, loaded on ``device_name``, as `served_q`."""
+    from pathlib import Path
+
+    import torch
+
+    from pokeuraou import qhead
+    from pokeuraou.qrank import file_sha256
+
+    device = torch.device(device_name)
+    return {
+        name: served_q(qhead.load_q(path, device_name), device, [Path(path).name],
+                       [file_sha256(path)])
+        for name, path in paths.items()
+    }
+
+
+def serve(
+    models: dict,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    arms: dict | None = None,
+    q_models: dict | None = None,
+) -> tuple[_Server, str]:
+    """Starts the stand-in server on a thread of this process. ``models`` maps a name to a callable
+    ``(arrays, rows) -> scores``; ``arms`` the names to the files `describe` reports;
+    ``q_models`` the Q arms (objects with ``files``, ``fingerprint``, ``properties``, a call on
+    the arrays and ``batch``)."""
+    server = _Server((host, port), _Handler, models, arms)
+    server.q_models = dict(q_models or {})
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    shown_host, shown_port = server.server_address[:2]
+    return server, f"{shown_host}:{shown_port}"
 
 
 def encoded_of(arrays: dict[str, np.ndarray]) -> Encoded:
