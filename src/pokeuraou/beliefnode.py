@@ -57,6 +57,7 @@ the port is available to be compared against.
 
 from __future__ import annotations
 
+import functools
 import itertools
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -292,6 +293,17 @@ def belief_payoffs(
     leaf = _stack_leaf(owner, rules)
     tickets: Iterator[int] | None = _TICKETS if leaf is not None else None
     ref_ticket = next(tickets) if tickets is not None else None
+    if leaf is not None:
+        from . import portlp
+
+        if portlp.NODE[0]:
+            done = _node_in_port(
+                reg, leaf, position, row, col, budget, rules, hidden, spreads, solve, scorer,
+                encoder,
+            )
+            if done is _NOT_ON_THIS_BINARY:
+                return _per_completion(reg, row, col, evaluate, budget, spreads)
+            return done
 
     with timing.region("belief.ref"):
         filled = port.ask(
@@ -786,6 +798,181 @@ def _served_in_port(  # noqa: PLR0913 - the node's pieces
             if desc.get("patch") is not None:
                 encoder.note("patched side=rebuilt", count)
     return _fold_answer(answer, jobs, m, n, asks)
+
+
+#: `_node_in_port`'s answer when the port encoded with another `can_mega` rule than asked.
+_NOT_ON_THIS_BINARY = object()
+
+
+def _action_features(reg: Regulation, actions: Sequence[SideAction]) -> list[dict]:
+    """What the port reads off each action (`beliefplan.rs`): whether it forces a switch
+    (`_phazes`), attacks (`_attacks`) and which party members its switches bring in."""
+    from .regulation import to_id
+
+    return [
+        {
+            "p": _phazes(reg, action),
+            "a": _attacks(reg, action),
+            "s": [[s.party_index, to_id(s.species)] for s in action.slots
+                  if isinstance(s, SwitchAction)],
+        }
+        for action in actions
+    ]
+
+
+def _node_in_port(  # noqa: PLR0913 - the node's pieces
+    reg: Regulation,
+    leaf,  # noqa: ANN001 - inference.RemoteValue
+    position: Position,
+    row: list[SideAction],
+    col: list[SideAction],
+    budget: Budget,
+    rules,  # noqa: ANN001 - EncodingRules
+    hidden: dict[int, tuple[int, ...]],
+    spreads: dict[int, list],
+    solve: Sequence[int],
+    scorer: Callable,
+    encoder,  # noqa: ANN001 - Encoder
+):  # noqa: ANN202 - a BeliefNode, or `_NOT_ON_THIS_BINARY`
+    """The whole node in the port (`beliefNode`, IKA-455 stage 1.4): what `belief_payoffs` does
+    from the reference fill to the folded matrices, in one crossing. Python sends the positions,
+    the actions and what it alone reads off them; the answer is the node."""
+    from types import SimpleNamespace
+
+    from . import portlp, rustnode
+    from .encode import HP_SCALE
+    from .inference import request_failed
+    from .rustnode import _candidates, _position, dump_budget  # noqa: PLC2701
+
+    ident = _id_of
+    request: dict = {"kind": "beliefNode", "position": _position(position)}
+    jobs = []
+    for side, items in spreads.items():
+        for item in items:
+            request[f"p{len(jobs)}"] = _position(item.position)
+            jobs.append({
+                "side": side,
+                "slots": list(hidden.get(side, ())),
+                "exact": bool(item.exact),
+                "root": item.position is position,
+                "pk": [[ident(mon.species), ident(mon.base_species), mon.slot]
+                       for mon in item.position.sides[side].pokemon],
+            })
+    request.update({
+        "ours": _candidates(row),
+        "theirs": _candidates(col),
+        "budget": dump_budget(budget),
+        "rows": len(row),
+        "cols": len(col),
+        "hidden": [list(hidden.get(0, ())), list(hidden.get(1, ()))],
+        "carded": [_red_card_on_field(position, 0), _red_card_on_field(position, 1)],
+        "rowFeat": _action_features(reg, row),
+        "colFeat": _action_features(reg, col),
+        "jobs": jobs,
+    })
+    if rules.mega_from_slots:
+        request["encoding"] = rules.to_request()
+    asks = []
+    for side in solve:
+        items = spreads.get(1 - side)
+        if items:
+            asks.append((side, np.asarray([item.weight for item in items], dtype=np.float64)))
+    request["solve"] = [{"side": side, "weights": portlp._b64(w)}  # noqa: SLF001
+                        for side, w in asks]
+    mon_k = {name: k for k, name in enumerate(encoder.mon_names)}
+    side_k = {name: k for k, name in enumerate(encoder.side_names)}
+    request["server"] = {
+        "address": leaf.address,
+        "model": leaf.model,
+        "shm": leaf._block.name,  # noqa: SLF001 - the leaf's own block, idle while the port asks
+        "bytes": int(leaf._block.size),  # noqa: SLF001
+        "batch": int(leaf.batch_size),
+        "merge": bool(leaf.merge),
+    }
+    request["netScoresEnds"] = bool(leaf.encoder.rules.net_scores_ends)
+    request["patch"] = {
+        "can_mega": mon_k["can_mega"],
+        "maxhp_scaled": mon_k["maxhp_scaled"],
+        "hp_fraction": mon_k["hp_fraction"],
+        "fainted": mon_k["fainted"],
+        "mega_used": side_k["mega_used"],
+        "mega_available": side_k["mega_available"],
+        "alive_fraction": side_k["alive_fraction"],
+        "team_hp_fraction": side_k["team_hp_fraction"],
+        "hp_scale": float(HP_SCALE),
+    }
+    started = timing.clock()
+    with timing.stage("rust.fill"):
+        answer = portlp._ask(reg, request)  # noqa: SLF001
+    wall = timing.clock() - started
+    if "error" in answer:
+        raise RuntimeError(f"`beliefNode`: {answer['error']}")
+    if "serverError" in answer:
+        raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
+                              "capGb": answer.get("capGb")}, "inference failed")
+    if "fills" not in answer:
+        raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
+    # What `fill_encoded` booked for each fill, booked from what the port says it did.
+    for fill in answer["fills"]:
+        with timing.purpose(fill["purpose"]):
+            what = "rust can_mega=" + {True: "slots", False: "holder", None: "unechoed"}[fill["mega"]]
+            if hasattr(encoder, "note"):
+                encoder.note(what, int(fill["leaves"]))
+            timing.add("rust.child.resolve", float(fill["resolveUs"]) / 1e6)
+            timing.add("rust.child.encode", float(fill["encodeUs"]) / 1e6)
+            timing.add("rust.child.bind", float(fill["bindUs"]) / 1e6)
+            timing.count("leaves.offered", int(fill.get("offered", 0)))
+            timing.count("leaves.stored", int(fill["leaves"]))
+            if fill["purpose"] == "dirty":
+                timing.count("leaves.node", int(fill["leaves"]))
+            if timing.ON:
+                used = timing.current_purpose()
+                timing.add(
+                    f"rust.child@{used}",
+                    (float(fill["resolveUs"]) + float(fill["encodeUs"])) / 1e6,
+                )
+                timing.count("fills")
+                timing.count("fill.cells", int(fill["cells"]))
+                timing.count("fill.leaves", int(fill["leaves"]))
+    timing.add("rust.fill@matrix", wall)
+    if "refused" in answer:
+        port.raise_refused([(int(i), int(j), str(why)) for i, j, why in answer["refused"]])
+    if rules.mega_from_slots and answer["mega"] is not True:
+        # A binary that predates the field encoded with the current rule (as `belief_payoffs`).
+        return _NOT_ON_THIS_BINARY
+    if "served" not in answer:
+        raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
+    served = answer["served"]
+    waited = float(served.get("waitUs", 0.0)) / 1e6
+    rustnode.PORT_WAITED[0] -= waited
+    requests, count = int(served.get("requests", 0)), int(served.get("rows", 0))
+    leaf.waited += waited
+    leaf.copied += float(served.get("copyUs", 0.0)) / 1e6
+    leaf.calls += requests
+    leaf.evaluated += count
+    leaf.ended += int(served.get("ended", 0))
+    timing.count("leaves", count)
+    timing.count("forward.passes", requests)
+    timing.count("serve.requests", requests)
+    portlp.COUNTS["stacked"] += 1
+    portlp.COUNTS["nodes"] += 1
+    if hasattr(encoder, "note"):
+        for rows in answer["patched"]:
+            encoder.note("patched side=rebuilt", int(rows))
+    unmodelled = set(answer["unmodelled"])
+    ordered = [SimpleNamespace(side=job["side"]) for job in jobs]
+    payoffs, solved = _fold_answer(answer, ordered, len(row), len(col), asks)
+    matrices: dict[int, list[np.ndarray]] = {}
+    for job, payoff in zip(ordered, payoffs, strict=True):
+        matrices.setdefault(1 - job.side, []).append(payoff)
+    return BeliefNode(matrices, unmodelled, int(answer["shared"]), int(answer["redone"]), solved)
+
+
+@functools.cache
+def _id_of(name: str) -> str:
+    from .regulation import to_id
+
+    return to_id(name)
 
 
 def _packed(spans: list) -> dict | None:

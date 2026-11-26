@@ -32,26 +32,27 @@
 //! cells that do not reach the side's own bench); one with `packed` carries its own spans.
 
 use crate::lp::{
-    b64_decode, f64s, f64s_text, fold_value, folded_cells, numpy_dot, solve_bayesian, unsolved_json, FoldTree,
+    b64_decode, f64s, f64s_text, fold_tree_from_value, fold_value, folded_cells, numpy_dot, solve_bayesian,
+    unsolved_json, FoldTree,
     GAMES, LPS,
 };
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 
 /// A node's span block, read once: every span's cell, leaves and weights.
-struct Spans {
-    rows: Vec<usize>,
-    cols: Vec<usize>,
-    starts: Vec<usize>,
-    lengths: Vec<usize>,
-    weights: Vec<f64>,
-    indices: Vec<usize>,
+pub(crate) struct Spans {
+    pub(crate) rows: Vec<usize>,
+    pub(crate) cols: Vec<usize>,
+    pub(crate) starts: Vec<usize>,
+    pub(crate) lengths: Vec<usize>,
+    pub(crate) weights: Vec<f64>,
+    pub(crate) indices: Vec<usize>,
 }
 
 impl Spans {
     /// The block `encoded_node::write_body` writes: weights (f64), then rows, columns and
     /// lengths (u32 each), then the leaf indices (u32), little-endian.
-    fn read(block: &[u8], count: usize, total: usize) -> Result<Spans, String> {
+    pub(crate) fn read(block: &[u8], count: usize, total: usize) -> Result<Spans, String> {
         let need = total * 8 + count * 12 + total * 4;
         if block.len() < need {
             return Err(format!("a span block of {} bytes for {count} spans of {total} leaves", block.len()));
@@ -126,6 +127,26 @@ fn trees(text: Option<&str>) -> Result<Vec<(usize, usize, FoldTree)>, String> {
     }
 }
 
+/// `trees` of a request's `folded`: the JSON text Python wrote, or (stage 1.4, where the port
+/// built the node itself) the header's own list of `[row, column, tree]`.
+fn trees_v(v: &Value) -> Result<Vec<(usize, usize, FoldTree)>, String> {
+    match v {
+        Value::String(text) => trees(Some(text)),
+        Value::Array(cells) => cells
+            .iter()
+            .map(|cell| {
+                let p = cell.as_array().filter(|p| p.len() == 3).ok_or("a folded cell is not [row, column, tree]")?;
+                Ok((
+                    p[0].as_u64().ok_or("a folded cell's row")? as usize,
+                    p[1].as_u64().ok_or("a folded cell's column")? as usize,
+                    fold_tree_from_value(&p[2])?,
+                ))
+            })
+            .collect(),
+        _ => Ok(Vec::new()),
+    }
+}
+
 fn put(part: &mut [f64], m: usize, n: usize, i: usize, j: usize, v: f64) -> Result<(), String> {
     if i >= m || j >= n {
         return Err("a cell outside its node".into());
@@ -159,7 +180,7 @@ fn fold_with(value: &Value, values: Vec<f64>) -> Result<Value, String> {
     let wanted = dirty.iter().any(|d| *d);
     let reference = &value["ref"];
     let ref_spans = Spans::of(reference)?;
-    let ref_folds = trees(reference["folded"].as_str())?;
+    let ref_folds = trees_v(&reference["folded"])?;
     // A cell's span and tree in the reference, as Python's dicts keep them (the last wins).
     let mut ref_span_at: Vec<Option<usize>> = vec![None; m * n];
     for s in 0..ref_spans.rows.len() {
@@ -211,7 +232,7 @@ fn fold_with(value: &Value, values: Vec<f64>) -> Result<Value, String> {
                         put(&mut part, m, n, spans.rows[s], spans.cols[s], spans.dot(s, at)?)?;
                     }
                 }
-                for (i, j, tree) in trees(own["folded"].as_str())? {
+                for (i, j, tree) in trees_v(&own["folded"])? {
                     put(&mut part, m, n, i, j, fold_value(&tree, at)?)?;
                 }
             }
@@ -239,7 +260,7 @@ fn fold_with(value: &Value, values: Vec<f64>) -> Result<Value, String> {
                         }
                     }
                 }
-                for (i, j, tree) in trees(entry["folded"].as_str())? {
+                for (i, j, tree) in trees_v(&entry["folded"])? {
                     put(&mut part, m, n, i, j, fold_value(&tree, at)?)?;
                 }
             }
@@ -352,6 +373,26 @@ pub fn hold(ticket: u64, clear: bool, encoded: &Encoded, header: &Value) {
             h.clear();
         }
         h.insert(ticket, Held { encoded: copy_of(encoded), decided });
+    });
+}
+
+/// `hold` for a fill the port made itself (stage 1.4): the arrays moved in, not copied.
+pub(crate) fn hold_owned(ticket: u64, clear: bool, encoded: Encoded, header: &Value) {
+    let rows = header["leaves"].as_u64().unwrap_or(0) as usize;
+    let mut decided = vec![f64::NAN; rows];
+    for pair in header["decided"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        if let (Some(i), Some(v)) = (pair.get(0).and_then(Value::as_u64), pair.get(1).and_then(Value::as_f64)) {
+            if (i as usize) < rows {
+                decided[i as usize] = v;
+            }
+        }
+    }
+    HELD.with(|h| {
+        let mut h = h.borrow_mut();
+        if clear {
+            h.clear();
+        }
+        h.insert(ticket, Held { encoded, decided });
     });
 }
 
@@ -515,7 +556,7 @@ pub fn belief_served(widths: &Widths, value: &Value) -> Value {
     }
 }
 
-fn served_node(widths: &Widths, value: &Value) -> Result<Value, Value> {
+pub(crate) fn served_node(widths: &Widths, value: &Value) -> Result<Value, Value> {
     let error = |e: String| json!({ "error": e });
     let server = crate::served::Server::from_json(&value["server"]).map_err(error)?;
     let net_scores_ends = value.get("netScoresEnds").and_then(Value::as_bool).unwrap_or(false);

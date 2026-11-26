@@ -333,6 +333,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
     print(f"  port LPs (POKEURAOU_GEN_PORT_LP): {'on' if portlp.GEN[0] else 'off'}, "
           f"folds (POKEURAOU_GEN_PORT_FOLD): {'on' if portlp.FOLD[0] else 'off'}, "
           f"stack (POKEURAOU_GEN_PORT_STACK): {'on' if portlp.STACK[0] else 'off'}, "
+          f"node (POKEURAOU_GEN_PORT_NODE): {'on' if portlp.NODE[0] else 'off'}, "
           f"{portlp.counts()}", file=sys.stderr)
     if ranks_out is not None:
         written = stats.get("rank_scores_bytes", 0)

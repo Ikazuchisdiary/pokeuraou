@@ -1213,6 +1213,10 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("beliefFold") => crate::beliefnode::belief_fold(&value),
         // IKA-455 stage 1.3: the same, with the leaves the port held stacked and scored by the
         // inference server here first (`beliefnode.rs`).
+        // IKA-455 stage 1.4: the whole node of a hidden bench in one request (`beliefplan.rs`).
+        Ok(value) if value["kind"].as_str() == Some("beliefNode") => {
+            crate::beliefplan::belief_node(reg, encoder, &value)
+        }
         Ok(value) if value["kind"].as_str() == Some("beliefServed") => {
             crate::beliefnode::belief_served(&encoder.widths, &value)
         }

@@ -935,9 +935,10 @@ class RustNode:
             timing.count("port.acts.defined", len(fresh))
         known = self._known
         for request in requests:
-            stored = request.get("position")
-            if stored.__class__ is _Stored and stored.key not in known:
-                _define(stored, known, lines)
+            # The position, and (IKA-455 stage 1.4) every completion's a `beliefNode` names.
+            for stored in request.values():
+                if stored.__class__ is _Stored and stored.key not in known:
+                    _define(stored, known, lines)
         return b"".join(lines)
 
     def _exchange(self, request: dict[str, Any]) -> dict[str, Any]:

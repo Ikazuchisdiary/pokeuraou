@@ -65,7 +65,8 @@ ON = [os.environ.get(ENV, "0").strip() == "1"]
 #: What went: crossings, games (`solve_many`), Bayesian games (`solve_bayesian_many`),
 #: sub-games folded in the port and given whole, and the LPs the port reports it solved (the
 #: positive control).
-COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps": 0, "stacked": 0}
+COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps": 0, "stacked": 0,
+          "nodes": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -125,6 +126,24 @@ def set_stack(on: bool) -> None:
 
 
 set_stack(STACK[0])
+
+NODE_ENV = "POKEURAOU_GEN_PORT_NODE"
+#: IKA-455 stage 1.4: whether a hidden bench's whole node is one request to the port -- the
+#: reference fill, the plan (which cells reach a bench, which completion borrows from which),
+#: each completion's own fill, the stack, the server's values, the fold and the games
+#: (`beliefnode.belief_payoffs`, `rust/src/beliefplan.rs` `beliefNode`). Off by default. On
+#: includes `STACK` (and so `FOLD` and `GEN`).
+NODE = [os.environ.get(NODE_ENV, "0").strip() == "1"]
+
+
+def set_node(on: bool) -> None:
+    """Turn stage 1.4 on or off in this process; on turns `STACK` on too."""
+    NODE[0] = bool(on)
+    if on:
+        set_stack(True)
+
+
+set_node(NODE[0])
 
 
 def _b64(a: np.ndarray) -> str:
@@ -325,6 +344,7 @@ def counts() -> dict[str, int]:
 
 
 __all__ = ["COUNTS", "ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "ON", "STACK", "STACK_ENV",
-           "bayesian_answer", "counts", "set_fold", "set_gen", "set_on", "set_stack",
+           "NODE", "NODE_ENV", "bayesian_answer", "counts", "set_fold", "set_gen", "set_node", "set_on",
+           "set_stack",
            "solve_bayesian_many",
            "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]
