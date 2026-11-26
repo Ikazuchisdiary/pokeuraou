@@ -686,7 +686,8 @@ def inference_address(given: str | None = None) -> str | None:
     except (OSError, ValueError) as problem:
         raise SystemExit(
             f"no inference server answers at {address!r} ({problem}); start one "
-            f"(tools/inference_server.py) or pass --inference local to read here"
+            f"(`pokeuraou-damage inference-server`, IKA-461; or tools/inference_server.py) or "
+            f"pass --inference local to read here"
         ) from None
     return address
 

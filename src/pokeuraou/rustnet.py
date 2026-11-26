@@ -230,11 +230,17 @@ def server_command(
     if not exe.exists():
         raise SystemExit(f"{exe} is not built: cd rust && cargo build --release")
     command = [str(exe), "inference-server", "--regulation", str(regulation_dir() / f"{regulation}.json")]
-    for name, files in arms.items():
-        rnets = [ensure_exported(f, regulation, Path(out_dir) / "rnet") for f in files]
-        command += ["--arm", name, *map(str, rnets)]
-    for name, file in q_arms.items():
-        command += ["--q-arm", name, str(ensure_exported_q(file, Path(out_dir) / "rnet"))]
+    try:
+        for name, files in arms.items():
+            rnets = [ensure_exported(f, regulation, Path(out_dir) / "rnet") for f in files]
+            command += ["--arm", name, *map(str, rnets)]
+        for name, file in q_arms.items():
+            command += ["--q-arm", name, str(ensure_exported_q(file, Path(out_dir) / "rnet"))]
+    except ValueError as problem:
+        raise SystemExit(
+            f"the Rust inference server cannot take this net: {problem}. "
+            "Use the Python server (--python-server)."
+        ) from None
     spec = importlib.util.find_spec("torch")
     if spec and spec.origin and not os.environ.get("POKEURAOU_CUDA_DLLS"):
         lib = Path(spec.origin).parent / "lib"

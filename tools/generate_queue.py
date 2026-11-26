@@ -162,12 +162,15 @@ def main() -> None:
         "configuration that loses to not serving at all.",
     )
     ap.add_argument(
-        "--rust-server",
+        "--python-server",
         action="store_true",
-        help="IKA-461, off by default: the value arm and the Q arm are answered by "
-        "`pokeuraou-damage inference-server` (the nets exported as .rnet files, run on the card "
-        "by cudarc) instead of tools/inference_server.py. Needs --served and one --value file; "
-        "the answers differ from torch's by float32 noise (about 3e-7).",
+        help="with --served, the servers are tools/inference_server.py (Python, torch). Without "
+        "it (IKA-461) the value arm and the Q arm are answered by `pokeuraou-damage "
+        "inference-server` (the nets exported as .rnet files, run on the card by cudarc): 2,040 "
+        "against 1,372 games/min in 16 ABBA runs, the answers within float32 noise of torch's "
+        "(about 3e-7), and SPRT(-10, 0) H1 on the board. The Rust server takes one --value file "
+        "and a CUDA device; a net it does not implement (attention, move properties) stops the "
+        "launcher and asks for this flag.",
     )
     ap.add_argument(
         "--selection-book",
@@ -344,7 +347,7 @@ def main() -> None:
         server_log.mkdir(parents=True, exist_ok=True)
         for index in range(args.servers):
             errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
-            if args.rust_server:
+            if not args.python_server and args.device == "cuda":
                 # IKA-461: the value arm and the Q arm both in the Rust server.
                 from pokeuraou.rustnet import server_command
                 from pokeuraou.teams import load_roster

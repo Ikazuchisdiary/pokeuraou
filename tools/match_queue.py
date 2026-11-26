@@ -166,11 +166,13 @@ def main() -> None:
         "--servers, which decides whether this is faster or slower than not using it.",
     )
     ap.add_argument(
-        "--rust-server",
+        "--python-server",
         action="store_true",
-        help="IKA-461, off by default: every value arm and Q arm is answered by "
-        "`pokeuraou-damage inference-server` (the nets exported as .rnet files) instead of "
-        "tools/inference_server.py. Needs --served and --pool.",
+        help="with --served, the servers are tools/inference_server.py (Python, torch). Without "
+        "it (IKA-461) an M-C pool match (--pool, CUDA) has every value arm and Q arm answered by "
+        "`pokeuraou-damage inference-server` (the nets exported as .rnet files): 2,040 against "
+        "1,372 games/min in generation's shape, and SPRT(-10, 0) H1 against the Python server on "
+        "this board. A match without --pool has no format to export for and is Python's.",
     )
     for flag in ("--tested-server", "--baseline-server"):
         ap.add_argument(
@@ -479,7 +481,8 @@ def main() -> None:
             qs = {name: model for name, model in args.q_model_named}
             if args.q_model is not None:
                 qs["q"] = str(args.q_model)
-            served_at = launch("rust" if args.rust_server else "python", arms, qs, "", args.servers)
+            rust = not args.python_server and pool_regulation is not None and args.device == "cuda"
+            served_at = launch("rust" if rust else "python", arms, qs, "", args.servers)
         print(f"  inference: {', '.join(served_at)}"
               + (f"; baseline arm: {', '.join(baseline_at)}" if baseline_at else "")
               + " (workers hold no model)", file=sys.stderr, flush=True)
