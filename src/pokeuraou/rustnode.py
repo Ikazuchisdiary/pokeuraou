@@ -775,6 +775,8 @@ class RustNode:
         self._acts: set[int] = set()
         #: IKA-458 stage 3.4: the games (`hiddenstep.Game`) this process has been given.
         self._games: set[int] = set()
+        #: IKA-458 stage 3.5: the pools (`prepgame.PoolDefinition`) this process has been given.
+        self._pools: set[int] = set()
 
     def close(self) -> None:
         if self._process.poll() is None:
@@ -989,6 +991,15 @@ class RustNode:
                 self._games.clear()
             self._process.stdin.write(game.line)
             self._games.add(game.number)
+        return self._exchange(request)
+
+    @timing.timed("rust.prep")
+    def prep_game(self, request: dict[str, Any], pool: Any) -> dict[str, Any]:  # noqa: ANN401
+        """IKA-458 stage 3.5: a game's preparation (`prepGame`), the pool's teams and pairs
+        defined first if this process has not been given them."""
+        if pool.number not in self._pools:
+            self._process.stdin.write(pool.line)
+            self._pools.add(pool.number)
         return self._exchange(request)
 
     @timing.timed("rust.lp")

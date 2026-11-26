@@ -26,27 +26,28 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-struct SheetSet {
-    species: String,
-    ability: String,
-    item: Option<String>,
-    nature: String,
-    sp: [i64; 6],
-    moves: Vec<String>,
+#[derive(Clone)]
+pub(crate) struct SheetSet {
+    pub(crate) species: String,
+    pub(crate) ability: String,
+    pub(crate) item: Option<String>,
+    pub(crate) nature: String,
+    pub(crate) sp: [i64; 6],
+    pub(crate) moves: Vec<String>,
 }
 
-struct Prior {
-    selections: Vec<Vec<usize>>,
-    probabilities: Vec<f64>,
+pub(crate) struct Prior {
+    pub(crate) selections: Vec<Vec<usize>>,
+    pub(crate) probabilities: Vec<f64>,
     /// The sheet's species as ids, in the order `selections` indexes.
-    species: Vec<String>,
+    pub(crate) species: Vec<String>,
 }
 
-struct Game {
-    sheets: [Vec<SheetSet>; 2],
-    priors: [Option<Prior>; 2],
+pub(crate) struct Game {
+    pub(crate) sheets: [Vec<SheetSet>; 2],
+    pub(crate) priors: [Option<Prior>; 2],
     /// The Pokemon a set makes in a party slot, built once (`_make_pokemon`).
-    made: HashMap<(usize, usize, usize), Rc<Pokemon>>,
+    pub(crate) made: HashMap<(usize, usize, usize), Rc<Pokemon>>,
 }
 
 thread_local! {
@@ -56,7 +57,7 @@ thread_local! {
 /// Past this many games the table starts again (a bound; a worker plays one at a time).
 const GAMES_MAX: usize = 16;
 
-fn sheet_set(value: &Value) -> SheetSet {
+pub(crate) fn sheet_set(value: &Value) -> SheetSet {
     let mut sp = [0i64; 6];
     for (index, name) in STAT_IDS.iter().enumerate() {
         sp[index] = value["sp"].get(*name).and_then(Value::as_i64).unwrap_or(0);
@@ -101,6 +102,11 @@ pub fn define_game(value: &Value) {
         priors: [prior(&value["priors"][0]), prior(&value["priors"][1])],
         made: HashMap::new(),
     };
+    insert_game(id, game);
+}
+
+/// A game under the caller's number: the table starts again past `GAMES_MAX`.
+pub(crate) fn insert_game(id: u64, game: Game) {
     GAMES.with(|games| {
         let mut games = games.borrow_mut();
         if games.len() >= GAMES_MAX {
@@ -195,7 +201,7 @@ fn bench_weights(
 }
 
 /// `selfplay._make_pokemon`: a fresh Pokemon from a set, at full health, in party slot `slot`.
-fn make_pokemon(reg: &Reg, set: &SheetSet, slot: usize) -> Result<Pokemon, String> {
+pub(crate) fn make_pokemon(reg: &Reg, set: &SheetSet, slot: usize) -> Result<Pokemon, String> {
     let species = reg
         .species
         .get(&crate::id::Id::new(&set.species))

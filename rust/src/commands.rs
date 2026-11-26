@@ -690,6 +690,29 @@ fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String
     Ok(out)
 }
 
+/// The leads' switch-ins of a turn-1 position, each draw they open answered by `draw` (the
+/// weights in, the index out) and the phase replayed with the answers so far: what
+/// `RustNode._phase` does over the pipe, here in one go (IKA-458 stage 3.5).
+pub fn lead_phase(
+    reg: &Reg,
+    position: Position,
+    mut draw: impl FnMut(&[f64]) -> Result<usize, String>,
+) -> Result<Position, String> {
+    if &*position.format != reg.format_id.as_str() {
+        return Err("position is for another regulation".into());
+    }
+    let mut presets: Vec<usize> = Vec::new();
+    loop {
+        let value = json!({ "presets": presets });
+        let (after, _notes, opened, _log) =
+            phase_position(reg, position.clone(), &value, Phase::Leads, [Vec::new(), Vec::new()])?;
+        match opened.first() {
+            Some(weights) if !weights.is_empty() => presets.push(draw(weights)?),
+            _ => return Ok(after),
+        }
+    }
+}
+
 /// The phase's position, its notes, the draws it opened and its trace: `phase_command`'s
 /// answer before it is written out (IKA-350: `replacements_encoded` encodes it instead).
 type Phased = (Position, std::collections::BTreeSet<String>, Vec<Vec<f64>>, Option<Box<EventLog>>);

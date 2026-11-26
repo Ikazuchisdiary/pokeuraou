@@ -1252,8 +1252,13 @@ def play_game(
     eq_select: str | tuple[str, str] = DEFAULT_EQ_SELECT,
     force_mega: str | None | tuple[str | None, str | None] = None,
     hold_baton: str | None | tuple[str | None, str | None] = None,
+    hidden_game: Any = None,  # noqa: ANN401 - a `hiddenstep.Game` the port already holds
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
+
+    ``hidden_game`` (IKA-458 stage 3.5) is this game's sheets and priors as the port made them
+    when it prepared the game (`prepgame`), for `hiddenStep` to read there; None has this call
+    define them to the port from ``sheets`` and ``bench_prior``.
 
     ``search_limit`` may be a pair, giving each side its own number of candidates. Equal
     values are the training setting; an unequal pair is a diagnostic -- if one side wins
@@ -1566,7 +1571,8 @@ def play_game(
     # marked, and the next decision's belief offered worlds without it -- 15.8% of the
     # move decisions and 23.6% of the replacements in the shipping pool (IKA-117).
     seen: list[frozenset[str]] = [frozenset(), frozenset()]
-    hidden_game = None  # IKA-458 stage 3.4: this game's sheets and priors, numbered for the port
+    # IKA-458 stage 3.4: this game's sheets and priors, numbered for the port (stage 3.5: the
+    # port may have made them itself, and the caller says so).
     # Which two each side led with, read off the turn-1 position and carried as names for
     # the same reason `seen` is (IKA-118). The bench belief conditions on it: a selection
     # is ordered, and one that brought a lead but planned it for the back is not what this

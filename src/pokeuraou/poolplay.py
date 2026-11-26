@@ -53,7 +53,7 @@ from typing import Any
 
 import numpy as np
 
-from . import rank_scores, timing
+from . import prepgame, rank_scores, timing
 from .actions import BATON_MOVE, baton_slots
 from .deepen import DEFAULT_DEEPEN
 from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select
@@ -128,6 +128,9 @@ class SolvedSelections:
     tag: str = ""
     #: Pairs read from `store` that another worker (or an earlier run) had solved.
     loaded: int = 0
+    #: The pairs this process solved itself (IKA-458 stage 3.5: the port reads the files, and
+    #: counts a pair read from one of them as loaded only if another process wrote it).
+    solved_pairs: set[tuple[int, int]] = field(default_factory=set)
     _kept: dict[tuple[int, int], BookEntry] = field(default_factory=dict)
 
     @timing.timed("selection.solve")
@@ -167,6 +170,7 @@ class SolvedSelections:
         entry = self._read(lo, hi) if self.memo else None
         if entry is None:
             entry = self._solve(lo, hi)
+            self.solved_pairs.add((lo, hi))
             if self.memo:
                 self._write(lo, hi, entry)
         if self.memo:
@@ -354,14 +358,21 @@ def generate_pool(
         raise ValueError("pairs must be a non-empty subset of pool.pairs")
     size = reg.meta.picked_team_size
 
-    def scheduled() -> Iterator[tuple[int | None, np.random.Generator]]:
+    # IKA-458 stage 3.5: the port prepares each game of a queue (`prepgame`); its generator is
+    # one object whose state the preparation sets, and a game it declines gets its own below.
+    prepare_in_port = (
+        selection == SOLVED and indices is not None and solver is not None and prepgame.usable()
+    )
+    shared_rng = np.random.Generator(np.random.PCG64(0)) if prepare_in_port else None
+
+    def scheduled() -> Iterator[tuple[int | None, np.random.Generator | None]]:
         if indices is None:
             rng = np.random.default_rng(seed)
             for _ in range(games):
                 yield None, rng
         else:
             for index in indices:
-                yield index, np.random.default_rng([seed, index])
+                yield index, None if prepare_in_port else np.random.default_rng([seed, index])
 
     out.parent.mkdir(parents=True, exist_ok=True)
     stats: dict[str, Any] = {
@@ -383,18 +394,40 @@ def generate_pool(
         stats["rank_scores_repaired"] = writer.repaired
     with out.open("a", encoding="utf-8") as handle:
         for index, rng in scheduled():
-            k, a, b = draw_pair(rng, drawn_from)
-            if pairs is not None:
-                k = every.index((min(a, b), max(a, b)))
+            started = time.perf_counter()
+            prepared = None
+            # IKA-458 stage 3.5: the pair, the four, the priors and the start position from the
+            # port, where `portlp.PREP` is on; a game it declines is prepared here as before.
+            if rng is None:
+                assert solver is not None and index is not None
+                with timing.stage("selection"):
+                    prepared = prepgame.prepare(
+                        reg, pool, solver, seed=seed, index=index,
+                        pairs=None if pairs is None else drawn_from, hide_bench=hide_bench,
+                        epsilon=explore_epsilon, temperature=explore_temperature,
+                    )
+                if prepared is None:
+                    rng = np.random.default_rng([seed, index])
+                else:
+                    rng = shared_rng
+                    prepared.apply(rng)
+            if prepared is not None:
+                k, a, b = prepared.pair, *prepared.teams
+            else:
+                k, a, b = draw_pair(rng, drawn_from)
+                if pairs is not None:
+                    k = every.index((min(a, b), max(a, b)))
             team0, team1 = pool.teams[a], pool.teams[b]
             six0, six1 = list(team0.sets), list(team1.sets)
             mirror = a == b
             drawn = None
             priors: tuple[BenchPrior | None, BenchPrior | None] | None = None
-            started = time.perf_counter()
             # IKA-258: the stretch before a game's first decision had no row of its own.
             with timing.stage("selection"):
-                if selection == SOLVED:
+                if prepared is not None:
+                    pick0, pick1 = prepared.picks
+                    priors = prepared.priors
+                elif selection == SOLVED:
                     assert solver is not None
                     entry = solver.entry(a, b)
                     drawn = entry.draw(
@@ -439,9 +472,17 @@ def generate_pool(
                         tuple(pick0),
                         tuple(pick1),
                     ),
+                    start=None if prepared is None else prepared.position,
+                    hidden_game=None if prepared is None else prepared.game,
                 )
             record.selection_source = selection
-            if drawn is not None:
+            if prepared is not None:
+                record.own_selection_policy = prepared.own_policy
+                record.foe_selection_policy = prepared.foe_policy
+                record.own_selection_mixture = prepared.own_mixture
+                record.foe_selection_mixture = prepared.foe_mixture
+                record.selection_value = prepared.value
+            elif drawn is not None:
                 record.own_selection_policy = [float(x) for x in drawn.our_equilibrium]
                 record.foe_selection_policy = [float(x) for x in drawn.foe_equilibrium]
                 record.own_selection_mixture = [float(x) for x in drawn.our_mixture]

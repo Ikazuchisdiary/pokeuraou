@@ -1196,6 +1196,13 @@ fn answer<R: BufRead, W: Write>(
             crate::hiddenbench::define_game(&value);
             return Ok(());
         }
+        // IKA-458 stage 3.5: a pool's teams and pairs, once; not answered.
+        Ok(value) if value["kind"].as_str() == Some("poolDefine") => {
+            crate::prep::define_pool(&value);
+            return Ok(());
+        }
+        // IKA-458 stage 3.5: a game's pair, picks, priors and start position in one request.
+        Ok(value) if value["kind"].as_str() == Some("prepGame") => crate::prep::prep_game(reg, &value),
         // IKA-458 stage 3.4: what each side has shown and the positions its unseen slots could hold.
         Ok(value) if value["kind"].as_str() == Some("hiddenStep") => {
             crate::hiddenbench::hidden_step(reg, &value)

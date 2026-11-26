@@ -55,7 +55,9 @@ ika429-cache-control = []
 serde = { version = "1", features = ["derive"] }
 # `raw_value` (IKA-347): `encode-games` reads floats from their text, because the default
 # float parser is not correctly rounded and the training arrays must be the bytes Python wrote.
-serde_json = { version = "1", features = ["raw_value"] }
+# `float_roundtrip` (IKA-458 stage 3.5): a decimal read back exactly, for the selection solves'
+# files (the strategies are Python's `repr` of a float); without it a read can be one ulp off.
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 
 [build-dependencies]
 # IKA-381: builds vendor/HiGHS (1.12.0, scipy's commit) for the LP in src/lp.rs (build.rs).
