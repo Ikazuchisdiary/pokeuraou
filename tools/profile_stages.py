@@ -43,8 +43,11 @@ and everything below it. Two numbers come back for every stage:
     wall   summed over every process that reported. On eight workers this is about eight
            times the run's own clock, and that is the point -- a share of it is a share of
            the machine, which is what a speed-up would be buying
-    cpu    `thread_time`, quantised at 15.625 ms on Windows. Read it to tell a stage that
-           is burning CPU from one that is blocked on another process, not for its value
+    cpu    the thread's CPU seconds from `pokeuraou.timing.thread_cpu`: `thread_time` off
+           Windows, and on Windows the thread's cycle count over a calibrated rate, because
+           `thread_time` moves in 15.625 ms steps there and puts them on the short rows
+           after a wait (IKA-452, IKA-454). A row whose CPU a call is above its wall a call
+           is printed as a clock warning after the table
 
 The CPU seconds of the process tree are polled here rather than taken from the reports,
 because a report is written at exit and a child that has already been reaped reports
@@ -73,6 +76,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from pokeuraou.benchflags import add_bench_flags, bench_argv, require_bench  # noqa: E402
 from pokeuraou.timing import (  # noqa: E402
     BORROWED,
+    CPU_OVER_WALL_TOLERANCE,
     PURPOSE_ROWS,
     PURPOSES,
     STAGES,
@@ -519,11 +523,49 @@ def summarise(reports: list[dict[str, Any]]) -> dict[str, Any]:
         "elapsed": elapsed,
         "processes": len(reports),
         "roles": roles,
+        "clocks": sorted({str(r.get("cpu_clock", "thread_time (before IKA-454)"))
+                          for r in reports}),
     }
 
 
 def _seconds(value: float) -> str:
     return f"{value:,.1f}"
+
+
+def cpu_clock_warnings(
+    summary: dict[str, Any],
+    tolerance: float = CPU_OVER_WALL_TOLERANCE,
+    min_wall: float = 0.05,
+) -> list[str]:
+    """Rows whose CPU per call is above their wall time per call, and the clocks that read it.
+
+    A stage runs on one thread, so a call's CPU cannot exceed its wall time. A row where
+    the sums say it did is the clock being wrong, not the code being fast: IKA-452 found
+    `rust.score` at 0.603 ms CPU against 0.209 ms wall on `thread_time` (15.625 ms steps
+    on Windows), and with a mis-calibrated cycle rate the LP row at 1.938 ms against
+    1.745 ms. The tolerance is `CPU_OVER_WALL_TOLERANCE` (5%), set from the measured
+    calibration error. Borrowed rows are other clocks' accounts and carry no CPU. Rows
+    with less than `min_wall` seconds of wall are too short to compare.
+    """
+    out: list[str] = []
+    for name, row in summary["stages"].items():
+        wall, cpu, calls = row["wall"], row["cpu"], row["calls"]
+        if name in BORROWED or calls <= 0 or wall < min_wall:
+            continue
+        if cpu > wall * (1.0 + tolerance):
+            out.append(
+                f"{name}: CPU {1000 * cpu / calls:.3f} ms a call is above wall "
+                f"{1000 * wall / calls:.3f} ms a call (x{cpu / wall:.2f}, tolerance "
+                f"{tolerance:.0%}); a thread cannot run longer than the clock passed"
+            )
+    clocks = summary.get("clocks") or []
+    if sys.platform == "win32" and any(c.startswith("thread_time") for c in clocks):
+        out.append(
+            "the cpu column was read from `thread_time` in some reports "
+            f"({', '.join(clocks)}); on Windows that clock moves in 15.625 ms steps "
+            "and is not comparable per call"
+        )
+    return out
 
 
 def print_server(summary: dict[str, Any]) -> None:
@@ -589,6 +631,8 @@ def print_table(summary: dict[str, Any], tree: dict[str, Any] | None, wall: floa
     print("\n  * time another row already holds, so never added into a total: the Rust\n"
           "    child's own clock inside rust.fill, the serving thread's inside forward,\n"
           "    and the refused-cell tail across branch, encode and forward at once.")
+    for line in cpu_clock_warnings(summary):
+        print(f"  ** cpu clock: {line} **")
 
     counts = summary.get("counts") or {}
     if counts:

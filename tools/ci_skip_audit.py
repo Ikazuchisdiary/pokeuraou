@@ -186,6 +186,13 @@ CLASSES: tuple[Class, ...] = (
         environment=True,
         probe=lambda: (ROOT / "examples" / "scenario-turn1.json").exists(),
     ),
+    Class(
+        "windows-only",
+        re.compile(r"the thread cycle clock exists on Windows only"),
+        "tests of the Windows thread cycle clock (IKA-454); the GitHub runner is Linux, "
+        "where the stages read `time.thread_time`, so these skip there by design",
+        environment=False,
+    ),
     # Below here: the data's contents decide, not the machine. Counted, never pinned.
     Class(
         "no-such-case",
