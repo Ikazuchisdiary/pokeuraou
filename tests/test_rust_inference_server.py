@@ -107,7 +107,11 @@ def _fuzz(encoded: Encoded, net, encoder, rows: int, seed: int) -> Encoded:
 
 class RustServer:
     def __init__(
-        self, arms: dict[str, list[Path]], tmp_path: Path, slots: int = 2, q_arms: dict[str, Path] | None = None,
+        self,
+        arms: dict[str, list[Path]],
+        tmp_path: Path,
+        slots: int = 2,
+        q_arms: dict[str, Path] | None = None,
     ) -> None:
         exe = rustnode.binary_path()
         assert exe.exists(), f"{exe} is not built: cd rust && cargo build --release"

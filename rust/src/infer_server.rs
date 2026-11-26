@@ -695,12 +695,19 @@ pub fn main(args: &[String]) {
             if arm.nets.len() > 1 { " (ensemble, logits averaged)" } else { "" }
         );
     }
+    for arm in &server.q_arms {
+        eprintln!("  Q arm {}: {} (sha256 {})", arm.name, arm.file, &arm.net.sha256.chars().take(12).collect::<String>());
+    }
     eprintln!(
         "  {} slots x {} graphs a net-set, ready in {:.1} s; Q requests {}",
         slots,
         infer_gpu::BUCKETS,
         started.elapsed().as_secs_f64(),
-        server.q_forward.as_deref().map(|a| format!("forwarded to {a}")).unwrap_or("refused".into())
+        if !server.q_arms.is_empty() {
+            "answered here".to_string()
+        } else {
+            server.q_forward.as_deref().map(|a| format!("forwarded to {a}")).unwrap_or("refused".into())
+        }
     );
     if report > 0.0 {
         let server = server.clone();
@@ -714,14 +721,14 @@ pub fn main(args: &[String]) {
                 let per = |ns: &AtomicU64| ns.load(Relaxed) as f64 / 1e6 / req.max(1) as f64;
                 eprintln!(
                     "  {req} requests, {rows} rows ({} since the last line); per request {:.2} ms in all, \
-                     {:.2} ms waiting for a slot, {:.2} ms copying, {:.2} ms on the card; Q forwarded {}; \
+                     {:.2} ms waiting for a slot, {:.2} ms copying, {:.2} ms on the card; Q items {}; \
                      process CPU {:.1} s (+{:.1})",
                     req - last.0,
                     per(&s.handled_ns),
                     per(&s.slot_wait_ns),
                     per(&s.copy_ns),
                     per(&s.gpu_ns),
-                    s.q_forwarded.load(Relaxed),
+                    s.q_forwarded.load(Relaxed) + s.q_served.load(Relaxed),
                     cpu,
                     cpu - last.2
                 );

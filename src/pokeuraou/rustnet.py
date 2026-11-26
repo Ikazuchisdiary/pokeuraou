@@ -201,6 +201,48 @@ def ensure_exported_q(pt: str | Path, out_dir: str | Path) -> Path:
     return out
 
 
+def server_command(
+    regulation: str,
+    arms: dict[str, list[str | Path]],
+    q_arms: dict[str, str | Path],
+    out_dir: str | Path,
+) -> list[str]:
+    """The command of one `pokeuraou-damage inference-server`, the nets exported first.
+
+    `arms` maps an arm's name to its `.pt` files (several: an ensemble, logits averaged);
+    `q_arms` maps a Q arm's name to its `.pt`. The `.rnet` files go to `out_dir` (reused when
+    their source hash is unchanged). The CUDA 12 DLLs are the server's own search
+    (`--dll-dir`, `POKEURAOU_CUDA_DLLS`, `CUDA_PATH_V12*`, the Toolkit's folder); the `.venv`'s
+    torch's are passed only when none of those is set.
+    """
+    import importlib.util
+    import os
+    import sys
+
+    from .regulation import regulation_dir, repo_root
+
+    # Not `rustnode`: importing it makes a launcher write a timing report of its own.
+    exe = Path(
+        os.environ.get("POKEURAOU_RUST_NODE_BIN")
+        or repo_root() / "rust" / "target" / "release"
+        / ("pokeuraou-damage.exe" if sys.platform == "win32" else "pokeuraou-damage")
+    )
+    if not exe.exists():
+        raise SystemExit(f"{exe} is not built: cd rust && cargo build --release")
+    command = [str(exe), "inference-server", "--regulation", str(regulation_dir() / f"{regulation}.json")]
+    for name, files in arms.items():
+        rnets = [ensure_exported(f, regulation, Path(out_dir) / "rnet") for f in files]
+        command += ["--arm", name, *map(str, rnets)]
+    for name, file in q_arms.items():
+        command += ["--q-arm", name, str(ensure_exported_q(file, Path(out_dir) / "rnet"))]
+    spec = importlib.util.find_spec("torch")
+    if spec and spec.origin and not os.environ.get("POKEURAOU_CUDA_DLLS"):
+        lib = Path(spec.origin).parent / "lib"
+        if lib.is_dir() and not any(k.startswith("CUDA_PATH_V12") for k in os.environ):
+            command += ["--dll-dir", str(lib)]
+    return command
+
+
 def read_header(path: str | Path) -> dict[str, Any]:
     with Path(path).open("rb") as fh:
         if fh.read(8) != MAGIC:

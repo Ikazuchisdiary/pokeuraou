@@ -166,6 +166,13 @@ def main() -> None:
         "--servers, which decides whether this is faster or slower than not using it.",
     )
     ap.add_argument(
+        "--rust-server",
+        action="store_true",
+        help="IKA-461, off by default: every value arm and Q arm is answered by "
+        "`pokeuraou-damage inference-server` (the nets exported as .rnet files) instead of "
+        "tools/inference_server.py. Needs --served and --pool.",
+    )
+    ap.add_argument(
         "--servers",
         type=int,
         default=2,
@@ -398,20 +405,35 @@ def main() -> None:
         server_log = out_dir / "logs"
         server_log.mkdir(parents=True, exist_ok=True)
         for index in range(args.servers):
-            command = [
-                sys.executable, str(ROOT / "tools" / "inference_server.py"),
-                "--device", args.device,
-                *(["--regulation", pool_regulation] if pool_regulation else []),
-                "--arm", "value", *args.value,
-            ]
-            if args.baseline:
-                command += ["--arm", "baseline", *args.baseline]
-            if args.q_model is not None:
-                command += ["--q-arm", "q", str(args.q_model)]
-            for name, model in args.q_model_named:
+            for name, _model in args.q_model_named:
                 if name == "q" and args.q_model is not None:
                     raise SystemExit("--q-model-named q collides with --q-model's server arm q")
-                command += ["--q-arm", name, model]
+            if args.rust_server:
+                # IKA-461: every arm and every Q in the Rust server.
+                from pokeuraou.rustnet import server_command
+
+                if pool_regulation is None:
+                    raise SystemExit("--rust-server is for an M-C pool match (--pool)")
+                rust_arms = {"value": list(args.value)}
+                if args.baseline:
+                    rust_arms["baseline"] = list(args.baseline)
+                rust_q = {name: model for name, model in args.q_model_named}
+                if args.q_model is not None:
+                    rust_q["q"] = str(args.q_model)
+                command = server_command(pool_regulation, rust_arms, rust_q, out_dir)
+            else:
+                command = [
+                    sys.executable, str(ROOT / "tools" / "inference_server.py"),
+                    "--device", args.device,
+                    *(["--regulation", pool_regulation] if pool_regulation else []),
+                    "--arm", "value", *args.value,
+                ]
+                if args.baseline:
+                    command += ["--arm", "baseline", *args.baseline]
+                if args.q_model is not None:
+                    command += ["--q-arm", "q", str(args.q_model)]
+                for name, model in args.q_model_named:
+                    command += ["--q-arm", name, model]
             errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
             process = subprocess.Popen(  # noqa: S603
                 command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors,
