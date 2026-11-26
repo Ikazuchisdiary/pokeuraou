@@ -97,7 +97,7 @@ def test_the_preparation_is_pythons(pool, store, on, eps, temp) -> None:  # noqa
         want = _python(pool, solver, 45801, index, eps, temp)
         k, a, b, drawn, priors, start, rng = want
         got = prepgame.prepare(
-            pool.reg, pool, solver, seed=45801, index=index, pairs=None, hide_bench=True,
+            pool.reg, pool, solver, seed=45801, index=index, pairs=None,
             epsilon=eps, temperature=temp,
         )
         assert got is not None
@@ -141,12 +141,12 @@ def test_the_mixtures_are_bit_exact_without_exploration(pool, store, on) -> None
     for index in range(20):
         _, _, _, drawn, _, _, _ = _python(pool, solver, 7, index, 0.0, 1.0)
         got = prepgame.prepare(
-            pool.reg, pool, solver, seed=7, index=index, pairs=None, hide_bench=False,
+            pool.reg, pool, solver, seed=7, index=index, pairs=None,
             epsilon=0.0, temperature=1.0,
         )
         assert got.own_mixture == [float(x) for x in drawn.our_mixture]
         assert got.foe_mixture == [float(x) for x in drawn.foe_mixture]
-        assert got.game is None and got.priors is None
+        assert got.game is not None and got.priors is not None
 
 
 def test_another_seed_is_other_games(pool, store, on) -> None:  # noqa: ANN001
@@ -157,7 +157,7 @@ def test_another_seed_is_other_games(pool, store, on) -> None:  # noqa: ANN001
             (g.teams, g.picks)
             for g in (
                 prepgame.prepare(pool.reg, pool, solver, seed=seed, index=i, pairs=None,
-                                 hide_bench=True, epsilon=0.25, temperature=0.5)
+                                 epsilon=0.25, temperature=0.5)
                 for i in range(12)
             )
         ]
@@ -170,7 +170,7 @@ def test_a_pair_with_no_file_is_solved_here_and_asked_again(pool, tmp_path, on) 
     solver = SolvedSelections(pool.reg, pool.teams, _stub, store=tmp_path, tag="t")
     seeded = _solver(pool, tmp_path)
     got = prepgame.prepare(
-        pool.reg, pool, solver, seed=3, index=0, pairs=None, hide_bench=True,
+        pool.reg, pool, solver, seed=3, index=0, pairs=None,
         epsilon=0.25, temperature=0.5,
     )
     assert got is not None and solver.solves == 1
@@ -178,13 +178,13 @@ def test_a_pair_with_no_file_is_solved_here_and_asked_again(pool, tmp_path, on) 
     assert (lo, hi) in solver.solved_pairs and (tmp_path / f"{lo:03d}-{hi:03d}.json").exists()
     # The same game again finds the file: nothing is solved, and the pair counts as reused.
     again = prepgame.prepare(
-        pool.reg, pool, solver, seed=3, index=0, pairs=None, hide_bench=True,
+        pool.reg, pool, solver, seed=3, index=0, pairs=None,
         epsilon=0.25, temperature=0.5,
     )
     assert solver.solves == 1 and again.picks == got.picks and solver.reused >= 1
     # A second process's solver reads what the first wrote.
     other = prepgame.prepare(
-        pool.reg, pool, seeded, seed=3, index=0, pairs=None, hide_bench=True,
+        pool.reg, pool, seeded, seed=3, index=0, pairs=None,
         epsilon=0.25, temperature=0.5,
     )
     assert seeded.solves == 0 and other.picks == got.picks
@@ -201,7 +201,7 @@ def test_a_pair_another_worker_solved_is_loaded_once(pool, store, tmp_path, on) 
     metted = set()
     for index in range(12):
         got = prepgame.prepare(
-            pool.reg, pool, solver, seed=5, index=index, pairs=None, hide_bench=False,
+            pool.reg, pool, solver, seed=5, index=index, pairs=None,
             epsilon=0.25, temperature=0.5,
         )
         metted.add((min(got.teams), max(got.teams)))
@@ -213,7 +213,7 @@ def test_a_store_of_another_tag_stops_the_run(pool, store, on) -> None:  # noqa:
     other = SolvedSelections(pool.reg, pool.teams, _stub, store=store, tag="another leaf")
     with pytest.raises(ValueError, match="another leaf"):
         prepgame.prepare(
-            pool.reg, pool, other, seed=3, index=0, pairs=None, hide_bench=True,
+            pool.reg, pool, other, seed=3, index=0, pairs=None,
             epsilon=0.25, temperature=0.5,
         )
 
@@ -226,7 +226,7 @@ def test_a_subset_of_pairs_is_drawn_from_and_keeps_the_pools_index(pool, store, 
         _k, a, b = draw_pair(rng, subset)
         want = pool.pairs.index((min(a, b), max(a, b)))
         got = prepgame.prepare(
-            pool.reg, pool, solver, seed=9, index=index, pairs=subset, hide_bench=True,
+            pool.reg, pool, solver, seed=9, index=index, pairs=subset,
             epsilon=0.25, temperature=0.5,
         )
         assert (got.pair, got.teams) == (want, (a, b))
@@ -251,7 +251,7 @@ def test_a_game_from_a_prepared_start_is_the_python_roads_game(pool, store, tmp_
         out = tmp_path / f"{name}.jsonl"
         before = (portlp.COUNTS["prepared"], portlp.COUNTS["hidden"])
         generate_pool(
-            pool.reg, pool, games=0, hide_bench=True, seed=81, out=out, solver=solver,
+            pool.reg, pool, games=0, seed=81, out=out, solver=solver,
             objective=HP_SHARE, search_limit=2, max_turns=40, indices=list(range(6)),
         )
         runs.append((_records(out), portlp.COUNTS["prepared"] - before[0],

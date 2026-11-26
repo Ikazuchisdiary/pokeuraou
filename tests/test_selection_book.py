@@ -29,7 +29,6 @@ import json
 import numpy as np
 import pytest
 
-from pokeuraou.payoff import HP_SHARE
 from pokeuraou.priors import SampledSet
 from pokeuraou.selection import SpreadClass, book_entry, solve_selection
 from pokeuraou.selection_book import (
@@ -47,7 +46,6 @@ from pokeuraou.selection_book import (
     perplexity,
     start_book,
 )
-from pokeuraou.selfplay import generate
 from pokeuraou.standings import Standings, TeamMember, TournamentTeam
 from pokeuraou.teams import all_selections, load_roster
 
@@ -502,133 +500,6 @@ def _standings(team: TournamentTeam) -> Standings:
         player_count=1,
         teams=[team],
     )
-
-
-def test_generation_draws_both_sides_from_the_book(roster, tmp_path) -> None:  # noqa: ANN001
-    """End to end: every game is a book hit, and the record says what it was drawn from.
-
-    The opponent's sets in the record must be the drawn class's, spreads included. If
-    generation resampled the investment after drawing their selection, their four would
-    have been chosen by a player holding a different team.
-    """
-    reg = roster.reg
-    team = _team(roster.sets)
-    spreads = [
-        SampledSet(
-            species=s.species,
-            ability=s.ability,
-            item=s.item,
-            nature=s.nature,
-            sp={"hp": 8 + k, "atk": 4, "spe": 12},
-            moves=list(s.moves),
-        )
-        for k, s in enumerate(roster.sets)
-    ]
-    entry = _entry(
-        ours=_point_mass(0), theirs=[_point_mass(5)], sets=spreads
-    )
-    entry.key = key_for_team(team)
-    book = SelectionBook(roster="rizabanadohido")
-    book.add(entry)
-
-    out = tmp_path / "games.jsonl"
-    stats = generate(
-        reg,
-        None,
-        roster,
-        [],
-        games=2,
-        seed=3,
-        out=out,
-        objective=HP_SHARE,
-        search_limit=2,
-        max_turns=3,
-        standings=_standings(team),
-        book=book,
-        explore_epsilon=0.0,
-        hide_bench=False,
-    )
-    assert stats["book_hits"] == 2
-    assert stats["book_misses"] == 0
-
-    # Asserted rather than skipped-if-empty: the rng is seeded and the resolver is
-    # deterministic here, so "nothing finished" would be a real change and not weather.
-    lines = [ln for ln in out.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    assert lines
-    for line in lines:
-        record = json.loads(line)
-        assert record["selectionSource"] == "book"
-        assert record["ownPick"] == list(SELECTIONS[0])
-        assert record["foePick"] == list(SELECTIONS[5])
-        assert record["selectionValue"] == pytest.approx(0.5)
-        assert len(record["ownSelectionPolicy"]) == len(SELECTIONS)
-        assert sum(record["foeSelectionPolicy"]) == pytest.approx(1.0)
-        brought = [m["sp"] for m in record["foeTeam"]]
-        assert all("hp" in sp for sp in brought)
-
-
-def test_a_mirror_game_is_our_own_six_with_our_own_spreads(roster, tmp_path) -> None:  # noqa: ANN001
-    """Not "a team like ours" -- the same sets, or the 50% assertion is worth nothing.
-
-    A mirror whose opponent had resampled spreads is not antisymmetric, so its win rate
-    would no longer be forced to 50% and the free calibration check would quietly become
-    a number with no requirement attached to it.
-    """
-    reg = roster.reg
-    out = tmp_path / "games.jsonl"
-    stats = generate(
-        reg,
-        None,
-        roster,
-        [],
-        games=2,
-        seed=5,
-        out=out,
-        objective=HP_SHARE,
-        search_limit=2,
-        # Mirrors of this composition are stally -- two Toxapex and two Incineroar on the
-        # field -- so a three-turn cap finishes nothing and the assertions below would all
-        # be skipped over an empty file.
-        max_turns=25,
-        mirror_share=1.0,
-        hide_bench=False,
-    )
-    assert stats["mirror_games"] == 2
-    assert stats["book_hits"] == 0
-    lines = [ln for ln in out.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    assert lines
-    for line in lines:
-        record = json.loads(line)
-        assert record["foeArchetype"] == "mirror"
-        assert record["foeSix"] == [entry.species for entry in roster.sets]
-        # Both sides brought four of the *same* six sets. They are different fours -- the
-        # picks are independent -- so the teams are not equal; what must hold is that every
-        # member of either is one of our roster's sets, spreads included.
-        exact = {
-            (entry.species, tuple(sorted((k, v) for k, v in entry.sp.items() if v)))
-            for entry in roster.sets
-        }
-        for side in ("ownTeam", "foeTeam"):
-            members = {
-                (m["species"], tuple(sorted(m["sp"].items()))) for m in record[side]
-            }
-            assert members <= exact, f"{side} is not our own six"
-
-
-def test_a_mirror_share_must_be_a_probability(roster) -> None:  # noqa: ANN001
-    with pytest.raises(ValueError, match="mirror_share"):
-        generate(roster.reg, None, roster, [], games=1, mirror_share=1.5)
-
-
-def test_a_team_the_book_does_not_cover_falls_back_to_a_uniform_draw(roster) -> None:  # noqa: ANN001
-    """Counted, not silently mixed in: two distributions in one dataset need labels."""
-    reg = roster.reg
-    team = _team(roster.sets)
-    book = SelectionBook(roster="rizabanadohido")
-    hit, total = book.covered([team])
-    assert (hit, total) == (0, 1)
-    with pytest.raises(ValueError, match="standings"):
-        generate(reg, None, roster, [], games=1, book=book)
 
 
 def test_the_merge_reads_the_directory_the_shards_wrote_to(tmp_path) -> None:  # noqa: ANN001

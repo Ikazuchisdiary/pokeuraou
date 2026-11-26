@@ -93,24 +93,6 @@ def test_in_a_hidden_mirror_side_one_believes_the_mirror_of_side_zero(setup) -> 
     )
 
 
-def test_the_open_game_shows_the_whole_four_and_records_no_second_value(setup) -> None:  # noqa: ANN001
-    reg, sheet = setup
-    own = sheet[:4]
-    foe = [sheet[i] for i in (1, 0, 4, 5)]
-    record = play_game(
-        reg, np.random.default_rng(3), own, foe, "test",
-        search_limit=3, max_turns=2, open_information=True,
-    )
-    game = _payload(record)
-    whole = [sorted(identity(m) for m in side.pokemon) for side in
-             selfplay.position_from_sets(reg, own, foe).sides]
-    assert game["decisions"]
-    for decision in game["decisions"]:
-        assert decision["shownIdentities"] == whole
-        assert "foeSearchValue" not in decision
-    assert replay_shown(game) == [d["shownIdentities"] for d in game["decisions"]]
-
-
 def test_leads_are_the_turn_one_pairs_in_active_order(setup, hidden_game) -> None:  # noqa: ANN001
     reg, sheet = setup
     assert hidden_game["leads"] == [

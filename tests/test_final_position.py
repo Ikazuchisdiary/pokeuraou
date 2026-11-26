@@ -58,8 +58,7 @@ def _play(setup, *, seed: int, max_turns: int, hidden: bool) -> dict:  # noqa: A
     record = play_game(
         reg, np.random.default_rng(seed), own, foe, "test",
         search_limit=2, max_turns=max_turns,
-        sheets=(sheet, sheet) if hidden else None,
-        open_information=not hidden,
+        sheets=(sheet, sheet),
     )
     return _payload(record)
 
@@ -72,8 +71,8 @@ def finished(setup) -> dict:  # noqa: ANN001
 
 @pytest.fixture(scope="module")
 def capped(setup) -> dict:  # noqa: ANN001
-    """An open game stopped by the cap (`max_turns * 2` decision steps) after a move."""
-    return _play(setup, seed=8, max_turns=3, hidden=False)
+    """A hidden-bench game stopped by the cap (`max_turns * 2` decision steps) after a move."""
+    return _play(setup, seed=8, max_turns=3, hidden=True)
 
 
 def _board(pos: dict) -> list:

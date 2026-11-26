@@ -62,11 +62,9 @@ AGENT_ARGS = (
     # ships, so omitting it drifts nothing; a tool that passes "first" plays the old rule.
     "rank_view",
     # How a leaf ranking fills its cells (IKA-268). Since IKA-341 `play_game`'s default is
-    # no longer what M-B generation ships: unnamed, a leaf-ranked side plays q-nocover by
-    # the process's Q, and M-B generation names `search.ROSTER_RANK_FILL` (refs2, M-B has no
-    # Q) -- so a roster tool that leaves it off plays another menu, or stops. M-C
-    # generation passes it too: its tools' fill is checked where they resolve it, at their
-    # options (`resolution_drift` below), since no `play_game` call shows it.
+    # no longer what generation ships: unnamed, a leaf-ranked side plays q-nocover by
+    # the process's Q. M-C generation passes it too: its tools' fill is checked where they
+    # resolve it, at their options (`resolution_drift` below), since no `play_game` call shows it.
     "rank_fill",
     # Which completions a hidden-bench belief leaves out (IKA-283). Its default is what
     # ships, so omitting it drifts nothing; a tool that passes a drop plays another game.
@@ -86,28 +84,12 @@ EXPECTED = {
     "diff_generation.py": "differential harness: compares two engines on identical inputs",
     # diff_narrow, diff_node, diff_solve_node, dump_turn_cases and cells_needed stood here
     # until IKA-212 deleted them with Python's resolver.
-    "bench_generation.py": "throughput benchmark; the agent is the variable being swept",
-    "profile_generation.py": "profiler",
-    "worker_growth.py": "throughput benchmark",
 }
 #: The tools that drift as of 2026-09-19, recorded so that `--check` can fail on an
 #: eighth without first demanding these seven be fixed. Not an excuse: a board number from
 #: any of them is still a number about a different player, which is what the report says.
 #: Struck off by fixing the call site, which `--check` then insists on.
-KNOWN_DRIFT = frozenset(
-    {
-        "asymmetry.py",
-        "book_check.py",
-        "cycle_match.py",
-        "forced_handoff.py",
-        "matchup.py",
-        "resume_generate.py",
-        # Since IKA-122 lists `bench_prior`: its named arms draw the opponent's four from
-        # the book's column strategy and then search over a uniform belief.
-        "selection_check.py",
-        "width_match.py",
-    }
-)
+KNOWN_DRIFT: frozenset[str] = frozenset()
 
 
 #: The options that name a leaf-ranked menu's fill. M-C generation's worker leaves them
@@ -275,43 +257,40 @@ def calls(path: Path) -> list[tuple[int, set[str]]]:
 
 
 def unstated(path: Path) -> list[int]:
-    """Lines of the `play_game` calls here that name neither `sheets` nor
-    `open_information` (IKA-123).
+    """Lines of the `play_game` calls here that do not name `sheets` (IKA-123, IKA-460).
 
-    `play_game` stops at run time on such a call, but a tool nobody runs finds out late,
-    so it is read here too. Every tool is in scope, the excused ones included: a harness
-    that plays the open game on purpose says so with `open_information=True`, which costs
-    one argument and leaves nothing to infer.
+    `sheets` is required since the open game was removed, so such a call stops at run
+    time; a tool nobody runs finds out late, so it is read here too.
     """
     return [
         line
         for line, kwargs in calls(path)
-        if not kwargs & {"sheets", "open_information", "**"}
+        if not kwargs & {"sheets", "**"}
     ]
 
 
 def shipping_args() -> set[str]:
     """The arguments generation passes whose default is not what ships."""
     reference: set[str] = set()
-    for _, kwargs in calls(ROOT / "src/pokeuraou/selfplay.py"):
+    # M-C generation and the pool match: `poolplay` holds both calls (M-B's `generate` was
+    # removed in IKA-460, and with it the third).
+    for _, kwargs in calls(ROOT / "src/pokeuraou/poolplay.py"):
         reference |= kwargs
     reference &= set(AGENT_ARGS)
     # `depth`, `policy`, `solve_sparsely` and `solve_restricted` default to what
     # generation ships (1, None, False, False), so omitting them changes nothing. The six
     # that bite are the ones whose default is NOT what ships: the leaf (None means
     # hp-share), the narrowing order (False means damage, generation uses the leaf), the
-    # sheets (None means the search is handed the opponent's four), the width (8, where
-    # generation plays 12), the bench prior (None means the uniform belief, where
-    # generation weights the bench by the opponent's selection equilibrium) and the fill
-    # (None means q-nocover by a Q M-B does not have, where M-B generation names refs2,
-    # IKA-341).
+    # sheets (required), the width (8, where generation plays 12), the bench prior (None
+    # means the uniform belief, where generation weights the bench by the opponent's
+    # selection equilibrium) and the fill (None means q-nocover by the process's Q).
     return reference & {
         "evaluate", "rank_by_leaf", "sheets", "search_limit", "bench_prior", "rank_fill",
     }
 
 
 def pool_generation_missing(reference: set[str]) -> list[str]:
-    """What M-B generation passes and the pool generator (`poolplay`, IKA-81) does not.
+    """What generation passes and a `poolplay` call does not (IKA-81).
 
     M-C is generated by `poolplay.generate_pool`, a second caller of `play_game` with
     generation's job. It is held to generation's own set rather than listed as a tool:
@@ -389,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         for line in unstated(p):
             silent.append(f"{p.relative_to(ROOT).as_posix()}:{line}")
-            print(f"  UNSTATED  {p.name}:{line} names neither sheets nor open_information")
+            print(f"  UNSTATED  {p.name}:{line} names no sheets")
         passed: set[str] = set()
         for _, kwargs in found:
             passed |= kwargs
@@ -430,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
     if silent:
         print(
             f"\n  UNSTATED: {', '.join(silent)} call play_game without saying which game.\n"
-            "  Pass the sixes as `sheets`, or `open_information=True` for the open game."
+            "  Pass the sixes as `sheets`."
         )
     if unresolved:
         print(
@@ -441,7 +420,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if pool_missing:
         print(
-            f"\n  POOL: poolplay.py omits {', '.join(pool_missing)} that M-B generation passes.\n"
+            f"\n  POOL: poolplay.py omits {', '.join(pool_missing)} that generation passes.\n"
             "  The two generators have to build the same agent."
         )
     if play_drift:

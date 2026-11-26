@@ -3,8 +3,7 @@ M-C generation does.
 
 The user's decision of 9/28: the library's unnamed fill of a leaf-ranked menu is q-nocover,
 which needs the process's Q and stops without one (IKA-338's rule, now in `play_game`,
-`_menus`, `generate_pool` and `PoolArm`); M-B's roster path names refs2
-(`search.ROSTER_RANK_FILL`, M-B has no Q); a person's game with no Q it can read falls
+`_menus`, `generate_pool` and `PoolArm`); a person's game with no Q it can read falls
 back to refs2 with a note; the refs fills stay, played when named. What these tests hold:
 
 - **unnamed is q-nocover or a stop**: a leaf-ranked `play_game` / `generate_pool` /
@@ -12,8 +11,7 @@ back to refs2 with a note; the refs fills stay, played when named. What these te
   it stops at the first menu -- never refs2;
 - **a side that reads no fill keeps its bytes**: damage-ranked, the record carries no
   ``rankFill``, as before;
-- **M-B names refs2**: `selfplay.generate` passes `ROSTER_RANK_FILL`, and `agent_drift` holds
-  a roster tool that does not to account;
+- **a call that leaves the fill off drifts**: `agent_drift` holds it to account;
 - **the rank-score file has cells to record**: under a q fill it stops, where it wrote
   empty lines (IKA-278's file, since IKA-338's default);
 - **a person's menus**: a Q of another vocabulary than the leaf's falls back to refs2 with a
@@ -37,7 +35,7 @@ from pokeuraou.encode import Encoder
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.pool import load_pool
 from pokeuraou.poolplay import PoolArm, SolvedSelections, generate_pool
-from pokeuraou.search import DEFAULT_RANK_FILL, ROSTER_RANK_FILL, SHIPPED_RANK_FILL
+from pokeuraou.search import DEFAULT_RANK_FILL, SHIPPED_RANK_FILL
 
 from ._harness import load_tool
 from .test_poolplay import _stub, _variants, _write_pool
@@ -71,12 +69,12 @@ def _game(pool, **kwargs):  # noqa: ANN001, ANN003, ANN202
     team = list(pool.teams[0].sets)
     return selfplay.play_game(
         pool.reg, np.random.default_rng(3), team[:4], team[:4], "t",
-        search_limit=3, max_turns=2, evaluate=_stub, open_information=True, **kwargs,
+        search_limit=3, max_turns=2, evaluate=_stub, sheets=(team, team), **kwargs,
     )
 
 
 def test_the_constants() -> None:
-    assert ROSTER_RANK_FILL == DEFAULT_RANK_FILL == "refs2"
+    assert DEFAULT_RANK_FILL == "refs2"
     assert SHIPPED_RANK_FILL == "q-nocover"
 
 
@@ -123,7 +121,7 @@ def test_a_pool_arm_resolves_its_fill_at_construction() -> None:
 def _generate(pool, out: Path, **kwargs):  # noqa: ANN001, ANN003, ANN202
     solver = SolvedSelections(pool.reg, pool.teams, _stub)
     generate_pool(
-        pool.reg, pool, games=0, hide_bench=True, seed=278, out=out, solver=solver,
+        pool.reg, pool, games=0, seed=278, out=out, solver=solver,
         evaluate=_stub, objective=HP_SHARE, search_limit=3, max_turns=8, rank_by_leaf=True,
         indices=[0, 1, 2], **kwargs,
     )
@@ -170,38 +168,12 @@ class _Parser:
         raise SystemExit(2)
 
 
-# ------------------------------------------------------------------ M-B's roster path
+# ------------------------------------------------------------------ the fill is held
 
 
-def test_m_b_generation_names_the_roster_fill(monkeypatch, tmp_path) -> None:  # noqa: ANN001
-    from pokeuraou.teams import load_roster
-
-    roster = load_roster("rizabanadohido")
-    seen: dict = {}
-
-    class Stop(Exception):
-        pass
-
-    def fake_play(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        seen.update(kwargs)
-        raise Stop
-
-    monkeypatch.setattr(selfplay, "play_game", fake_play)
-    with pytest.raises(Stop):
-        selfplay.generate(roster.reg, None, roster, [], games=1, mirror_share=1.0,
-                          hide_bench=True, rank_by_leaf=True, out=tmp_path / "g.jsonl")
-    assert seen["rank_fill"] == ROSTER_RANK_FILL
-
-
-def test_agent_drift_holds_a_roster_tool_that_leaves_the_fill_off(tmp_path) -> None:  # noqa: ANN001
+def test_agent_drift_holds_a_tool_that_leaves_the_fill_off(tmp_path) -> None:  # noqa: ANN001
     drift = load_tool("agent_drift")
     assert "rank_fill" in drift.shipping_args()
-    # Every roster tool that ranks by the leaf names it (generation_match is the board).
-    for name in ("generation_match.py", "bench_generation.py", "book_check.py",
-                 "selection_check.py", "resume_generate.py", "worker_growth.py",
-                 "forced_handoff.py"):
-        passed = set().union(*(kw for _line, kw in drift.calls(ROOT / "tools" / name)))
-        assert "rank_fill" in passed, name
     # Positive control: a call that leaves it off is missing it.
     tool = tmp_path / "roster_tool.py"
     tool.write_bytes(

@@ -272,7 +272,7 @@ def test_the_drop_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN00
     for which in (0, 1):
         record, sides = pool_match_game(
             pool.reg, pool, (tested, other), seed=283, game_index=0, which=which,
-            hide_bench=True, max_turns=2,
+            max_turns=2,
         )
         assert record.bench_drop[which] == "w20"
         assert record.bench_drop[1 - which] == "none"
@@ -284,7 +284,7 @@ def test_the_drop_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN00
     same = _arm("none", solver)
     record, _ = pool_match_game(
         pool.reg, pool, (same, same), seed=283, game_index=0, which=0,
-        hide_bench=True, max_turns=2,
+        max_turns=2,
     )
     assert "benchDrop" not in record.to_json(objective="value:arm", search_limit=(2, 2))
 

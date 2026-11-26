@@ -135,7 +135,7 @@ def test_an_unknown_mode_stops(reg) -> None:  # noqa: ANN001
     with pytest.raises(ValueError, match="ally_targets"):
         from pokeuraou.selfplay import play_game
 
-        play_game(reg, None, [], [], "x", open_information=True, ally_targets="some")  # type: ignore[arg-type]
+        play_game(reg, None, [], [], "x", sheets=([], []), ally_targets="some")  # type: ignore[arg-type]
 
 
 @pytest.mark.oracle

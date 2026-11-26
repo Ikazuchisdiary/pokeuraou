@@ -438,7 +438,7 @@ def main(argv: list[str] | None = None) -> None:
     from pokeuraou import portlp
 
     portlp.default_on_for_generation()
-    hide_bench = require_bench(args)
+    require_bench(args)
     if (args.inference is None) == (args.value is None):
         ap.error("one of --inference or --value names the tested arm's leaf")
     if args.inference is not None and args.baseline:
@@ -601,7 +601,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
-    print(f"pool match / {reg.meta.format_id} / bench {'hidden' if hide_bench else 'OPEN'} / "
+    print(f"pool match / {reg.meta.format_id} / bench hidden / "
           f"selection eps={args.explore_epsilon}, T={args.explore_temperature}",
           file=sys.stderr)
     if pairs is not None:
@@ -616,7 +616,7 @@ def main(argv: list[str] | None = None) -> None:
             f"  {label}: leaf {arm.name} / width {arm.limit} / "
             f"{'leaf' if arm.rank_by_leaf else 'damage'} ranking"
             + (f" (fill {arm.rank_fill})" if arm.rank_by_leaf else "")
-            + (f" / bench drop {arm.bench_drop}" if hide_bench else "")
+            + f" / bench drop {arm.bench_drop}"
             + f" / deepen {arm.deepen}"
             + (f" / ends {_ends_rule(arm.evaluate)}" if arm.evaluate is not None else "")
             + (f" / depth {arm.depth} restricted" if arm.depth != 1 else "")
@@ -635,8 +635,8 @@ def main(argv: list[str] | None = None) -> None:
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + " / belief "
-            + ("ORACLE (the opponent's drawn four)" if arm.bench_oracle and hide_bench
-               else "solved" if arm.solver is not None and hide_bench else "uniform"),
+            + ("ORACLE (the opponent's drawn four)" if arm.bench_oracle
+               else "solved" if arm.solver is not None else "uniform"),
             file=sys.stderr,
         )
     ranking = tuple("leaf" if arm.rank_by_leaf else "damage" for arm in arms)
@@ -647,7 +647,7 @@ def main(argv: list[str] | None = None) -> None:
         tags += {"leaf": "@leafrank", "damage": "@damagerank"}[ranking[0]]
     if tested.rank_by_leaf and tested.rank_fill != other.rank_fill:
         tags += f"@rankfill:{tested.rank_fill}"
-    if hide_bench and tested.bench_drop != other.bench_drop:
+    if tested.bench_drop != other.bench_drop:
         tags += f"@benchdrop:{tested.bench_drop}"
     if tested.deepen != other.deepen:
         tags += f"@deepen:{tested.deepen}"
@@ -657,7 +657,7 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@d{tested.depth}"
     if tested.knockouts != other.knockouts:
         tags += "@ko" if tested.knockouts else "@noko"
-    if hide_bench and tested.dex_base_belief != other.dex_base_belief:
+    if tested.dex_base_belief != other.dex_base_belief:
         tags += "@dexbase" if tested.dex_base_belief else "@setbase"
     if tested.rust_binary != other.rust_binary:
         tags += "@port" if tested.rust_binary is not None else "@ownport"
@@ -671,7 +671,7 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@back:{'+'.join(tested.line1_back or ())}"
     if tested.hold_baton != other.hold_baton:
         tags += "@holdbaton" if tested.hold_baton else "@noholdbaton"
-    if hide_bench and tested.bench_oracle != other.bench_oracle:
+    if tested.bench_oracle != other.bench_oracle:
         tags += "@oracle" if tested.bench_oracle else "@nooracle"
     arm_label = f"{tested.name}{tags}"
 
@@ -715,7 +715,7 @@ def main(argv: list[str] | None = None) -> None:
             ledger_leaf, value_name,
             lambda game_index=game_index, which=which: pool_match_game(
                 reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
-                hide_bench=hide_bench, max_turns=args.max_turns,
+                max_turns=args.max_turns,
                 epsilon=args.explore_epsilon, temperature=args.explore_temperature,
                 pairs=pairs, ally_only_with=args.ally_only_with,
                 line_only_with=args.line_only_with,
@@ -860,8 +860,7 @@ def main(argv: list[str] | None = None) -> None:
                 depths=sides["depths"],
                 solvers=sides["solvers"],
                 books=sides["selections"],
-                information=("hidden-bench", "hidden-bench") if hide_bench
-                else ("open", "open"),
+                information=("hidden-bench", "hidden-bench"),
                 beliefs=sides["beliefs"],
             ),
         )

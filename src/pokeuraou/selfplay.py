@@ -26,7 +26,7 @@ represent our uncertainty would duplicate machinery that exists and is tested.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import cache
@@ -51,8 +51,8 @@ from .actions import ally_targets as ally_scope
 from .actions import hold_baton as baton_scope
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN, deepen_spec
-from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select, reselect, reselect_bayesian
-from .equilibrium import EquilibriumError, solve
+from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select, reselect_bayesian
+from .equilibrium import EquilibriumError
 from .fold import TurnLeaves
 from .hidden import (
     DEFAULT_BENCH_DROP,
@@ -68,7 +68,7 @@ from .narrow import narrow, note_coverless
 from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
 from .position import Field, MoveSlot, Pokemon, Position, Side
-from .priors import Cooccurrence, MetagamePrior, SampledSet
+from .priors import SampledSet
 from .provenance import (
     LEGACY_BENCH_DROP,
     LEGACY_DEEPEN,
@@ -79,7 +79,6 @@ from .qrank import is_q
 from .regulation import STAT_IDS, Regulation, repo_root
 from .rustnode import PortPause, PortTurn, ResumedTurn
 from .search import (
-    ROSTER_RANK_FILL,
     belief_solve,
     believed_ranking,
     leaf_ranking,
@@ -89,20 +88,9 @@ from .search import (
     search,
 )
 from .selection_book import (
-    DEFAULT_EPSILON,
-    DEFAULT_TEMPERATURE,
     BenchPrior,
-    SelectionBook,
 )
-from .standings import Standings, cluster_teams, label_for, sample_standings_team
 from .stats import nature_multipliers, stats_from_sp
-from .teams import (
-    Archetype,
-    Roster,
-    pick_four_indices,
-    sample_archetype,
-    sample_metagame_team,
-)
 
 #: How many actions per side reach the exact solver during self-play. The cost of a solved
 #: position is rows x columns, so this is the dial that decides whether self-play is
@@ -732,39 +720,6 @@ def _made_pokemon(
     return found
 
 
-def _with_lead(
-    rng: np.random.Generator,
-    roster: Roster,
-    wanted: tuple[str, ...],
-    drawn: tuple[int, ...],
-) -> tuple[int, ...]:
-    """The same four, reordered so `wanted` leads -- or a fresh four containing them.
-
-    Forcing the *selection* rather than a move is what makes this usable as teacher data.
-    A random move that starts a slow plan is undone on the next turn, because the search
-    that would have to continue it does not value it; a Pokemon that is on the field is on
-    the field. The deviation lasts the whole game, and the outcome is a real outcome of
-    having opened that way.
-
-    It exists because the lead is where the plan starts and the lead is what the book
-    stopped drawing. Toxapex is brought in 57.4% of the book's mass and leads 2.5% of it;
-    Toxapex with Incineroar led 1.44% of generation 9 -- 46 games in 3,187 -- against 47%
-    of the human repertoire.
-    """
-    names = [entry.species for entry in roster.sets]
-    missing = [n for n in wanted if n not in names]
-    if missing:
-        raise ValueError(f"the roster has no {missing}; it has {names}")
-    lead = [names.index(n) for n in wanted]
-    rest = [i for i in drawn if i not in lead]
-    while len(lead) + len(rest) < len(drawn):
-        spare = [i for i in range(len(names)) if i not in lead and i not in rest]
-        if not spare:
-            break
-        rest.append(int(spare[rng.integers(len(spare))]))
-    return tuple([*lead, *rest[: max(len(drawn) - len(lead), 0)]])
-
-
 def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
     total = float(weights.sum())
     if total <= 0:
@@ -1262,8 +1217,7 @@ def play_game(
     solve_restricted: bool | tuple[bool, bool] = False,
     start: Position | None = None,
     first_action: str | None = None,
-    sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
-    open_information: bool = False,
+    sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]],
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
     one_agent: bool = True,
     rank_view: str | tuple[str, str] = "heaviest",
@@ -1307,11 +1261,8 @@ def play_game(
     is what every game recorded before this did -- and what 47.4% of decisions had no
     right to. The two are different agents and `provenance` says which.
 
-    Omitting ``sheets`` is not enough to get the open game: it also takes
-    ``open_information=True``, and without either the call stops (IKA-123). The open game
-    was the silent default for as long as the hidden bench was an afterthought, and a
-    caller that forgot the sheets got an easier game under the same call. Passing both is
-    a contradiction and stops too.
+    The bench is always hidden (IKA-460 removed the open game, and with it
+    ``open_information``).
 
     ``one_agent`` says whether the two sides are one agent playing itself, which is what
     self-play is and what a match is not. It changes no decision; it changes only how
@@ -1343,7 +1294,7 @@ def play_game(
     ``rank_view`` takes a pair too: which completion of the opponent's unseen slots each
     agent's leaf or policy ranking reads under a hidden bench (`RANK_VIEWS`, IKA-143).
     "heaviest" ships; "first" is the enumeration-order rule every game before it played.
-    It changes nothing without ``sheets`` or with the damage ranking.
+    It changes nothing with the damage ranking.
 
     ``rank_fill`` takes a pair too: how each agent's leaf ranking fills its cells --
     ``refs<N>`` replies at the matrix budget, ``-fast`` for `Budget.fast` (IKA-268). It
@@ -1355,7 +1306,7 @@ def play_game(
 
     ``bench_drop`` takes a pair too: which completions of the opponent's unseen slots
     each agent's belief leaves out at a move node (`hidden.parse_bench_drop`, IKA-283).
-    "none" ships. It changes nothing without ``sheets``.
+    "none" ships.
 
     ``knockouts`` (a pair too) puts the knock-out branch in that side's matrix budget
     (`Budget.enumerate_knockouts`, IKA-359): off ships. Two sides that differ build and
@@ -1517,16 +1468,7 @@ def play_game(
                 f"solve, not depth {depths[side]} / solve_sparsely {sparse[side]} / "
                 f"solve_restricted {restricted[side]} (the label carries its own reading)"
             )
-    if sheets is None and not open_information:
-        raise ValueError(
-            "no `sheets`, so the search would be shown the opponent's four -- the open "
-            "game. Pass both sixes as `sheets` to hide the bench (what ships), or "
-            "`open_information=True` to mean the open game (a reference). Since IKA-123 "
-            "it is not a default."
-        )
-    if sheets is not None and open_information:
-        raise ValueError("`sheets` hides the bench and `open_information=True` shows it")
-    if sheets is not None and (
+    if (
         sparse != (False, False)
         # Depth 2 in the restricted reading, and the flag nowhere else: at depth 1 it
         # would do nothing, and a flag that does nothing is refused here, not recorded.
@@ -1542,7 +1484,7 @@ def play_game(
             f"{restricted} cannot be honoured with a hidden bench -- belief_solve takes "
             "depth 1 without solve_restricted, or depth 2 with it (IKA-111), and no "
             "sparse solve. "
-            "Pass one of those, or drop `sheets` and measure in the open game."
+            "Pass one of those."
         )
     record = GameRecord(
         own_team=[_set_json(reg, s) for s in own],
@@ -1555,7 +1497,7 @@ def play_game(
         record.foe_six = list(foe_six)
         record.own_pick = list(own_pick)
         record.foe_pick = list(foe_pick)
-    record.information = "open" if sheets is None else "hidden-bench"
+    record.information = "hidden-bench"
     record.ranking = (
         "policy" if policies[0] is not None else "leaf" if ranked[0] else "damage"
     )
@@ -1638,12 +1580,12 @@ def play_game(
     # as the loop below would at its first step. `one_agent` only prices a side's search when no
     # hidden bench is solved for both, and a hidden bench is the only game this road plays.
     if (
-        portlp.PLAY[0] and sheets is not None and hidden_game is None and portlp.HIDDEN[0]
+        portlp.PLAY[0] and hidden_game is None and portlp.HIDDEN[0]
         and not any(dex_bases) and not luck.active()
     ):
         hidden_game = hiddenstep.Game.of(sheets, bench_prior if bench_prior is not None else (None, None))
     if (
-        portlp.PLAY[0] and sheets is not None and hidden_game is not None
+        portlp.PLAY[0] and hidden_game is not None
         and portlp.HIDDEN[0] and not any(dex_bases) and first_action is None
         and all(f is None for f in forced_species) and all(h is None for h in holds)
         and allies == ("off", "off") and binaries == (None, None)
@@ -1677,7 +1619,7 @@ def play_game(
         # IKA-458 stage 3.4: the seen identities and slots and each side's completions from
         # the port, where `portlp.HIDDEN` is on and nothing makes the belief another's.
         stepped = None
-        if sheets is not None and portlp.HIDDEN[0] and not any(dex_bases):
+        if portlp.HIDDEN[0] and not any(dex_bases):
             if hidden_game is None:
                 hidden_game = hiddenstep.Game.of(
                     sheets, bench_prior if bench_prior is not None else (None, None)
@@ -1691,7 +1633,7 @@ def play_game(
         else:
             seen = [seen_identities(pos, i, seen[i]) for i in (0, 1)]
             shown = [seen_slots(pos, i, seen[i]) for i in (0, 1)]
-            recorded_shown = _shown_record(pos, None if sheets is None else seen)
+            recorded_shown = _shown_record(pos, seen)
         owed = port.replacements_needed(reg, pos)
         if any(owed[0]) or any(owed[1]):
             pos = _do_replacement_node(
@@ -1715,7 +1657,7 @@ def play_game(
                 record.unmodelled.append(f"hidden bench: {stepped.error}")
                 break
             spreads = _believed(stepped.spreads, drops)
-        elif sheets is not None:
+        else:
             try:
                 views = [
                     _belief_view(reg, pos, side, shown[side], dex_bases[1 - side], record, 1 - side)
@@ -1769,7 +1711,7 @@ def play_game(
 
         # Which sides widen the root by the double oracle here (IKA-293): where they
         # deepen at all -- every move node of the open game, and the nodes with no bench
-        # hidden under `sheets` (the `exact` below).
+        # hidden (the `exact` below).
         widens = (False, False)
         if oracles != (None, None):
             open_node = spreads is None or all(
@@ -2207,13 +2149,9 @@ def play_game(
         timing.decided("move")
         advanced = _advance_turn(
             reg, rng, pos, chosen, record, leaves, objective,
-            hidden=(
-                None
-                if sheets is None
-                else _HiddenBench(
-                    sheets, list(seen), bench_prior, list(leads), dex_bases,
-                    hidden_game.number if stepped is not None and hidden_game is not None else None,
-                )
+            hidden=_HiddenBench(
+                sheets, list(seen), bench_prior, list(leads), dex_bases,
+                hidden_game.number if stepped is not None and hidden_game is not None else None,
             ),
         )
         if advanced is None:
@@ -2967,7 +2905,7 @@ def _do_replacement_node(
     record: GameRecord,
     leaves: tuple[LeafEvaluator | None, LeafEvaluator | None] = (None, None),
     *,
-    sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
+    sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]],
     shown: list[frozenset[int]] | None = None,
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
     leads: list[frozenset[str] | None] | None = None,
@@ -2982,7 +2920,7 @@ def _do_replacement_node(
     It is a simultaneous-move node like any other -- neither player sees the other's
     replacement -- so it gets a matrix and an equilibrium rather than a heuristic pick.
 
-    With `sheets` it is also the node where the *reveal* happens: the Pokemon coming in is
+    It is also the node where the *reveal* happens: the Pokemon coming in is
     the one that stops being hidden, and choosing what to send against an opponent whose
     bench is unknown is the same Bayesian game the move nodes solve. `shown` is each
     side's seen slots in *this* position -- `seen_slots` of the identities `play_game`
@@ -2990,18 +2928,11 @@ def _do_replacement_node(
     is the turn-1 lead pair per side, as `play_game` carries it (IKA-118).
     `recorded_shown` is `Decision.shown`, written as given and read by nothing here.
 
-    Without them each side now also gets its own matrix. It did not: both strategies came
-    off `matrix(pos, leaves[0])`, and this docstring called that a wart and left it,
-    "because changing it would move every open-information number". Every one of those
-    numbers was a comparison in which the column player's replacements were chosen by its
-    opponent's evaluator, for about a third of the decisions in a game, and the seat swap
-    moves that from one arm to the other rather than cancelling it.
-
     The options are built once from the true position because they are the same in every
     completion: a replacement names a *slot*, and which slots are free is public even when
     who is standing in them is not.
     """
-    if sheets is not None and stepped is not None and stepped.error is None:
+    if stepped is not None and stepped.error is None:
         # IKA-458 stage 3.6a: the options, the node, both draws and the phase in one request.
         from . import replacephase
 
@@ -3077,107 +3008,69 @@ def _do_replacement_node(
         return replacement_matrix(reg, at, options, evaluate)
 
     foe_value: float | None = None
-    if sheets is not None:
-        seen = shown or [frozenset(), frozenset()]
-        answers: dict[int, tuple[list[float], float]] = {}
-        if stepped is not None:
-            # The port made them with the step (IKA-458 stage 3.4).
-            if stepped.error is not None:
-                record.unmodelled.append(f"hidden bench at a replacement: {stepped.error}")
-            spreads = {} if stepped.error is not None else stepped.spreads
-        else:
-            try:
-                views = [
-                    _belief_view(reg, pos, side, seen[side], dex_base[1 - side], record, 1 - side)
-                    for side in (0, 1)
-                ]
-                spreads = {
-                    side: completions(
-                        reg, views[side], side, sheets[side], seen=seen[side],
-                        weights=_bench_weights(
-                            bench_prior, side, views[side], seen[side], record,
-                            (leads or [None, None])[side],
-                        ),
-                    )
-                    for side in (0, 1)
-                }
-            except ValueError as problem:
-                record.unmodelled.append(f"hidden bench at a replacement: {problem}")
-                spreads = {}
-        if spreads:
-            from . import portlp, replacenode
-            from .equilibrium import solve_bayesian
-
-            # IKA-457 stage 2.2: the whole node in one request to the port, where it is on.
-            try:
-                ported = replacenode.solve(reg, options, spreads, leaves, selects)
-            except portlp.PortFault as fault:
-                portlp.faulted("replacementNode", fault)
-                ported = None
-            if ported is not None:
-                answers.update(ported)
-            for side in (0, 1) if ported is None else ():
-                items = spreads[1 - side]
-                leaf = leaves[side]
-                built = [matrix(item.position, leaf) for item in items]
-                weights = np.asarray([item.weight for item in items], dtype=np.float64)
-                # Side 1 minimises what side 0 maximises, so its game is the transpose of
-                # the negation -- the same turn read from the other end, as in the move
-                # node, rather than a second matrix that could drift from this one.
-                own_game = [m if side == 0 else -m.T for m in built]
-                solved = solve_bayesian(own_game, weights)
-                strategy = reselect_bayesian(
-                    own_game, weights, float(solved.value), solved.row_strategy, selects[side]
-                )
-                answers[side] = (
-                    [float(x) for x in strategy],
-                    float(solved.value),
-                )
-            own_policy, value = answers[0]
-            foe_policy = answers[1][0]
-            # Side 1's game is the negated transpose: back into side 0's units.
-            foe_value = -answers[1][1]
-        else:
-            own_policy = [1.0 / len(options[0])] * len(options[0])
-            foe_policy = [1.0 / len(options[1])] * len(options[1])
-            value = 0.5
+    seen = shown or [frozenset(), frozenset()]
+    answers: dict[int, tuple[list[float], float]] = {}
+    if stepped is not None:
+        # The port made them with the step (IKA-458 stage 3.4).
+        if stepped.error is not None:
+            record.unmodelled.append(f"hidden bench at a replacement: {stepped.error}")
+        spreads = {} if stepped.error is not None else stepped.spreads
     else:
-        # One matrix per side, as the hidden-bench branch above already does. This read
-        # `matrix(pos, leaves[0])` and took BOTH strategies off it, so with different
-        # leaves the column player's replacement was chosen by the row player's
-        # evaluator. The docstring called it a wart and deferred it because changing it
-        # "would move every open-information number" -- which is the reason to change it:
-        # a replacement is about a third of a game's decisions, and the seat swap moves
-        # the corruption from one arm to the other rather than cancelling it.
-        payoff = matrix(pos, leaves[0])
         try:
-            equilibrium = solve(payoff)
-            own_policy = [
-                float(x) for x in reselect(
-                    payoff, equilibrium.value, equilibrium.row_strategy, selects[0]
-                )
+            views = [
+                _belief_view(reg, pos, side, seen[side], dex_base[1 - side], record, 1 - side)
+                for side in (0, 1)
             ]
-            foe_policy = [
-                float(x) for x in reselect(
-                    -payoff.T, -equilibrium.value, equilibrium.col_strategy, selects[1]
+            spreads = {
+                side: completions(
+                    reg, views[side], side, sheets[side], seen=seen[side],
+                    weights=_bench_weights(
+                        bench_prior, side, views[side], seen[side], record,
+                        (leads or [None, None])[side],
+                    ),
                 )
-            ]
-            value = float(equilibrium.value)
-        except EquilibriumError:
-            own_policy = [1.0 / len(options[0])] * len(options[0])
-            foe_policy = [1.0 / len(options[1])] * len(options[1])
-            value = float(payoff.mean())
-        if leaves[1] is not leaves[0]:
-            foe_payoff = matrix(pos, leaves[1])
-            try:
-                foe_eq = solve(foe_payoff)
-                foe_policy = [
-                    float(x) for x in reselect(
-                        -foe_payoff.T, -foe_eq.value, foe_eq.col_strategy, selects[1]
-                    )
-                ]
-            except EquilibriumError:
-                foe_policy = [1.0 / len(options[1])] * len(options[1])
+                for side in (0, 1)
+            }
+        except ValueError as problem:
+            record.unmodelled.append(f"hidden bench at a replacement: {problem}")
+            spreads = {}
+    if spreads:
+        from . import portlp, replacenode
+        from .equilibrium import solve_bayesian
+
+        # IKA-457 stage 2.2: the whole node in one request to the port, where it is on.
+        try:
+            ported = replacenode.solve(reg, options, spreads, leaves, selects)
+        except portlp.PortFault as fault:
+            portlp.faulted("replacementNode", fault)
+            ported = None
+        if ported is not None:
+            answers.update(ported)
+        for side in (0, 1) if ported is None else ():
+            items = spreads[1 - side]
+            leaf = leaves[side]
+            built = [matrix(item.position, leaf) for item in items]
+            weights = np.asarray([item.weight for item in items], dtype=np.float64)
+            # Side 1 minimises what side 0 maximises, so its game is the transpose of
+            # the negation -- the same turn read from the other end, as in the move
+            # node, rather than a second matrix that could drift from this one.
+            own_game = [m if side == 0 else -m.T for m in built]
+            solved = solve_bayesian(own_game, weights)
+            strategy = reselect_bayesian(
+                own_game, weights, float(solved.value), solved.row_strategy, selects[side]
+            )
+            answers[side] = (
+                [float(x) for x in strategy],
+                float(solved.value),
+            )
+        own_policy, value = answers[0]
+        foe_policy = answers[1][0]
+        # Side 1's game is the negated transpose: back into side 0's units.
+        foe_value = -answers[1][1]
+    else:
+        own_policy = [1.0 / len(options[0])] * len(options[0])
+        foe_policy = [1.0 / len(options[1])] * len(options[1])
+        value = 0.5
 
     chosen = [
         options[0][_sample_index(rng, np.array(own_policy))],
@@ -3253,326 +3146,6 @@ def _set_json(reg: Regulation, entry: SampledSet) -> dict[str, Any]:
     }
 
 
-def cluster_labels(
-    reg: Regulation, standings: Standings, which: str = "all"
-) -> dict[str, str]:
-    """player -> a readable archetype label, so per-archetype win rates stay reportable.
-
-    The labels are for reading the results, not for sampling: real teams are sampled
-    directly, and a cluster is only a name to group them under afterwards. A team that
-    clusters with nobody is labelled as such rather than given a name of its own, so the
-    long tail does not turn into 59 archetypes with three games each.
-    """
-    out: dict[str, str] = {}
-    for group in cluster_teams(standings.pool(which)):
-        label = label_for(group, reg) if len(group) > 1 else "unclustered"
-        for team in group:
-            out[team.player] = label
-    return out
-
-
-def generate(
-    reg: Regulation,
-    prior: MetagamePrior,
-    roster: Roster,
-    archetypes: list[Archetype],
-    *,
-    games: int,
-    seed: int = 0,
-    out: Path | None = None,
-    objective: Objective = HP_SHARE,
-    search_limit: int | tuple[int, int] = SEARCH_LIMIT,
-    max_turns: int = MAX_TURNS,
-    leaf: str | None = None,
-    cooc: Cooccurrence | None = None,
-    archetype_share: float = 0.0,
-    standings: Standings | None = None,
-    standings_pool: str = "all",
-    evaluate: LeafEvaluator | None = None,
-    book: SelectionBook | None = None,
-    explore_epsilon: float = DEFAULT_EPSILON,
-    explore_temperature: float = DEFAULT_TEMPERATURE,
-    mirror_share: float = 0.0,
-    depth: int | tuple[int, int] = 1,
-    rank_by_leaf: bool = False,
-    policy: Any = None,
-    solve_sparsely: bool = False,
-    solve_restricted: bool = False,
-    force_lead: tuple[str, ...] | None = None,
-    hide_bench: bool | None = None,
-    indices: Iterable[int] | None = None,
-    on_finish: Callable[[int], None] | None = None,
-) -> dict[str, Any]:
-    """Plays games and appends one JSON line per finished game.
-
-    Our six are fixed (this is a team-conditioned value function) and both sides pick four
-    of six uniformly. The opponent comes from one of two pools:
-
-    - the **measured metagame**, when ``cooc`` is given: six species drawn from the
-      co-occurrence counts in the usage data, which is what a real opponent looks like at
-      the rate real opponents look like it;
-    - a **cited archetype**, for an ``archetype_share`` of the games: a real composition
-      from a tournament report, which the metagame pool covers only by chance.
-
-    ...and a third that supersedes both when it is available: ``standings``, a real
-    tournament field. 394 entries from Worlds 2026 carry the actual ability, nature, item
-    and moves, so drawing one uniformly is the tournament metagame with no archetype
-    abstraction and no pairwise model. Only the SP spread is filled from usage, which
-    matches the information a player really has: open team sheets show the nature and blank
-    the investment. Games record which pool they came from in ``foeArchetype``.
-
-    ``book`` replaces the uniform 4-of-6 draw with the solved selection equilibrium, for
-    *both* sides. It is looked up by the opponent's team sheet, so nothing about the four
-    they bring reaches our draw -- :mod:`pokeuraou.selection_book` lists the four ways that
-    could have gone wrong. The opponent's spreads then come from the sampled class rather
-    than from a fresh usage draw, because the column strategy the game uses is the strategy
-    of a player holding exactly that investment. A team the book does not cover falls back
-    to the uniform draw and is counted in ``book_misses``.
-
-    ``mirror_share`` plays that fraction of games against **our own six, spreads
-    included**. Two reasons, and the second was not obvious:
-
-    - the mirror is where the only *external* knowledge about this team lives (a reported
-      three-way cycle among three selections, in ``configs/knowledge/``), and until now
-      self-play had never played one -- every opponent came from the tournament field, so
-      every mirror judgement the value function makes is extrapolation. Checking a model
-      against human knowledge on positions it was never trained on measures extrapolation
-      rather than the model;
-    - a true mirror is exactly antisymmetric, so its win rate **must** come out at 50%.
-      That makes a mirror share a free calibration assertion on the whole pipeline --
-      search, resolver, evaluator -- reported in ``mirror_wins`` / ``mirror_games``. A
-      speed-tie bias in the search matrix was once caught by precisely this kind of sum.
-
-    Mirror games draw their selection uniformly: the book is keyed on tournament sheets and
-    has no entry for ourselves, and a uniform draw is what covers the 90 anyway.
-
-    ``indices`` plays the games with those numbers instead of ``games`` in a row, which is
-    how a worker draws from a shared queue. It changes where the randomness comes from, and
-    it has to: a run streamed one generator through a whole block, so the seventeenth game
-    was whatever the sixteen before it left behind. That is fine when the block is fixed
-    and meaningless when the order is a race. With ``indices`` each game is seeded from its
-    own number, so a game is the same game whichever worker draws it, in whatever order,
-    and a game replayed after a worker died is the game that was lost.
-
-    ``on_finish`` is called with an index once its game has been *written*, not once it has
-    been played. The gap is the point: a worker that dies in between should have that game
-    handed to somebody else.
-
-    ``hide_bench`` has no default (IKA-123). True is what ships: both searches solve over
-    the sixes, never the opponent's four. False is the open game, which is what every pool
-    before the hidden bench was generated in and what this argument silently meant when
-    left out -- so leaving it out now stops instead of making open teacher data.
-    """
-    if not 0.0 <= mirror_share <= 1.0:
-        raise ValueError(f"mirror_share must be a probability, got {mirror_share}")
-    if book is not None and standings is None:
-        raise ValueError(
-            "a selection book is keyed on tournament team sheets, so it needs the "
-            "standings pool it was solved against"
-        )
-    if hide_bench is None:
-        raise ValueError(
-            "hide_bench must be given: True hides the opponent's bench (what ships), False "
-            "plays the open game (reference). It defaulted to False before IKA-123."
-        )
-    if standings is not None:
-        field = cluster_labels(reg, standings, standings_pool)
-    else:
-        field = {}
-        # An all-mirror run needs no opponent pool at all: the opponent is us.
-        if mirror_share < 1.0:
-            if cooc is None and archetype_share < 1.0:
-                archetype_share = 1.0
-            if not archetypes and archetype_share > 0.0:
-                raise ValueError("archetype_share > 0 but no archetypes were given")
-    def scheduled() -> Iterator[tuple[int | None, np.random.Generator]]:
-        if indices is None:
-            rng = np.random.default_rng(seed)
-            for _ in range(games):
-                yield None, rng
-        else:
-            for index in indices:
-                yield index, np.random.default_rng([seed, index])
-
-    path = out or (selfplay_dir() / f"games-seed{seed}.jsonl")
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    lead_wanted = tuple(force_lead) if force_lead else ()
-    stats = {
-        "games": 0,
-        "book_hits": 0,
-        "book_misses": 0,
-        "mirror_games": 0,
-        "mirror_wins": 0,
-        "finished": 0,
-        "discarded_unfinished": 0,
-        "wins": 0,
-        "decisions": 0,
-        "turns": 0,
-    }
-    with path.open("a", encoding="utf-8") as handle:
-        for index, rng in scheduled():
-            drawn = None
-            # Bound here because only the standings branch assigns it, and the bench
-            # prior below reads it. It currently survives on `drawn is not None`
-            # short-circuiting first, which is a name binding resting on the order of an
-            # `and` -- true today and not a thing to rely on.
-            entry = None
-            forced_uniform = False
-            mirror = mirror_share > 0.0 and rng.random() < mirror_share
-            if mirror:
-                # Our own six, the same spreads, no sampling: an approximate mirror would
-                # not be antisymmetric and would lose the 50% assertion that is the point.
-                label = "mirror"
-                foe_six = list(roster.sets)
-            elif standings is not None:
-                pool = standings.pool(standings_pool)
-                team = pool[int(rng.integers(len(pool)))]
-                label = field.get(team.player, "worlds")
-                entry = book.get(team) if book is not None else None
-                if entry is None:
-                    if book is not None:
-                        stats["book_misses"] += 1
-                    foe_six = sample_standings_team(rng, reg, prior, team)
-                else:
-                    stats["book_hits"] += 1
-                    drawn = entry.draw(
-                        rng,
-                        epsilon=explore_epsilon,
-                        temperature=explore_temperature,
-                    )
-                    foe_six = list(drawn.foe_six)
-            elif cooc is not None and rng.random() >= archetype_share:
-                label = "metagame"
-                foe_six = sample_metagame_team(rng, reg, prior, cooc)
-            else:
-                archetype = archetypes[int(rng.integers(len(archetypes)))]
-                label = archetype.id
-                foe_six = sample_archetype(rng, reg, prior, archetype)
-            if drawn is not None:
-                own_pick = drawn.our_pick
-                foe_pick = drawn.foe_pick
-                if lead_wanted:
-                    # Our lead, forced; everything else left as the book drew it. The
-                    # opponent, the spreads and our other two are untouched, so the games
-                    # differ from ordinary generation in one thing only.
-                    own_pick = _with_lead(rng, roster, lead_wanted, own_pick)
-            else:
-                own_pick = pick_four_indices(
-                    rng, len(roster.sets), size=reg.meta.picked_team_size
-                )
-                if lead_wanted:
-                    own_pick = _with_lead(rng, roster, lead_wanted, own_pick)
-                    # The uniform branch defaults to "uniform", which is as wrong here as
-                    # "book" is above: two of the four were chosen, not drawn.
-                    forced_uniform = True
-                foe_pick = pick_four_indices(
-                    rng, len(foe_six), size=reg.meta.picked_team_size
-                )
-            own_four = [roster.sets[i] for i in own_pick]
-            foe_four = [foe_six[i] for i in foe_pick]
-
-            record = play_game(
-                reg, rng, own_four, foe_four, label,
-                objective=objective, search_limit=search_limit, max_turns=max_turns,
-                evaluate=evaluate,
-                depth=depth,
-                rank_by_leaf=rank_by_leaf,
-                # M-B has no Q: its roster path plays refs2, named (IKA-341).
-                rank_fill=ROSTER_RANK_FILL,
-                policy=policy,
-                solve_sparsely=solve_sparsely,
-                solve_restricted=solve_restricted,
-                # Both sixes, so neither search is shown the other's unplayed bench.
-                sheets=(list(roster.sets), list(foe_six)) if hide_bench else None,
-                open_information=not hide_bench,
-                # And what each side would have brought, so the belief over the bench is
-                # the opponent's own selection equilibrium rather than a uniform draw
-                # over every pair the sheet allows. Only when the book named this
-                # opponent: without an entry there is nothing to condition on and
-                # uniform is the honest prior, which is what `None` selects.
-                # The same epsilon and temperature the draw above used, because the
-                # belief has to be about the opponent this game actually has.
-                bench_prior=(
-                    (
-                        BenchPrior.of(
-                            entry, 0, [s.species for s in roster.sets],
-                            epsilon=explore_epsilon, temperature=explore_temperature,
-                        ),
-                        BenchPrior.of(
-                            entry, 1, [s.species for s in foe_six],
-                            epsilon=explore_epsilon, temperature=explore_temperature,
-                        ),
-                    )
-                    if hide_bench and drawn is not None and entry is not None
-                    else None
-                ),
-                selection=(
-                    [entry.species for entry in roster.sets],
-                    [entry.species for entry in foe_six],
-                    own_pick,
-                    foe_pick,
-                ),
-            )
-            if drawn is not None:
-                # "book" means the book drew this four. A forced lead overrides the two
-                # slots the book cared most about, so it did not -- and a pool built that
-                # way would otherwise describe itself as book-selected in every summary a
-                # later decision about including it would read. The mixtures below are
-                # still the book's and are still worth keeping: they say what the book
-                # would have played, which is the comparison the forcing exists to make.
-                record.selection_source = "forced-lead" if lead_wanted else "book"
-                record.own_selection_policy = [
-                    float(x) for x in drawn.our_equilibrium
-                ]
-                record.foe_selection_policy = [
-                    float(x) for x in drawn.foe_equilibrium
-                ]
-                record.own_selection_mixture = [float(x) for x in drawn.our_mixture]
-                record.foe_selection_mixture = [float(x) for x in drawn.foe_mixture]
-                record.selection_value = drawn.value
-            elif forced_uniform:
-                record.selection_source = "forced-lead"
-            stats["games"] += 1
-            if mirror:
-                stats["mirror_games"] += 1
-                if record.outcome is not None:
-                    stats["mirror_wins"] += int(record.outcome > 0.5)
-            if record.outcome is None:
-                stats["discarded_unfinished"] += 1
-            else:
-                stats["finished"] += 1
-                stats["wins"] += int(record.outcome > 0.5)
-                stats["decisions"] += len(record.decisions)
-                stats["turns"] += record.turns
-                payload = record.to_json(
-                    objective=leaf or objective.name, search_limit=search_limit
-                )
-                if index is not None:
-                    # The queue's index, so two pools generated at one seed can be
-                    # checked for pairing afterwards instead of assumed to pair.
-                    #
-                    # `data/selfplay-hidden2` and `data/selfplay-open2` were made at seed
-                    # 2001 with one flag between them, and whether game k is the same
-                    # matchup in both is exactly the question a twin design rests on --
-                    # and it could not be asked, because a worker takes indices from the
-                    # queue in whatever order it gets them, so file order says nothing.
-                    # The same gap was closed for matches earlier today; generation kept
-                    # it. `--mirror-share`'s short-circuit already desynchronised
-                    # generation 11h from generation 10 once, and that was found by
-                    # noticing afterwards rather than by being able to check.
-                    payload["gameIndex"] = index
-                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                handle.flush()
-            if index is not None and on_finish is not None:
-                # After the write, and after a discard too: a game that was played and
-                # came to nothing has still been played, and handing it back would have
-                # the queue retry it until it ran out of attempts.
-                on_finish(index)
-    stats["path"] = str(path)
-    return stats
-
-
 __all__ = [
     "MAX_TURNS",
     "SEARCH_LIMIT",
@@ -3580,7 +3153,6 @@ __all__ = [
     "Decision",
     "GameRecord",
     "final_position",
-    "generate",
     "lead_branches_from_sets",
     "play_game",
     "position_from_sets",

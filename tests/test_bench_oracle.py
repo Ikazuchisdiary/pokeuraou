@@ -57,7 +57,7 @@ def _play(pool, monkeypatch, oracle: bool, which: int):  # noqa: ANN001, ANN202
         arms = (_arm(pool, oracle=oracle), _arm(pool, oracle=False))
         _, sides = pool_match_game(
             pool.reg, pool, arms, seed=440, game_index=0, which=which,
-            hide_bench=True, max_turns=4, epsilon=0.25, temperature=0.5,
+            max_turns=4, epsilon=0.25, temperature=0.5,
         )
     return calls, sides
 

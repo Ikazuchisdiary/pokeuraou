@@ -266,7 +266,6 @@ def generate_pool(
     pool: Pool,
     *,
     games: int,
-    hide_bench: bool,
     seed: int = 0,
     out: Path,
     selection: str = SOLVED,
@@ -314,9 +313,6 @@ def generate_pool(
     beliefs). "solved" needs a leaf that answers a turn-1 position -- ``evaluate`` or
     ``solver`` -- because the hp-share proxy scores every full-HP position alike and the LP
     would return an arbitrary vertex.
-
-    ``hide_bench`` is keyword-only and has no default here either (IKA-123); the CLI gives
-    the pool path the hidden bench when neither flag is passed (IKA-128).
 
     ``store`` is the directory the solves are shared through (`SolvedSelections`); None
     keeps them in this process only.
@@ -403,7 +399,7 @@ def generate_pool(
                 with timing.stage("selection"):
                     prepared = prepgame.prepare(
                         reg, pool, solver, seed=seed, index=index,
-                        pairs=None if pairs is None else drawn_from, hide_bench=hide_bench,
+                        pairs=None if pairs is None else drawn_from,
                         epsilon=explore_epsilon, temperature=explore_temperature,
                     )
                 if prepared is None:
@@ -434,17 +430,16 @@ def generate_pool(
                         rng, epsilon=explore_epsilon, temperature=explore_temperature
                     )
                     pick0, pick1 = drawn.our_pick, drawn.foe_pick
-                    if hide_bench:
-                        priors = (
-                            BenchPrior.of(
-                                entry, 0, [s.species for s in six0],
-                                epsilon=explore_epsilon, temperature=explore_temperature,
-                            ),
-                            BenchPrior.of(
-                                entry, 1, [s.species for s in six1],
-                                epsilon=explore_epsilon, temperature=explore_temperature,
-                            ),
-                        )
+                    priors = (
+                        BenchPrior.of(
+                            entry, 0, [s.species for s in six0],
+                            epsilon=explore_epsilon, temperature=explore_temperature,
+                        ),
+                        BenchPrior.of(
+                            entry, 1, [s.species for s in six1],
+                            epsilon=explore_epsilon, temperature=explore_temperature,
+                        ),
+                    )
                 else:
                     pick0 = pick_four_indices(rng, len(six0), size=size)
                     pick1 = pick_four_indices(rng, len(six1), size=size)
@@ -463,8 +458,7 @@ def generate_pool(
                     deepen=deepen,
                     depth=depth,
                     solve_restricted=solve_restricted,
-                    sheets=(six0, six1) if hide_bench else None,
-                    open_information=not hide_bench,
+                    sheets=(six0, six1),
                     bench_prior=priors,
                     selection=(
                         [s.species for s in six0],
@@ -514,8 +508,7 @@ def generate_pool(
                         "pair": k,
                         "mirror": mirror,
                         "benchPrior": (
-                            None if not hide_bench
-                            else ["solved", "solved"] if priors is not None
+                            ["solved", "solved"] if priors is not None
                             else ["uniform", "uniform"]
                         ),
                     }
@@ -868,7 +861,6 @@ def pool_match_game(
     seed: int,
     game_index: int,
     which: int,
-    hide_bench: bool,
     objective: Objective = HP_SHARE,
     max_turns: int = MAX_TURNS,
     epsilon: float = 0.0,
@@ -961,28 +953,27 @@ def pool_match_game(
     # bench_prior[s] prices side s's bench and is read by side 1 - s: so it is built from
     # the entry of the arm sitting at 1 - s, about side s.
     priors: tuple[BenchPrior | None, BenchPrior | None] | None = None
-    if hide_bench:
-        about0 = (
-            BenchPrior.of(entries[1], 0, species[0], epsilon=epsilon, temperature=temperature)
-            if entries[1] is not None
-            else None
+    about0 = (
+        BenchPrior.of(entries[1], 0, species[0], epsilon=epsilon, temperature=temperature)
+        if entries[1] is not None
+        else None
+    )
+    about1 = (
+        BenchPrior.of(entries[0], 1, species[1], epsilon=epsilon, temperature=temperature)
+        if entries[0] is not None
+        else None
+    )
+    # IKA-440: an oracle arm's prior about the side across is that side's actual draw.
+    if side_arms[1].bench_oracle:
+        about0 = BenchPrior(
+            selections=(tuple(picks[0]),), probabilities=(1.0,), species=tuple(species[0])
         )
-        about1 = (
-            BenchPrior.of(entries[0], 1, species[1], epsilon=epsilon, temperature=temperature)
-            if entries[0] is not None
-            else None
+    if side_arms[0].bench_oracle:
+        about1 = BenchPrior(
+            selections=(tuple(picks[1]),), probabilities=(1.0,), species=tuple(species[1])
         )
-        # IKA-440: an oracle arm's prior about the side across is that side's actual draw.
-        if side_arms[1].bench_oracle:
-            about0 = BenchPrior(
-                selections=(tuple(picks[0]),), probabilities=(1.0,), species=tuple(species[0])
-            )
-        if side_arms[0].bench_oracle:
-            about1 = BenchPrior(
-                selections=(tuple(picks[1]),), probabilities=(1.0,), species=tuple(species[1])
-            )
-        if about0 is not None or about1 is not None:
-            priors = (about0, about1)
+    if about0 is not None or about1 is not None:
+        priors = (about0, about1)
 
     record = play_game(
         reg, rng, [six[0][i] for i in picks[0]], [six[1][i] for i in picks[1]],
@@ -994,8 +985,7 @@ def pool_match_game(
         rank_by_leaf=(side_arms[0].rank_by_leaf, side_arms[1].rank_by_leaf),
         # Two agents even when they hold one leaf: each is charged its whole search.
         one_agent=False,
-        sheets=six if hide_bench else None,
-        open_information=not hide_bench,
+        sheets=six,
         bench_prior=priors,
         rank_view="heaviest",
         rank_fill=(side_arms[0].rank_fill, side_arms[1].rank_fill),
@@ -1015,8 +1005,8 @@ def pool_match_game(
     sources = tuple(arm.selection for arm in side_arms)
     record.selection_source = sources[0] if sources[0] == sources[1] else "mixed"
     beliefs = tuple(
-        "oracle" if hide_bench and side_arms[s].bench_oracle
-        else "uniform" if not hide_bench or entries[s] is None else SOLVED
+        "oracle" if side_arms[s].bench_oracle
+        else "uniform" if entries[s] is None else SOLVED
         for s in (0, 1)
     )
     sides = {

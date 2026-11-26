@@ -170,7 +170,7 @@ def _play(pool, arms, monkeypatch, games: int = 6):  # noqa: ANN001, ANN202
     for game in range(games):
         for which in (0, 1):
             _record, sides = pool_match_game(
-                pool.reg, pool, arms, seed=7, game_index=game, which=which, hide_bench=True,
+                pool.reg, pool, arms, seed=7, game_index=game, which=which,
                 line_only_with=[species[0]],
             )
             out.append((which, sides))

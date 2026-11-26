@@ -135,7 +135,6 @@ def prepare(  # noqa: PLR0913 - the request's pieces
     seed: int,
     index: int,
     pairs: Sequence[tuple[int, int]] | None,
-    hide_bench: bool,
     epsilon: float,
     temperature: float,
 ) -> Prepared | None:
@@ -145,7 +144,7 @@ def prepare(  # noqa: PLR0913 - the request's pieces
     if seed < 0 or index < 0:
         return None
     defined = define(pool)
-    number = next(hiddenstep._GAME_NUMBERS) if hide_bench else None  # noqa: SLF001
+    number = next(hiddenstep._GAME_NUMBERS)  # noqa: SLF001
     request: dict[str, Any] = {
         "kind": "prepGame",
         "pool": defined.number,
@@ -156,7 +155,7 @@ def prepare(  # noqa: PLR0913 - the request's pieces
         "tag": solver.tag,
         "epsilon": portlp._b64(np.array([epsilon], dtype=np.float64)),  # noqa: SLF001
         "temperature": portlp._b64(np.array([temperature], dtype=np.float64)),  # noqa: SLF001
-        "hideBench": bool(hide_bench),
+        "hideBench": True,
         "game": number,
     }
 
@@ -213,8 +212,8 @@ def prepare(  # noqa: PLR0913 - the request's pieces
         own_mixture=own_mixture.tolist(),
         foe_mixture=foe_mixture.tolist(),
         value=float(answer["value"]),
-        game=None if number is None else hiddenstep.Game(number, b""),
-        priors=LazyPriors(build_priors) if hide_bench else None,
+        game=hiddenstep.Game(number, b""),
+        priors=LazyPriors(build_priors),
         rng_state={
             "bit_generator": "PCG64",
             "state": {"state": int(state["state"], 16), "inc": int(state["inc"], 16)},

@@ -67,7 +67,7 @@ def pool_file(tmp_path):  # noqa: ANN001, ANN201
 def _records(pool, out: Path, monkeypatch, q_record):  # noqa: ANN001, ANN202
     monkeypatch.setattr(poolplay, "play_game", _fake_play([]))
     generate_pool(
-        pool.reg, pool, games=0, hide_bench=True, seed=340, out=out,
+        pool.reg, pool, games=0, seed=340, out=out,
         solver=SolvedSelections(pool.reg, pool.teams, _stub), objective=HP_SHARE,
         indices=list(range(4)), q_record=q_record,
     )

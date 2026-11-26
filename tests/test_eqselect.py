@@ -178,7 +178,7 @@ def test_the_label_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN0
         before = dict(eqselect.STATS.get("qre0.05", {"calls": 0, "moved": 0}))
         record, sides = pool_match_game(
             pool.reg, pool, (tested, other), seed=196, game_index=0, which=which,
-            hide_bench=True, max_turns=3,
+            max_turns=3,
         )
         assert record.eq_select[which] == "qre0.05"
         assert record.eq_select[1 - which] == "lp"
@@ -193,7 +193,7 @@ def test_the_label_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN0
     same = _arm("lp", solver)
     record, _ = pool_match_game(
         pool.reg, pool, (same, same), seed=196, game_index=0, which=0,
-        hide_bench=True, max_turns=3,
+        max_turns=3,
     )
     assert "eqSelect" not in record.to_json(objective="value:arm", search_limit=(3, 3))
 

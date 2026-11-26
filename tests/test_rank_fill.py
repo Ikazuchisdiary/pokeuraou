@@ -109,7 +109,7 @@ def test_the_fill_follows_its_arm_into_either_seat(pool, monkeypatch) -> None:  
         asked.clear()
         record, sides = pool_match_game(
             pool.reg, pool, (tested, other), seed=268, game_index=0, which=which,
-            hide_bench=True, max_turns=2,
+            max_turns=2,
         )
         assert record.rank_fill[which] == "refs1-fast"
         assert record.rank_fill[1 - which] == "refs2"
@@ -127,7 +127,7 @@ def test_the_fill_follows_its_arm_into_either_seat(pool, monkeypatch) -> None:  
     same = _arm(pool, "refs2", solver)
     record, _ = pool_match_game(
         pool.reg, pool, (same, same), seed=268, game_index=0, which=0,
-        hide_bench=True, max_turns=2,
+        max_turns=2,
     )
     moves = sum(d.kind == "move" for d in record.decisions)
     assert moves > 0 and len(asked) == 2 * moves

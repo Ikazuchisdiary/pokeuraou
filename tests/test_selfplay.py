@@ -17,7 +17,7 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.position import Position
 from pokeuraou.priors import find_cached_chaos, load_chaos
-from pokeuraou.selfplay import generate, play_game, position_from_sets
+from pokeuraou.selfplay import play_game, position_from_sets
 from pokeuraou.teams import (
     load_archetypes,
     load_roster,
@@ -62,15 +62,17 @@ def test_a_turn_one_position_is_well_formed(setup) -> None:  # noqa: ANN001
 def test_a_game_reaches_a_result(setup) -> None:  # noqa: ANN001
     reg, prior, roster, usable = setup
     rng = np.random.default_rng(4)
+    foe_six = sample_archetype(rng, reg, prior, usable[0])
+    foe_four = pick_four(rng, foe_six, size=4)
     record = play_game(
         reg,
         rng,
         pick_four(rng, roster.sets, size=4),
-        pick_four(rng, sample_archetype(rng, reg, prior, usable[0]), size=4),
+        foe_four,
         usable[0].id,
         objective=HP_SHARE,
         search_limit=4,
-        open_information=True,
+        sheets=(list(roster.sets), foe_six),
     )
     assert record.decisions, "a game with no decision point is not a game"
     assert record.outcome in (0.0, 1.0, None)
@@ -87,15 +89,17 @@ def test_every_recorded_position_can_be_read_back(setup) -> None:  # noqa: ANN00
     """A policy target attached to a position nothing can reconstruct is worthless."""
     reg, prior, roster, usable = setup
     rng = np.random.default_rng(5)
+    foe_six = sample_archetype(rng, reg, prior, usable[0])
+    foe_four = pick_four(rng, foe_six, size=4)
     record = play_game(
         reg,
         rng,
         pick_four(rng, roster.sets, size=4),
-        pick_four(rng, sample_archetype(rng, reg, prior, usable[0]), size=4),
+        foe_four,
         usable[0].id,
         objective=HP_SHARE,
         search_limit=4,
-        open_information=True,
+        sheets=(list(roster.sets), foe_six),
     )
     for decision in record.decisions:
         restored = Position.from_json(json.loads(json.dumps(decision.position)))
@@ -103,78 +107,34 @@ def test_every_recorded_position_can_be_read_back(setup) -> None:  # noqa: ANN00
         assert restored.format == reg.meta.format_id
 
 
-def test_an_unfinished_game_is_discarded_not_labelled(setup, tmp_path) -> None:  # noqa: ANN001
-    """A one-turn cap guarantees nothing finishes, so nothing may be written.
+def _hidden_game(setup, seed: int, **kwargs):  # noqa: ANN001, ANN003, ANN202
+    reg, prior, roster, usable = setup
+    rng = np.random.default_rng(seed)
+    foe_six = sample_archetype(rng, reg, prior, usable[0])
+    return play_game(
+        reg, rng, pick_four(rng, roster.sets, size=4), pick_four(rng, foe_six, size=4),
+        usable[0].id, objective=HP_SHARE, search_limit=4,
+        sheets=(list(roster.sets), foe_six), **kwargs,
+    )
+
+
+def test_an_unfinished_game_has_no_outcome(setup) -> None:  # noqa: ANN001
+    """A one-turn cap guarantees nothing finishes, so no outcome may be put on it.
 
     Labelling a timed-out game with a proxy would put the rejected target back into the
-    data through the back door.
+    data through the back door (`poolplay` discards such a game instead of writing it).
     """
-    reg, prior, roster, usable = setup
-    out = tmp_path / "games.jsonl"
-    stats = generate(
-        reg, prior, roster, usable,
-        games=3, seed=1, out=out, objective=HP_SHARE, search_limit=4, max_turns=1,
-        hide_bench=False,
-    )
-    assert stats["games"] == 3
-    assert stats["finished"] == 0
-    assert stats["discarded_unfinished"] == 3
-    assert not out.exists() or out.read_text(encoding="utf-8").strip() == ""
+    record = _hidden_game(setup, 1, max_turns=1)
+    assert record.outcome is None
 
 
-def test_written_games_carry_a_real_outcome(setup, tmp_path) -> None:  # noqa: ANN001
-    reg, prior, roster, usable = setup
-    out = tmp_path / "games.jsonl"
-    stats = generate(
-        reg, prior, roster, usable,
-        games=4, seed=2, out=out, objective=HP_SHARE, search_limit=4, hide_bench=False,
-    )
-    if stats["finished"] == 0:
-        pytest.skip("no game finished in this small sample")
-    lines = [line for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) == stats["finished"]
-    for line in lines:
-        record = json.loads(line)
-        assert record["outcome"] in (0.0, 1.0)
-        assert record["targetIsRealOutcome"] is True
-        assert record["searchObjective"] == HP_SHARE.name
-        assert record["decisions"]
-
-
-def test_a_forced_lead_keeps_four_distinct_and_puts_them_first(reg, team_a) -> None:
-    """The lead is forced; the rest of the four is left as it was drawn.
-
-    Forcing the selection rather than a move is the point: a move that starts a slow plan
-    is undone on the next turn by a search that does not value the plan, where a Pokemon
-    on the field stays on it. So this has to produce a legal selection -- four distinct
-    party members, the wanted ones first -- whatever it was handed, including a draw that
-    already contains them and one that contains neither.
-    """
-    import numpy as np
-
-    from pokeuraou.selfplay import _with_lead
-    from pokeuraou.teams import load_roster
-
-    roster = load_roster("rizabanadohido")
-    names = [entry.species for entry in roster.sets]
-    wanted = ("toxapex", "incineroar")
-    rng = np.random.default_rng(0)
-    for drawn in ((0, 1, 2, 3), (4, 5, 0, 1), (0, 2, 3, 1), (5, 4, 3, 2)):
-        out = _with_lead(rng, roster, wanted, drawn)
-        assert len(out) == len(drawn)
-        assert len(set(out)) == len(drawn), f"{out} repeats a party member"
-        assert [names[i] for i in out[:2]] == list(wanted)
-        assert all(0 <= i < len(names) for i in out)
-
-
-def test_a_forced_lead_the_roster_cannot_field_is_named(reg, team_a) -> None:
-    """Silently ignoring it would generate ordinary games under a label saying otherwise."""
-    import numpy as np
-    import pytest
-
-    from pokeuraou.selfplay import _with_lead
-    from pokeuraou.teams import load_roster
-
-    roster = load_roster("rizabanadohido")
-    with pytest.raises(ValueError, match="pikachu"):
-        _with_lead(np.random.default_rng(0), roster, ("pikachu",), (0, 1, 2, 3))
+def test_written_games_carry_a_real_outcome(setup) -> None:  # noqa: ANN001
+    record = _hidden_game(setup, 2)
+    if record.outcome is None:
+        pytest.skip("the game did not finish in this small sample")
+    payload = record.to_json(objective=HP_SHARE.name, search_limit=4)
+    assert payload["outcome"] in (0.0, 1.0)
+    assert payload["targetIsRealOutcome"] is True
+    assert payload["searchObjective"] == HP_SHARE.name
+    assert payload["decisions"]
+    assert payload["information"] == "hidden-bench"

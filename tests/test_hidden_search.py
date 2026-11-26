@@ -221,33 +221,29 @@ def _replace(reg, position, owed, sheets, shown):  # noqa: ANN001, ANN202
     return record.decisions[0], record
 
 
-def test_the_replacement_node_is_unchanged_when_nothing_is_hidden(replacement) -> None:  # noqa: ANN001
-    """The last node that was still handed the opponent's whole four.
+def test_the_replacement_node_with_nothing_hidden_is_one_world(replacement) -> None:  # noqa: ANN001
+    """Every slot seen: the belief is the one true world, so the node is well formed.
 
-    Every slot seen must give what it always gave -- the same menus, the same mixtures and
-    the same value, exactly.
+    (Until IKA-460 this compared the node with the open game's, which handed the search the
+    opponent's whole four; the open game is gone, and with it the exact comparison.)
     """
     reg, position, owed, data = replacement
     sheets = _fixture_sheets(reg, position, data)
-    old, _ = _replace(reg, position, owed, None, None)
-    new, _ = _replace(reg, position, owed, sheets, [SEEN_ALL, SEEN_ALL])
-    assert old.own_actions == new.own_actions
-    assert old.foe_actions == new.foe_actions
-    np.testing.assert_array_equal(old.own_policy, new.own_policy)
-    np.testing.assert_array_equal(old.foe_policy, new.foe_policy)
-    assert old.search_value == new.search_value
+    seen, record = _replace(reg, position, owed, sheets, [SEEN_ALL, SEEN_ALL])
+    assert not record.unmodelled, record.unmodelled
+    assert sum(seen.own_policy) == pytest.approx(1.0)
+    assert sum(seen.foe_policy) == pytest.approx(1.0)
 
 
 def test_hiding_the_bench_changes_the_replacement(replacement) -> None:  # noqa: ANN001
-    """And with slots unseen it must not give the same answer back.
+    """And with slots unseen it must not give the all-seen answer back.
 
     Without this the test above passes just as well against a branch that quietly falls
-    through to the open path, which is the failure worth guarding: it would leave the leak
-    in place and every test green.
+    through to the all-seen path, which would leave the leak in place with every test green.
     """
     reg, position, owed, data = replacement
     sheets = _fixture_sheets(reg, position, data)
-    open_node, _ = _replace(reg, position, owed, None, None)
+    open_node, _ = _replace(reg, position, owed, sheets, [SEEN_ALL, SEEN_ALL])
     blind, record = _replace(
         reg, position, owed, sheets, [frozenset({0, 1}), frozenset({0, 1})]
     )
@@ -255,7 +251,7 @@ def test_hiding_the_bench_changes_the_replacement(replacement) -> None:  # noqa:
     assert sum(blind.own_policy) == pytest.approx(1.0)
     assert sum(blind.foe_policy) == pytest.approx(1.0)
     assert blind.search_value != open_node.search_value, (
-        "solving over six possible benches returned the open-information value; "
+        "solving over six possible benches returned the all-seen value; "
         "the belief path did not run"
     )
 

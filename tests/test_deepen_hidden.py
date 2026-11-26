@@ -480,7 +480,7 @@ def test_the_hidden_deepening_follows_its_arm_into_either_seat(pool) -> None:  #
     for which in (0, 1):
         record, sides = pool_match_game(
             pool.reg, pool, (tested, other), seed=33, game_index=0, which=which,
-            hide_bench=True, max_turns=3,
+            max_turns=3,
         )
         assert record.deepen[which] == "m30sallh" and record.deepen[1 - which] == "none"
         assert sides["deepens"][which] == "m30sallh"

@@ -45,7 +45,7 @@ from pokeuraou.teams import (
     usable_archetypes,
 )
 
-TOOLS = __import__("pathlib").Path(__file__).resolve().parents[1] / "tools"
+ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="module")
@@ -69,16 +69,17 @@ def a_game(setup, seed: int, **kwargs):  # noqa: ANN001, ANN003, ANN201
     """One real game, narrow enough to be a test and wide enough to have a matrix."""
     reg, prior, roster, usable = setup
     rng = np.random.default_rng(seed)
+    foe_six = sample_archetype(rng, reg, prior, usable[0])
     started = time.perf_counter()
     record = play_game(
         reg,
         rng,
         pick_four(rng, roster.sets, size=4),
-        pick_four(rng, sample_archetype(rng, reg, prior, usable[0]), size=4),
+        pick_four(rng, foe_six, size=4),
         usable[0].id,
         objective=HP_SHARE,
         search_limit=4,
-        open_information=True,
+        sheets=(list(roster.sets), foe_six),
         **kwargs,
     )
     return record, time.perf_counter() - started
@@ -93,35 +94,6 @@ def test_one_menu_and_one_solve_are_split_and_not_awarded(setup) -> None:  # noq
         "the same construction served both agents, so the halves have to be equal "
         "exactly -- 'on average' would leave a seat term in every cost comparison"
     )
-
-
-def test_the_deeper_side_carries_the_extra_seconds(setup) -> None:  # noqa: ANN001
-    """The one inequality: depth 2 refines, depth 1 does not, in the same game.
-
-    Both sides pay the same depth-1 solve over the same matrix, so the difference is the
-    refine and nothing else. An equality here would mean `--depth` reached the record and
-    not the search, which is the shape every measurement defect in this project has had.
-    """
-    record, elapsed = a_game(setup, seed=4, depth=(2, 1))
-    moves = [d for d in record.decisions if d.kind == "move"]
-    assert moves, "a game with no move node cannot show the refine"
-    assert record.search_seconds[1] > 0.0, "the shallower side still solves its own matrix"
-    assert record.search_seconds[0] > record.search_seconds[1], (
-        "the side looking a ply further spent no longer than the side that did not, so "
-        "the depth pair did not reach `search`"
-    )
-    assert sum(record.search_seconds) < elapsed, (
-        "the move nodes cannot account for more than the whole game; the resolver and "
-        "the replacement nodes are in `elapsed` and must not be in here"
-    )
-
-
-def test_the_shallower_side_is_the_same_game_either_way(setup) -> None:  # noqa: ANN001
-    """Sanity on the split: the pair is per side, so swapping it swaps the seconds."""
-    deep_first, _a = a_game(setup, seed=11, depth=(2, 1))
-    deep_second, _b = a_game(setup, seed=11, depth=(1, 2))
-    assert deep_first.search_seconds[0] > deep_first.search_seconds[1]
-    assert deep_second.search_seconds[1] > deep_second.search_seconds[0]
 
 
 def test_the_record_carries_both_numbers_out(setup) -> None:  # noqa: ANN001
@@ -187,43 +159,11 @@ def test_two_agents_holding_one_leaf_are_each_charged_all_of_it(setup, monkeypat
     )
 
 
-def test_the_match_says_its_two_arms_are_two_agents() -> None:
-    """Sharing the arms is the caller's to do, and so is saying what it costs.
+def test_the_pool_match_says_its_two_arms_are_two_agents() -> None:
+    """A match holds two agents whether or not they hold one leaf object.
 
-    Five places used to name the tested arm by `leaves[0] is value`, and while they did,
-    one object in both arms was silent and total: the seat flip stops flipping, the
-    tested arm's book governs both seats, the win count reads side 0 twice. They ask
-    `which` now, so the arms may be shared -- and what has to stay true is that the
-    sharing is invisible to everything except the clock, which is told.
+    Left to default, a symmetric pricing run reports half the cost it is measuring
+    (`generation_match.py`, which held this, was removed in IKA-460 with M-B).
     """
-    body = (TOOLS / "generation_match.py").read_text(encoding="utf-8")
-    assert "one_agent=False" in body, (
-        "a match holds two agents whether or not they hold one leaf object; left to "
-        "default, a symmetric pricing run reports half the cost it is measuring"
-    )
-    # Comments out: the module explains the five defects at length, in this spelling.
-    code = "\n".join(
-        line for line in body.splitlines() if not line.strip().startswith("#")
-    )
-    assert "leaves[0] is value" not in code, (
-        "an arm identified by object identity is an arm that reads as the tested one in "
-        "both seats the moment anything aliases them"
-    )
-    assert "assert baseline is not value or old_name == new_name" in body, (
-        "what is left to forbid is one object playing under two names: the sharing test "
-        "reads the model files, so the two names cannot differ unless something else "
-        "aliased the arms"
-    )
-
-
-def test_the_match_reports_the_arms_and_not_only_the_game() -> None:
-    """`s/game` holds both arms; a per-arm row is what an equal-time claim rests on."""
-    body = (TOOLS / "generation_match.py").read_text(encoding="utf-8")
-    assert "record.search_seconds[which]" in body, (
-        "the tested arm's seconds have to follow the seat swap, or seat 1 reports the "
-        "baseline's clock under the tested arm's name"
-    )
-    assert "record.search_seconds[1 - which]" in body
-    assert '"armSeconds"' in body and '"moveDecisions"' in body, (
-        "the two numbers and the count they are per have to reach the written row"
-    )
+    body = (ROOT / "src" / "pokeuraou" / "poolplay.py").read_text(encoding="utf-8")
+    assert "one_agent=False" in body

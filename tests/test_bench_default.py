@@ -1,53 +1,35 @@
-"""No information condition is a default any more (IKA-123).
+"""The bench is hidden in every game (IKA-123, IKA-460).
 
-The hidden bench was added after the open game, as `--hide-bench`, so the unmarked command
-played the open game -- the easier one, and not the one that ships. Every place that
-defaulted to open now asks to be told:
+The hidden bench was added after the open game, as `--hide-bench`, so for months the unmarked
+command played the open game -- the easier one, and not the one that ships. IKA-123 made the
+caller name the condition. IKA-460 removed the open game, so there is nothing left to name:
 
-* `play_game` without `sheets` wants `open_information=True`
-* `generate` wants `hide_bench`
-* every tool that can play both wants `--hide-bench` or `--open-bench`
-* `resume_generate.py`, which can only play open, wants `--open-bench`
-* `provenance` wants `information`
+* `play_game` requires `sheets` (the two sixes) and has no `open_information`
+* `--hide-bench` is the default of every tool that took it, and `--open-bench` stops
+* `provenance` wants `information` (recorded open games are still read)
 
-and the rating's zero moved to the hidden `hp-share`, while every recorded agent keeps the
-name it had. Each test below failed, or could not be written, before the change: a call
-without the statement ran the open game.
+and the rating's zero is the hidden `hp-share`, while every recorded agent keeps the name it
+had, so an old open record still reads under the name it was written with.
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
+import inspect
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-from pokeuraou.benchflags import MISSING, add_bench_flags, bench_argv, require_bench
+from pokeuraou.benchflags import OPEN_REMOVED, add_bench_flags, bench_argv, require_bench
 from pokeuraou.provenance import agent_name, provenance
-from pokeuraou.selfplay import generate, play_game
+from pokeuraou.selfplay import play_game
 from tests._harness import load_tool
 
 
-def test_play_game_without_sheets_must_say_it_means_the_open_game() -> None:
-    # Raised before the teams are read, so nothing here needs a regulation.
-    with pytest.raises(ValueError, match="open_information=True"):
-        play_game(None, np.random.default_rng(0), [], [], "x")  # type: ignore[arg-type]
-
-
-def test_sheets_and_open_information_contradict() -> None:
-    with pytest.raises(ValueError, match="shows it"):
-        play_game(
-            None,  # type: ignore[arg-type]
-            np.random.default_rng(0), [], [], "x",
-            sheets=([], []), open_information=True,
-        )
-
-
-def test_generate_wants_the_bench_named() -> None:
-    with pytest.raises(ValueError, match="hide_bench must be given"):
-        generate(None, None, None, [], games=1)  # type: ignore[arg-type]
+def test_play_game_has_no_open_game() -> None:
+    parameters = inspect.signature(play_game).parameters
+    assert "open_information" not in parameters
+    assert parameters["sheets"].default is inspect.Parameter.empty
 
 
 def test_provenance_has_no_default_information() -> None:
@@ -61,64 +43,21 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
-def test_the_flag_pair() -> None:
-    assert require_bench(_parser().parse_args(["--hide-bench"])) is True
-    assert require_bench(_parser().parse_args(["--open-bench"])) is False
-    with pytest.raises(SystemExit) as stopped:
-        require_bench(_parser().parse_args([]))
-    assert stopped.value.code == MISSING
-    # Both at once is argparse's own refusal.
-    with pytest.raises(SystemExit):
-        _parser().parse_args(["--hide-bench", "--open-bench"])
+def test_the_bench_is_hidden_by_default_and_open_stops(capsys: pytest.CaptureFixture[str]) -> None:
+    assert require_bench(_parser().parse_args([])) is True
+    assert _parser().parse_args(["--hide-bench"]).hide_bench is True
+    assert _parser().parse_args([]).hide_bench is True
     assert bench_argv(True) == ["--hide-bench"]
-    assert bench_argv(False) == ["--open-bench"]
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["--open-bench"])
+    assert OPEN_REMOVED.split(":")[0] in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    ("tool", "argv"),
-    [
-        # The acceptance line of IKA-123: the two queue drivers started with nothing added.
-        ("generate_queue", ["--out", "unused", "--games", "1"]),
-        ("match_queue", ["--out", "unused", "--games", "1", "--value", "v.pt"]),
-        ("selfplay", []),
-        ("generation_match", []),
-        ("selection_check", []),
-        # `branch_dedup` stood here until IKA-212 deleted it with Python's resolver.
-        ("profile_stages", ["generation"]),
-    ],
-)
-def test_a_tool_given_neither_flag_stops_and_says_what_to_add(
-    monkeypatch: pytest.MonkeyPatch, tool: str, argv: list[str]
-) -> None:
-    module = load_tool(tool)
-    monkeypatch.setattr(sys, "argv", [f"{tool}.py", *argv])
-    with pytest.raises(SystemExit) as stopped:
-        module.main()
-    assert stopped.value.code == MISSING
-
-
-def test_resume_generate_cannot_make_open_teacher_data_silently(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pytest.importorskip("torch")
-    module = load_tool("resume_generate")
-    monkeypatch.setattr(sys, "argv", ["resume_generate.py", "--dir", "nowhere"])
-    with pytest.raises(SystemExit) as stopped:
-        module.main()
-    assert "--open-bench" in str(stopped.value.code)
-    # With the statement it goes on, and stops on the next thing: no games under `nowhere`.
-    monkeypatch.setattr(sys, "argv", ["resume_generate.py", "--dir", "nowhere", "--open-bench"])
-    with pytest.raises(SystemExit) as stopped:
-        module.main()
-    assert "no recorded games" in str(stopped.value.code)
-
-
-def test_agent_drift_finds_a_call_that_does_not_say_which_game(tmp_path: Path) -> None:
+def test_agent_drift_finds_a_call_that_does_not_name_the_sheets(tmp_path: Path) -> None:
     drift = load_tool("agent_drift")
     silent = tmp_path / "silent.py"
     silent.write_text(
         "play_game(reg, rng, a, b, 'x', search_limit=12)\n"
-        "play_game(reg, rng, a, b, 'x', open_information=True)\n"
         "play_game(reg, rng, a, b, 'x', sheets=s)\n"
         "play_game(reg, rng, a, b, 'x', **kwargs)\n",
         encoding="utf-8",

@@ -219,18 +219,12 @@ DEFAULT_REFERENCES = 2
 #:
 #: Since IKA-341 this is no leaf-ranked menu's default anywhere: an unnamed fill of a
 #: leaf-ranked menu is `SHIPPED_RANK_FILL`, in the library as in generation and the board
-#: (`resolve_rank_fill`). ``refs2`` is played only where it is named -- M-B's roster path
-#: (`ROSTER_RANK_FILL`, M-B has no Q), a person's game with no Q (`tools/play_human.py`, a
-#: note), and research that names the refs fills (IKA-268, IKA-310, IKA-323). What stays is
-#: its other job: the label of an arm whose menu reads no fill (the damage or the policy
-#: ranking). Its records carry no ``rankFill`` (`provenance.LEGACY_RANK_FILL`), as before
-#: IKA-268, so the label is kept to keep those bytes.
+#: (`resolve_rank_fill`). ``refs2`` is played only where it is named -- a person's game with
+#: no Q (`tools/play_human.py`, a note), and research that names the refs fills (IKA-268,
+#: IKA-310, IKA-323). What stays is its other job: the label of an arm whose menu reads no
+#: fill (the damage or the policy ranking). Its records carry no ``rankFill``
+#: (`provenance.LEGACY_RANK_FILL`), as before IKA-268, so the label is kept to keep those bytes.
 DEFAULT_RANK_FILL = f"refs{DEFAULT_REFERENCES}"
-
-#: M-B's roster path's fill, named (IKA-341): M-B has no Q, and its generation, board and
-#: tools have played ``refs2`` since IKA-268. Every leaf-ranked `play_game` / `_menus` of
-#: the roster path passes it; `tools/agent_drift.py` holds a tool that does not to account.
-ROSTER_RANK_FILL = f"refs{DEFAULT_REFERENCES}"
 
 #: The fill of a leaf-ranked menu that names none, in M-C generation and on the board
 #: (IKA-338): rank by the default Q (`qrank.DEFAULT_Q`) without the cover.
@@ -1937,7 +1931,6 @@ __all__ = [
     "DEFAULT_SUB_BRANCHES",
     "DEFAULT_SUB_LIMIT",
     "ORACLE_TOLERANCE",
-    "ROSTER_RANK_FILL",
     "SHIPPED_RANK_FILL",
     "BeliefResult",
     "SearchResult",

@@ -186,7 +186,7 @@ def test_the_other_seating_is_the_same_solve_transposed(pool) -> None:  # noqa: 
 
 def test_a_solved_selection_needs_a_leaf(pool, tmp_path) -> None:  # noqa: ANN001
     with pytest.raises(ValueError, match="needs a leaf"):
-        generate_pool(pool.reg, pool, games=1, hide_bench=True, out=tmp_path / "g.jsonl")
+        generate_pool(pool.reg, pool, games=1, out=tmp_path / "g.jsonl")
 
 
 # ------------------------------------------------------------------------ the games
@@ -208,7 +208,6 @@ def _fake_play(calls: list[dict]):  # noqa: ANN202
             "label": label,
             "selection": kwargs["selection"],
             "sheets": kwargs["sheets"] is not None,
-            "open": kwargs["open_information"],
             "priors": None if priors is None else [
                 None if p is None else (p.species, p.probabilities) for p in priors
             ],
@@ -223,12 +222,12 @@ def _fake_play(calls: list[dict]):  # noqa: ANN202
 
 
 def _games(pool, out: Path, *, seed: int, indices, monkeypatch, memo: bool = True,  # noqa: ANN001
-           hide_bench: bool = True, solver: SolvedSelections | None = None):  # noqa: ANN202
+           solver: SolvedSelections | None = None):  # noqa: ANN202
     calls: list[dict] = []
     monkeypatch.setattr(poolplay, "play_game", _fake_play(calls))
     solver = solver or SolvedSelections(pool.reg, pool.teams, _stub, memo=memo)
     stats = generate_pool(
-        pool.reg, pool, games=0, hide_bench=hide_bench, seed=seed, out=out,
+        pool.reg, pool, games=0, seed=seed, out=out,
         solver=solver, objective=HP_SHARE, indices=list(indices),
     )
     records = [
@@ -250,7 +249,7 @@ def test_a_seed_and_its_indices_are_the_same_games_when_played(pool, tmp_path) -
         out = tmp_path / f"{name}.jsonl"
         solver = SolvedSelections(pool.reg, pool.teams, _stub)
         generate_pool(
-            pool.reg, pool, games=0, hide_bench=True, seed=81, out=out, solver=solver,
+            pool.reg, pool, games=0, seed=81, out=out, solver=solver,
             objective=HP_SHARE, search_limit=2, max_turns=40, indices=[0, 1],
         )
         records = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
@@ -362,7 +361,7 @@ def test_both_seats_get_a_belief_from_the_solve(pool, shared, tmp_path, monkeypa
         solver=shared,
     )
     for call in calls:
-        assert call["sheets"] and call["open"] is False
+        assert call["sheets"]
         assert call["priors"] is not None and all(p is not None for p in call["priors"])
         own_six, foe_six = call["selection"][0], call["selection"][1]
         assert list(call["priors"][0][0]) == own_six
@@ -374,7 +373,7 @@ def test_the_uniform_reference_names_itself(pool, tmp_path, monkeypatch) -> None
     monkeypatch.setattr(poolplay, "play_game", _fake_play(calls))
     out = tmp_path / "u.jsonl"
     generate_pool(
-        pool.reg, pool, games=3, hide_bench=True, seed=1, out=out, selection="uniform",
+        pool.reg, pool, games=3, seed=1, out=out, selection="uniform",
     )
     records = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
     assert [r["selectionSource"] for r in records] == ["uniform"] * 3
@@ -415,15 +414,15 @@ def test_the_pool_cli_hides_the_bench_without_a_flag(pool, monkeypatch) -> None:
     monkeypatch.setattr(tool, "build_leaf", lambda args, reg: (_stub, "value:stub"))
     monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1"])
     tool.main()
-    assert called["hide_bench"] is True
+    assert "hide_bench" not in called
     assert called["selection"] == "solved"
 
     called.clear()
     monkeypatch.setattr(
         "sys.argv", ["selfplay.py", "--pool", "p", "--games", "1", "--open-bench"]
     )
-    tool.main()
-    assert called["hide_bench"] is False, "the open reference is still there by name"
+    with pytest.raises(SystemExit):
+        tool.main()
 
 
 def test_the_pool_cli_refuses_the_roster_path_flags(monkeypatch) -> None:  # noqa: ANN001
@@ -447,7 +446,7 @@ def test_a_pairs_subset_draws_only_those_pairs_and_records_the_pool_index(
     monkeypatch.setattr(poolplay, "play_game", _fake_play(calls))
     out = tmp_path / "s.jsonl"
     generate_pool(
-        pool.reg, pool, games=0, hide_bench=True, seed=444, out=out, solver=shared,
+        pool.reg, pool, games=0, seed=444, out=out, solver=shared,
         objective=HP_SHARE, indices=list(range(40)), pairs=wanted,
     )
     records = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
@@ -467,7 +466,7 @@ def test_a_pairs_subset_must_be_pairs_of_the_pool(pool, shared, tmp_path) -> Non
     for bad in ([], [(1, 0)], [(0, 9)]):
         with pytest.raises(ValueError, match="subset of pool.pairs"):
             generate_pool(
-                pool.reg, pool, games=1, hide_bench=True, out=tmp_path / "x.jsonl",
+                pool.reg, pool, games=1, out=tmp_path / "x.jsonl",
                 solver=shared, objective=HP_SHARE, pairs=bad,
             )
 

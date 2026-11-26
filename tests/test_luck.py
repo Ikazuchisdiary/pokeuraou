@@ -16,7 +16,6 @@ import numpy as np
 import pytest
 
 from pokeuraou import luck
-from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.regulation import load_regulation
@@ -115,21 +114,20 @@ def test_one_game_in_both_seats_reads_a_half_after_both_terms(tmp_path) -> None:
 
 @pytest.fixture(scope="module")
 def ledgered():  # noqa: ANN201
-    """Two games in the open game and one under a hidden bench, each played with the ledger
-    and again without it. The open games give both seats one leaf object, so one matrix."""
+    """Two games under a hidden bench, each played with the ledger and again without it."""
     reg = load_regulation("gen9championsvgc2026regmb")
     register_mega_stones(reg)
     sheet = list(load_roster("rizabanadohido").sets)[:6]
     leaf = HP_SHARE.batch
     out = []
     # Incineroar's Parting Shot on both sides: seeds 0 and 13 stop a turn mid-way.
-    for seed, hidden in ((0, False), (13, False), (0, True)):
+    for seed, hidden in ((0, True), (13, True)):
         def play(seed: int = seed, hidden: bool = hidden):  # noqa: ANN202
             return play_game(
                 reg, np.random.default_rng(seed), [sheet[i] for i in (5, 0, 1, 2)],
                 [sheet[i] for i in (5, 1, 3, 4)],
                 "test", search_limit=4, max_turns=40, evaluate=leaf,
-                sheets=(sheet, sheet) if hidden else None, open_information=not hidden,
+                sheets=(sheet, sheet),
             )
 
         with luck.collecting(leaf, "hp-share") as ledger:
@@ -171,14 +169,9 @@ def test_the_workers_chance_term_is_the_after_the_fact_one(ledgered) -> None:  #
 def test_the_workers_action_term_is_the_matrix_priced_one(ledgered) -> None:  # noqa: ANN001
     reg, leaf, games = ledgered
     corrected = 0
-    for hidden, game, _plain, block in games:
-        if hidden:
-            # The hidden bench's matrices are its completions': read, not recomputable.
-            assert {a["s"] for a in block["actions"]} <= {"pure", "corrected", "uncovered"}
-            continue
-        after = aivat.action_terms(reg, game, leaf, budget=Budget.matrix(), kind="matrix")
-        assert [a["s"] for a in block["actions"]] == [a.status for a in after]
-        for mine, theirs in zip(block["actions"], after, strict=True):
-            assert mine["c"] == pytest.approx(theirs.c, abs=1e-12)
-        corrected += sum(1 for a in after if a.status == "corrected")
-    assert corrected, "no mixed decision in the open fixture games"
+    for hidden, _game, _plain, block in games:
+        assert hidden
+        # The hidden bench's matrices are its completions': read, not recomputable.
+        assert {a["s"] for a in block["actions"]} <= {"pure", "corrected", "uncovered"}
+        corrected += sum(1 for a in block["actions"] if a["s"] == "corrected")
+    assert corrected, "no mixed decision in the fixture games"

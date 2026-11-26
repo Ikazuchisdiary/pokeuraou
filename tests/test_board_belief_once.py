@@ -105,7 +105,7 @@ def _counting(monkeypatch, solve):  # noqa: ANN001, ANN202
 def _play(pool, arms, which):  # noqa: ANN001, ANN202
     record, _ = pool_match_game(
         pool.reg, pool, arms, seed=282, game_index=0, which=which,
-        hide_bench=True, max_turns=4,
+        max_turns=4,
     )
     payload = record.to_json(objective="value:arm", search_limit=(4, 4))
     payload.pop("searchSeconds", None)

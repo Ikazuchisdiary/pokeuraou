@@ -468,8 +468,7 @@ def _self_switch_pick(reg, sheet, foe, monkeypatch, *, hidden):  # noqa: ANN001,
         reg, np.random.default_rng(0), sheet[:4], foe, "test",
         start=_uturn_start(reg, sheet[:4], foe),
         evaluate=_reads_their_back_two,
-        sheets=(sheet, sheet) if hidden else None,
-        open_information=not hidden,
+        sheets=(sheet, sheet),
         max_turns=1,
     )
     picks = [d for d in record.decisions if d.kind == "selfswitch"]
@@ -482,24 +481,14 @@ def _self_switch_pick(reg, sheet, foe, monkeypatch, *, hidden):  # noqa: ANN001,
 def test_the_self_switch_does_not_read_their_true_bench(setup, monkeypatch) -> None:  # noqa: ANN001
     """Two games identical except for side 1's unseen back two pick the same switch-in.
 
-    The open game is the positive control: there the node is SUPPOSED to read the whole
-    board, and it has to pick differently for the two benches, or the leaf above does not
-    reach the choice and the hidden-bench half would pass against a node that ignores it.
-    Before IKA-120 the hidden-bench game picked exactly as the open one did.
+    Before IKA-120 the hidden-bench game picked as the open game did, from side 1's real
+    bench (the open game, which was this test's positive control, was removed in IKA-460).
     """
     reg, roster = setup
     sheet = _sheet(roster)
     brought = sheet[:4]  # Garchomp and Sylveon at the back
     other = sheet[:2] + sheet[4:6]  # Toxapex and Incineroar at the back
     assert [s.species for s in other[2:]] == ["toxapex", "incineroar"]
-
-    open_picks = [
-        _self_switch_pick(reg, sheet, foe, monkeypatch, hidden=False)
-        for foe in (brought, other)
-    ]
-    assert open_picks == ["switch 4, pass", "switch 3, pass"], (
-        f"the open game should follow side 1's real bench: {open_picks}"
-    )
 
     hidden_picks = [
         _self_switch_pick(reg, sheet, foe, monkeypatch, hidden=True)

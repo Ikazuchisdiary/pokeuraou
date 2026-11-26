@@ -256,7 +256,7 @@ def test_a_pool_arm_carries_its_depth_to_its_own_side_in_both_seats(  # noqa: AN
         with pytest.raises(RuntimeError, match="stop"):
             poolplay.pool_match_game(
                 pool.reg, pool, (deep, flat), seed=1, game_index=0, which=which,
-                hide_bench=True, max_turns=2, epsilon=0.0, temperature=1.0,
+                max_turns=2, epsilon=0.0, temperature=1.0,
             )
     assert seen[0]["depth"] == (2, 1) and seen[0]["solve_restricted"] == (True, False)
     assert seen[1]["depth"] == (1, 2) and seen[1]["solve_restricted"] == (False, True)

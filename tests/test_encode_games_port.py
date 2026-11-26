@@ -43,8 +43,7 @@ def _game(seed: int, max_turns: int, hidden: bool) -> dict:
     record = play_game(
         reg, np.random.default_rng(seed), sheet[:4], [sheet[i] for i in (1, 0, 4, 5)], "test",
         search_limit=2, max_turns=max_turns,
-        sheets=(sheet, sheet) if hidden else None,
-        open_information=not hidden,
+        sheets=(sheet, sheet),
     )
     return json.loads(json.dumps(record.to_json(objective="hp-share", search_limit=2)))
 
@@ -52,7 +51,7 @@ def _game(seed: int, max_turns: int, hidden: bool) -> dict:
 @pytest.fixture(scope="module")
 def games() -> list[dict]:
     """A finished hidden-bench game, one stopped by the cap, and a second finished one."""
-    return [_game(5, 40, True), _game(8, 3, False), _game(11, 6, True)]
+    return [_game(5, 40, True), _game(8, 3, True), _game(11, 6, True)]
 
 
 def _line(record: dict) -> bytes:

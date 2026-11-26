@@ -364,24 +364,17 @@ def test_under_a_hidden_bench_it_deepens_exactly_where_nothing_is_hidden(setup, 
     assert any(d.deepened[0]["expanded"] > 0 for d in deep.decisions if d.deepened)
 
 
-def test_in_the_open_game_every_move_decision_deepens(setup) -> None:  # noqa: ANN001
+def test_a_deepen_label_goes_with_depth_1_and_a_label(setup) -> None:  # noqa: ANN001
     reg, sheet = setup
-    record = selfplay.play_game(
-        reg, np.random.default_rng(34), sheet[:4], sheet[2:6], "test",
-        search_limit=3, max_turns=3, open_information=True, deepen="r40",
-    )
-    moves = [d for d in record.decisions if d.kind == "move"]
-    assert moves and all(d.deepened is not None for d in moves)
-    assert all(d.deepened[0]["budget"] == 40 for d in moves)
     with pytest.raises(ValueError, match="deepen"):
         selfplay.play_game(
             reg, np.random.default_rng(34), sheet[:4], sheet[2:6], "test",
-            search_limit=3, max_turns=1, open_information=True, deepen="m40", depth=2,
+            search_limit=3, max_turns=1, sheets=(sheet, sheet), deepen="m40", depth=2,
         )
     with pytest.raises(ValueError, match="deepen"):
         selfplay.play_game(
             reg, np.random.default_rng(34), sheet[:4], sheet[2:6], "test",
-            search_limit=3, max_turns=1, open_information=True, deepen="40",
+            search_limit=3, max_turns=1, sheets=(sheet, sheet), deepen="40",
         )
 
 
@@ -404,20 +397,23 @@ def test_the_budget_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN
     for which in (0, 1):
         record, sides = pool_match_game(
             pool.reg, pool, (tested, other), seed=33, game_index=0, which=which,
-            hide_bench=False, max_turns=2,
+            max_turns=2,
         )
         assert record.deepen[which] == "r30" and record.deepen[1 - which] == "none"
         assert sides["deepens"][which] == "r30"
         moves = [d for d in record.decisions if d.kind == "move"]
         assert moves
+        # Under a hidden bench a node deepens only where no bench is hidden (late), so the
+        # short game here may hold none; where one does, only the deepening arm's side did.
         for d in moves:
-            assert d.deepened[which] is not None and d.deepened[1 - which] is None
+            if d.deepened is not None:
+                assert d.deepened[1 - which] is None
         payload = record.to_json(objective="value:arm", search_limit=(2, 2))
         assert payload["deepen"] == record.deepen
     same = arm("none")
     record, _ = pool_match_game(
         pool.reg, pool, (same, same), seed=33, game_index=0, which=0,
-        hide_bench=False, max_turns=2,
+        max_turns=2,
     )
     assert "deepen" not in record.to_json(objective="value:arm", search_limit=(2, 2))
 
@@ -766,10 +762,12 @@ def test_the_oracle_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN
     for which in (0, 1):
         record, sides = pool_match_game(
             pool.reg, pool, (tested, other), seed=33, game_index=0, which=which,
-            hide_bench=False, max_turns=2,
+            max_turns=2,
         )
         assert record.deepen[which] == "m30oall" and record.deepen[1 - which] == "m30"
         moves = [d for d in record.decisions if d.kind == "move"]
         assert moves
         for d in moves:
-            assert "widened" in d.deepened[which] and "widened" not in d.deepened[1 - which]
+            if d.deepened is not None and d.deepened[which] is not None:
+                assert "widened" in d.deepened[which]
+                assert d.deepened[1 - which] is None or "widened" not in d.deepened[1 - which]

@@ -200,7 +200,7 @@ def _play(pool, arms, monkeypatch, *, only_with, games: int = 6):  # noqa: ANN00
         for which in (0, 1):
             _record, sides = pool_match_game(
                 pool.reg, pool, arms, seed=7, game_index=game, which=which,
-                hide_bench=True, line_only_with=only_with,
+                line_only_with=only_with,
             )
             out.append((which, sides))
     return species, flags, out

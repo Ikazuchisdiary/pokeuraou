@@ -116,8 +116,7 @@ def _play(pool, arms, monkeypatch, *, seed: int, games: range):  # noqa: ANN001,
         for which in (0, 1):
             _, meta = pool_match_game(
                 pool.reg, pool, arms, seed=seed, game_index=game, which=which,
-                hide_bench=True,
-            )
+                            )
             sides.append(meta)
     return calls, sides
 
@@ -290,8 +289,7 @@ def test_identical_arms_play_the_same_game_in_both_seats(pool) -> None:  # noqa:
         for which in (0, 1):
             record, _ = pool_match_game(
                 pool.reg, pool, (same, same), seed=17, game_index=game, which=which,
-                hide_bench=True,
-            )
+                            )
             payload = record.to_json(objective="hp-share", search_limit=(2, 2))
             payload.pop("searchSeconds")
             records.append(payload)

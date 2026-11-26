@@ -137,7 +137,7 @@ def run_worker(args: argparse.Namespace) -> None:
     out = Path(args.games_out) if args.games_out else Path(args.rows).with_suffix(".games.jsonl")
     out.unlink(missing_ok=True)
     poolplay.generate_pool(
-        reg, pool, games=len(indices), hide_bench=True, seed=args.seed, out=out,
+        reg, pool, games=len(indices), seed=args.seed, out=out,
         evaluate=evaluate, store=Path(args.store), leaf=label,
         search_limit=args.limit, rank_by_leaf=True, rank_fill=args.played,
         indices=scheduled(),

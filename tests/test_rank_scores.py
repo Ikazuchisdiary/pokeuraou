@@ -52,7 +52,7 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
 def _generate(pool, out: Path, ranks: Path | None, indices=(0, 1, 2)):  # noqa: ANN001, ANN202
     solver = SolvedSelections(pool.reg, pool.teams, _stub)
     stats = generate_pool(
-        pool.reg, pool, games=0, hide_bench=True, seed=278, out=out, solver=solver,
+        pool.reg, pool, games=0, seed=278, out=out, solver=solver,
         evaluate=_stub, objective=HP_SHARE, search_limit=3, max_turns=8,
         rank_by_leaf=True, indices=list(indices), rank_scores_out=ranks,
         rank_fill="refs2",

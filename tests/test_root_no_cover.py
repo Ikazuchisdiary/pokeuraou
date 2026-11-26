@@ -163,7 +163,7 @@ def test_the_uncovered_menu_follows_its_arm_into_either_seat(pool, monkeypatch) 
         before = _counted()
         record, sides = pool_match_game(
             pool.reg, pool, (tested, other), seed=323, game_index=0, which=which,
-            hide_bench=True, max_turns=2,
+            max_turns=2,
         )
         assert record.rank_fill[which] == "refs2-nocover"
         assert record.rank_fill[1 - which] == "refs2"
@@ -178,5 +178,5 @@ def test_the_uncovered_menu_follows_its_arm_into_either_seat(pool, monkeypatch) 
     before = _counted()
     same = _arm("refs2", solver)
     pool_match_game(pool.reg, pool, (same, same), seed=323, game_index=0, which=0,
-                    hide_bench=True, max_turns=2)
+                    max_turns=2)
     assert _counted() == before
