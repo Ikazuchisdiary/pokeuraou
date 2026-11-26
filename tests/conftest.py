@@ -40,14 +40,23 @@ def _port_roads_restored() -> Iterator[None]:
     of its worker: a later test_q_rank counted the port's solves as shared ones, and
     test_belief_fold_port and test_port_faults compared the port against a "Python" node the
     port had solved too. Four tests failed on CI at 131d811 for that alone.
+
+    Every road is restored, not a list of them: when stage 3.6 became the default (cb653bb)
+    the stages after 1.4 (`PLAY`, `HIDDEN`, ...) stayed on past `pool_match.main` too, and
+    test_hidden's stand-in priors met the port's hidden bench.
     """
     from pokeuraou import portlp
 
-    was = (portlp.ON[0], portlp.GEN[0], portlp.FOLD[0], portlp.STACK[0], portlp.NODE[0],
-           rustnode._SPAN_BLOCKS[0])  # noqa: SLF001
+    roads = [
+        value for name, value in vars(portlp).items()
+        if name.isupper() and isinstance(value, list) and len(value) == 1
+        and isinstance(value[0], bool)
+    ]
+    was = [road[0] for road in roads], rustnode._SPAN_BLOCKS[0]  # noqa: SLF001
     yield
-    (portlp.ON[0], portlp.GEN[0], portlp.FOLD[0], portlp.STACK[0], portlp.NODE[0],
-     rustnode._SPAN_BLOCKS[0]) = was  # noqa: SLF001
+    for road, flag in zip(roads, was[0], strict=True):
+        road[0] = flag
+    rustnode._SPAN_BLOCKS[0] = was[1]  # noqa: SLF001
 
 
 @pytest.fixture(scope="session")
