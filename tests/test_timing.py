@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -634,3 +636,210 @@ def test_a_refusal_in_a_depth2_stage_closes_its_part(monkeypatch: pytest.MonkeyP
         search._refine_cells(None, [object()], None, budget=None, sub_limit=8, sub_branches=3)
     assert timing._REGION_STACK == []
     assert timing._REGION_ROWS["d2.turns"][2] == 1
+
+
+# --- IKA-454: the stages' CPU is a thread's cycle count on Windows ---------------------
+
+WINDOWS_ONLY = pytest.mark.skipif(
+    sys.platform != "win32", reason="the thread cycle clock exists on Windows only"
+)
+
+
+def _echo_pipes() -> tuple[Any, tuple[int, int, int, int]]:
+    """A thread that answers every byte on one pipe with a byte on another, and the fds."""
+    ask_r, ask_w = os.pipe()
+    answer_r, answer_w = os.pipe()
+
+    def echo() -> None:
+        while os.read(ask_r, 1) == b"x":
+            os.write(answer_w, b"y")
+
+    thread = threading.Thread(target=echo)
+    thread.start()
+    return thread, (ask_r, ask_w, answer_r, answer_w)
+
+
+def _finish(thread: Any, fds: tuple[int, int, int, int]) -> None:
+    os.write(fds[1], b"q")
+    thread.join()
+    for fd in fds:
+        os.close(fd)
+
+
+def _wait_calls(clock: Any, calls: int) -> tuple[float, float, int]:
+    """Sum of a clock's and the wall clock's differences over short waits on another thread,
+    and how many single calls had more CPU than wall by over a millisecond.
+
+    Each call writes a byte down one pipe and blocks on the answer from a thread on the other
+    end, which is what a worker does while the port answers. The call takes tens of
+    microseconds of wall time, so a clock that moves in 15.6 ms steps puts a whole step
+    (a thousand times the call) on whichever call it lands on.
+    """
+    thread, fds = _echo_pipes()
+    cpu = wall = 0.0
+    over = 0
+    for _ in range(calls):
+        c0, w0 = clock(), time.perf_counter()
+        os.write(fds[1], b"x")
+        os.read(fds[2], 1)
+        spent_wall = time.perf_counter() - w0
+        spent_cpu = clock() - c0
+        wall += spent_wall
+        cpu += spent_cpu
+        over += spent_cpu > spent_wall + 1e-3
+    _finish(thread, fds)
+    return cpu, wall, over
+
+
+@WINDOWS_ONLY
+def test_thread_time_overcounts_short_waits_and_the_cycle_clock_does_not(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The positive control (IKA-452, IKA-454): the old clock really does exceed the wall.
+
+    The same pipe round trips are timed on `time.thread_time` and on the module's cycle
+    clock. One thread cannot spend more CPU in a call than the call took, so a call whose CPU
+    is over its wall by a millisecond is the clock (a 15.6 ms step landing on a 13 us call).
+    The old clock must show such calls, or the new clock showing none proves nothing. (Summed
+    over a quiet machine the old clock's total can still be below the wall: it is an unbiased
+    estimator there. IKA-452 saw the sum above the wall on the busy worker, per row.)
+    """
+    timing = load(monkeypatch, tmp_path)
+    assert timing.CPU_CLOCK == "thread_cycles"
+    calls = 20_000
+    _, _, old_over = _wait_calls(time.thread_time, calls)
+    new_cpu, new_wall, new_over = _wait_calls(timing.thread_cpu, calls)
+    assert old_over > 0, "the old clock no longer steps on this machine; the control is void"
+    assert new_over == 0
+    assert new_cpu <= new_wall * (1.0 + timing.CPU_OVER_WALL_TOLERANCE), (new_cpu, new_wall)
+
+
+@WINDOWS_ONLY
+def test_a_stage_around_a_wait_holds_no_more_cpu_than_wall(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Through the module's own stage, not the bare clock."""
+    timing = load(monkeypatch, tmp_path)
+    thread, fds = _echo_pipes()
+    for _ in range(5_000):
+        with timing.stage("rust.score"):
+            os.write(fds[1], b"x")
+            os.read(fds[2], 1)
+    _finish(thread, fds)
+    row = timing.snapshot()["stages"]["rust.score"]
+    assert row["calls"] == 5_000
+    assert row["cpu"] <= row["wall"] * (1.0 + timing.CPU_OVER_WALL_TOLERANCE), row
+
+
+@WINDOWS_ONLY
+def test_the_cycle_clock_reads_the_calling_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    timing = load(monkeypatch, tmp_path)
+    seen: dict[str, float] = {}
+
+    def spinner() -> None:
+        c0 = timing.thread_cpu()
+        burn(0.2)
+        seen["spinner"] = timing.thread_cpu() - c0
+
+    thread = threading.Thread(target=spinner)
+    c0 = timing.thread_cpu()
+    thread.start()
+    thread.join()
+    waiting = timing.thread_cpu() - c0
+    assert seen["spinner"] == pytest.approx(0.2, rel=0.1)
+    assert waiting < 0.02
+
+
+@WINDOWS_ONLY
+def test_the_cycle_rate_agrees_with_a_long_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A 1 s spin is read on the cycle clock: its CPU is its wall, to the calibration's error."""
+    timing = load(monkeypatch, tmp_path)
+    c0, w0 = timing.thread_cpu(), time.perf_counter()
+    burn(1.0)
+    cpu, wall = timing.thread_cpu() - c0, time.perf_counter() - w0
+    assert cpu / wall == pytest.approx(1.0, abs=timing.CPU_OVER_WALL_TOLERANCE)
+
+
+def test_the_clock_is_thread_time_where_timing_is_off_or_not_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    off = load(monkeypatch, None)
+    assert off.thread_cpu is time.thread_time
+    assert off.CPU_CLOCK == "thread_time"
+    assert off.CYCLES_PER_SECOND == 0.0
+    if sys.platform != "win32":
+        on = load(monkeypatch, tmp_path)
+        assert on.thread_cpu is time.thread_time
+        assert on.snapshot()["cpu_clock"] == "thread_time"
+
+
+def test_no_module_code_calls_thread_time_directly() -> None:
+    """The clock is one function; a second call site would put two scales in one table."""
+    calls = [
+        line.strip() for line in SOURCE.read_text(encoding="utf-8").splitlines()
+        if "thread_time(" in line and not line.lstrip().startswith("#")
+    ]
+    assert calls == [], calls
+
+
+def test_calibration_takes_the_least_interrupted_spin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A counter at a known 3 GHz that loses 60% of its cycles on four spins in five, as a
+    descheduled thread does. The fastest spin is the true rate; one interrupted spin is not."""
+    timing = load(monkeypatch, None)
+    rate = 3.0e9
+    state = {"lost": 0.0, "reads": 0}
+
+    def counter() -> int:
+        state["reads"] += 1
+        if state["reads"] % 2 == 0 and (state["reads"] // 2) % 5 != 0:
+            state["lost"] += 0.6 * 0.005 * rate
+        return int(time.perf_counter() * rate - state["lost"])
+
+    got = timing.calibrate_cycles_per_second(counter, spans=10, span=0.005)
+    assert got == pytest.approx(rate, rel=0.02)
+    # The control: the first spin of the same counter is interrupted and reads low.
+    state.update(lost=0.0, reads=0)
+    c0, w0 = counter(), time.perf_counter()
+    burn(0.005)
+    interrupted = (counter() - c0) / (time.perf_counter() - w0)
+    assert interrupted < rate * 0.6
+
+
+def test_calibration_fails_on_a_slow_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check can fail: a counter at half the rate reads half the rate."""
+    timing = load(monkeypatch, None)
+    got = timing.calibrate_cycles_per_second(
+        lambda: int(time.perf_counter() * 1.5e9), spans=5, span=0.005
+    )
+    assert got != pytest.approx(3.0e9, rel=0.02)
+
+
+def test_profile_stages_warns_on_a_row_whose_cpu_exceeds_its_wall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "_profile_stages_for_clock", SOURCE.parents[2] / "tools" / "profile_stages.py"
+    )
+    assert spec is not None and spec.loader is not None
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    # IKA-452's `rust.score` on thread_time: 0.603 ms CPU against 0.209 ms wall a call.
+    bad = {"stages": {"rust.score": {"wall": 20.9, "cpu": 60.3, "calls": 100_000.0}}}
+    assert len(tool.cpu_clock_warnings(bad)) == 1
+    assert "rust.score" in tool.cpu_clock_warnings(bad)[0]
+    # And with the cycle clock's 0.100 ms, nothing; so does a LP row 3% over (inside 5%).
+    good = {"stages": {
+        "rust.score": {"wall": 20.9, "cpu": 10.0, "calls": 100_000.0},
+        "lp": {"wall": 100.0, "cpu": 103.0, "calls": 100_000.0},
+    }}
+    assert tool.cpu_clock_warnings(good) == []
+    # IKA-452's mis-calibrated LP: 1.938 ms against 1.745 ms is 11% over.
+    lp = {"stages": {"lp": {"wall": 174.5, "cpu": 193.8, "calls": 100_000.0}}}
+    assert len(tool.cpu_clock_warnings(lp)) == 1
+    # A borrowed row carries no CPU of its own and is never judged.
+    borrowed = {"stages": {"server.held": {"wall": 1.0, "cpu": 9.0, "calls": 10.0}}}
+    assert tool.cpu_clock_warnings(borrowed) == []

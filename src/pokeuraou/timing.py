@@ -28,12 +28,17 @@ to be zero.
 Two clocks, and they are not the same measurement:
 
     wall    `perf_counter`, exact. Includes time this process spent waiting for another
-    cpu     `thread_time`, and **it advances in 15.625 ms steps on Windows** whatever
-            `get_clock_info` claims (measured: 19 distinct values in a 0.3 s busy loop).
-            Per call it is noise; over the thousands of calls a run makes it is a
-            randomised-rounding estimator of the total, and it is read for one thing only
-            -- telling a stage that is burning CPU from a stage that is blocked on someone
-            else, where that difference is the whole answer
+    cpu     this thread's CPU seconds, from `thread_cpu`. Off Windows that is
+            `time.thread_time`. On Windows `thread_time` advances in 15.625 ms steps
+            whatever `get_clock_info` claims (19 distinct values in a 0.3 s busy loop), and
+            the steps land on the short rows after a wait: IKA-452 measured a `rust.score`
+            call at 0.209 ms wall and 0.603 ms CPU, where the cycle count said 0.100 ms. So
+            on Windows (timing on) the CPU is the thread's cycle count from
+            `QueryThreadCycleTime` divided by a rate measured at start-up
+            (`calibrate_cycles_per_second`, error under 0.3% against a long window, IKA-454).
+            A call's CPU is then at most its wall time, and a row above that
+            (`CPU_OVER_WALL_TOLERANCE`) is a clock fault that `profile_stages` reports.
+            Read it per call, not only as a total
 
 The process totals come from `psutil` instead, which reads the kernel's own cumulative
 counters and does not have that problem. Children are counted separately, because the Rust
@@ -206,7 +211,7 @@ class _Stage:
 
     def __enter__(self) -> _Stage:
         wall = time.perf_counter()
-        cpu = time.thread_time()
+        cpu = thread_cpu()
         stack = _stack()
         if stack:
             outer = stack[-1]
@@ -222,7 +227,7 @@ class _Stage:
 
     def __exit__(self, *_exc: object) -> bool:
         wall = time.perf_counter()
-        cpu = time.thread_time()
+        cpu = thread_cpu()
         stack = _stack()
         mine = stack.pop()
         mine[0].wall += wall - mine[1]
@@ -262,11 +267,106 @@ def _purposes() -> list[str]:
 
 ON = bool(os.environ.get(ENV_DIR))
 
+
+def calibrate_cycles_per_second(
+    counter: Callable[[], int], spans: int = 20, span: float = 0.005
+) -> float:
+    """Cycles per second of a thread's cycle counter, from the least-interrupted spin.
+
+    It spins `spans` times for `span` seconds each and reads the cycles the counter advanced
+    over the `perf_counter` time that passed. A spin that was descheduled in the middle has
+    run fewer cycles than the wall clock says, so the rate it gives is too low and the CPU
+    seconds made from it too high. The fastest spin is the one that was not interrupted,
+    and that is the one kept.
+
+    Why not one long spin: IKA-452 calibrated over 0.3 s, and with 21 workers on 16
+    logical cores some of those spins were off by up to +65% (measured IKA-454, a 0.3 s
+    spin: median -3.9%, worst +65.2% from the true rate; this form: +0.0%, worst +1.2%
+    for 10 x 10 ms and +0.1%, worst +0.2% for 20 x 5 ms, both with 21 busy processes beside
+    it). The counter ticks at a constant rate: over 3 s windows its cycles per
+    `thread_time` second were 4,679-4,705 MHz idle and 4,664-4,811 MHz under load.
+    """
+    best = 0.0
+    for _ in range(spans):
+        t0 = time.perf_counter()
+        c0 = counter()
+        t1 = t0
+        while t1 - t0 < span:
+            t1 = time.perf_counter()
+        rate = (counter() - c0) / (t1 - t0)
+        best = max(best, rate)
+    return best
+
+
+def _windows_cycle_clock() -> tuple[Callable[[], float], float]:
+    """This thread's CPU seconds on Windows, from `QueryThreadCycleTime`, and its rate.
+
+    `time.thread_time` is `GetThreadTimes`, which the kernel advances in 15.625 ms steps
+    whatever its 100 ns unit says. This counts the cycles the thread has run instead, which
+    the kernel keeps exactly, and divides by a rate measured here (see
+    `calibrate_cycles_per_second`). Called with the pseudo handle for the current thread,
+    so it reads the calling thread in every thread. The DLL is loaded as `PyDLL`, which
+    keeps the GIL through the call, and each read has its own result cell, so two threads
+    cannot overwrite each other's value between the call and the read.
+    """
+    import ctypes
+
+    kernel = ctypes.PyDLL("kernel32")
+    query = kernel.QueryThreadCycleTime
+    query.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    query.restype = ctypes.c_int
+    kernel.GetCurrentThread.restype = ctypes.c_void_p
+    handle = kernel.GetCurrentThread()
+    cell, address = ctypes.c_ulonglong, ctypes.addressof
+
+    def cycles() -> int:
+        out = cell()
+        query(handle, address(out))
+        return out.value
+
+    rate = calibrate_cycles_per_second(cycles)
+
+    def seconds() -> float:
+        out = cell()
+        query(handle, address(out))
+        return out.value / rate
+
+    return seconds, rate
+
+
+def _choose_cpu_clock() -> tuple[Callable[[], float], str, float]:
+    """The clock the stages' CPU column reads, its name, and its cycle rate (0 if none).
+
+    Windows with timing on: the cycle counter. Anywhere else, and whenever timing is off
+    (so a normal run does not pay the 0.1 s calibration): `time.thread_time`, which is exact
+    where the OS keeps thread CPU time to the nanosecond.
+    """
+    if ON and sys.platform == "win32":
+        try:
+            seconds, rate = _windows_cycle_clock()
+        except (OSError, AttributeError, ValueError):
+            pass
+        else:
+            return seconds, "thread_cycles", rate
+    return time.thread_time, "thread_time", 0.0
+
+
+#: The one place this module reads the thread's CPU. Nothing else here calls
+#: `time.thread_time`: a second clock in the same table would put two scales side by side.
+thread_cpu, CPU_CLOCK, CYCLES_PER_SECOND = _choose_cpu_clock()
+
+#: How far a row's CPU per call may sit above its wall time per call before the table
+#: calls it a clock fault. One thread cannot run longer than the wall clock says, so a
+#: higher ratio is the clock or its rate being wrong. The calibration above is within 0.3%
+#: at the worst measured (IKA-454), and the per-call CPU and wall are read at slightly
+#: different instants, so 5% is far from noise and still catches the 10% of IKA-452.
+CPU_OVER_WALL_TOLERANCE = 0.05
+
 _STAGES: dict[str, _Stage] = {name: _Stage(name) for name in STAGES} if ON else {}
 _COUNTS: dict[str, int] = {}
 _PURPOSE_OBJECTS: dict[str, _Purpose] = {}
 _STARTED = time.perf_counter()
-_STARTED_CPU = time.thread_time()
+_STARTED_CPU = thread_cpu()
 
 #: The decision now being charged: [kind, details, wall it opened at, the stage totals and
 #: the counts as they stood then]. None before the first one and between none at all.
@@ -418,7 +518,7 @@ class _Region:
         self.name = name
 
     def __enter__(self) -> _Region:
-        wall, cpu, child = time.perf_counter(), time.thread_time(), _children_cpu()
+        wall, cpu, child = time.perf_counter(), thread_cpu(), _children_cpu()
         _split_stage(wall, cpu)
         if _REGION_STACK:
             _charge_own(_REGION_STACK[-1], wall, cpu, child)
@@ -429,7 +529,7 @@ class _Region:
         return self
 
     def __exit__(self, *_exc: object) -> bool:
-        wall, cpu, child = time.perf_counter(), time.thread_time(), _children_cpu()
+        wall, cpu, child = time.perf_counter(), thread_cpu(), _children_cpu()
         _split_stage(wall, cpu)
         _charge_own(_REGION_STACK.pop(), wall, cpu, child)
         if _REGION_STACK:
@@ -463,7 +563,7 @@ def _charge_own(entry: list[Any], wall: float, cpu: float, child: float) -> None
 
 
 #: The time outside every part, as a part named "-": it resumes where the last one ended.
-_OUTSIDE: list[Any] = ["-", time.perf_counter(), time.thread_time(), 0.0]
+_OUTSIDE: list[Any] = ["-", time.perf_counter(), thread_cpu(), 0.0]
 
 
 def _charge_outside(wall: float, cpu: float, child: float) -> None:
@@ -474,7 +574,7 @@ def _settle_outside() -> None:
     """Bring the "-" part up to now, so a decision's delta holds its own outside time."""
     if not REGIONS or _REGION_STACK:
         return
-    wall, cpu, child = time.perf_counter(), time.thread_time(), _children_cpu()
+    wall, cpu, child = time.perf_counter(), thread_cpu(), _children_cpu()
     _charge_outside(wall, cpu, child)
     _OUTSIDE[1], _OUTSIDE[2], _OUTSIDE[3] = wall, cpu, child
 
@@ -917,7 +1017,7 @@ def _end_startup(now: float) -> None:
     own_cpu = sum(s.cpu for name, s in _STAGES.items() if name not in BORROWED)
     row = _STAGES["startup"]
     row.wall = max(now - _STARTED - own_wall, 0.0)
-    row.cpu = max(time.thread_time() - _STARTED_CPU - own_cpu, 0.0)
+    row.cpu = max(thread_cpu() - _STARTED_CPU - own_cpu, 0.0)
     row.calls = 1
     _STARTUP_CPU.append(time.process_time())
 
@@ -987,6 +1087,9 @@ def snapshot() -> dict[str, Any]:
         "rust_node": os.environ.get("POKEURAOU_RUST_NODE", ""),
         # From the leaf this process built, not from the environment (IKA-144).
         "served": _SERVED[0],
+        # IKA-454: which clock the stages' cpu column was read from, and its cycle rate.
+        "cpu_clock": CPU_CLOCK,
+        "cycles_per_second": CYCLES_PER_SECOND,
         "stages": {
             name: {"wall": s.wall, "cpu": s.cpu, "calls": s.calls}
             for name, s in _STAGES.items()
@@ -1015,8 +1118,8 @@ def snapshot() -> dict[str, Any]:
 def _process_times() -> dict[str, Any]:
     """This process's CPU seconds, and its children's, from the kernel's own counters.
 
-    `thread_time` is quantised at a scheduler tick and the per-stage numbers wear that;
-    these do not, so the shares can be checked against a total that is not made of them.
+    The per-stage CPU is a thread clock (`thread_cpu`), and these are the kernel's process
+    totals, so the shares can be checked against a total that is not made of them.
     Children are separate because the Rust node is a child: counting its CPU as this
     process's is exactly the confusion that made "Rust 84% / Python 4%" read as a CPU
     split when it was a wall-clock one.
