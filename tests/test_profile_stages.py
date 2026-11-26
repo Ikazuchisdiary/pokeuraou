@@ -33,8 +33,8 @@ def tool() -> Any:
 def namespace(**given: Any) -> argparse.Namespace:
     base = {
         "workload": "generation", "out": Path("out"), "games": 24, "first_game": None,
-        "workers": None, "seed": None, "roster": None, "value": "v.pt", "limit": None,
-        "selection_book": None, "uniform_selection": False, "force_lead": None,
+        "workers": None, "seed": None, "value": "v.pt", "limit": None,
+        "uniform_selection": False,
         "device": "cuda", "no_bridge": False, "served": False, "servers": 2,
         "hide_bench": False, "rest": [],
     }
@@ -44,19 +44,18 @@ def namespace(**given: Any) -> argparse.Namespace:
 
 def test_an_unset_option_is_left_to_the_driver(tool: Any) -> None:
     command = tool.build(namespace())
-    for flag in ("--limit", "--workers", "--seed", "--selection-book", "--first-game",
-                 "--roster", "--force-lead", "--uniform-selection"):
+    for flag in ("--limit", "--workers", "--seed", "--first-game", "--uniform-selection"):
         assert flag not in command
 
 
 def test_the_shipping_command_line_goes_through(tool: Any) -> None:
     command = tool.build(namespace(
         games=600, seed=6601, served=True, servers=2, workers=24, limit=12,
-        selection_book=Path("book.jsonl.gz"), hide_bench=True, rest=["--rank-leaf"],
+        hide_bench=True, rest=["--rank-leaf"],
     ))
     joined = " ".join(command)
     for part in ("--games 600", "--seed 6601", "--served --servers 2", "--workers 24",
-                 "--limit 12", "--selection-book book.jsonl.gz", "--hide-bench"):
+                 "--limit 12", "--hide-bench"):
         assert part in joined
     # The tail is the workers', after generate_queue's own `--`.
     assert command[-2:] == ["--", "--rank-leaf"]
@@ -76,8 +75,7 @@ def test_process_role_reads_the_command_line(tool: Any) -> None:
 
 def worker(tool: Any, **overrides: Any) -> dict[str, Any]:
     argv = ["tools/selfplay.py", "--queue", "q", "--seed", "6601", "--limit", "12",
-            "--roster", "r", "--hide-bench", "--out", "missing.jsonl",
-            "--selection-book", "book.jsonl.gz", "--rank-leaf"]
+            "--hide-bench", "--out", "missing.jsonl", "--rank-leaf"]
     report = {
         "pid": 1, "argv": argv, "source": str(tool.ROOT / "src" / "pokeuraou"),
         "elapsed": 10.0, "stages": {"lp": {"wall": 4.0, "cpu": 4.0, "calls": 10}},
@@ -88,8 +86,7 @@ def worker(tool: Any, **overrides: Any) -> dict[str, Any]:
 
 
 def test_delivery_passes_the_run_that_was_asked_for(tool: Any) -> None:
-    args = namespace(seed=6601, limit=12, selection_book=Path("book.jsonl.gz"),
-                     hide_bench=True, rest=["--rank-leaf"])
+    args = namespace(seed=6601, limit=12, hide_bench=True, rest=["--rank-leaf"])
     found = tool.delivery([worker(tool), worker(tool)], args)
     assert found["problems"] == []
     assert found["seen"]["--limit"] == {"12": 2}
@@ -101,7 +98,6 @@ def test_delivery_passes_the_run_that_was_asked_for(tool: Any) -> None:
         # Each control breaks one of the shapes the check is for.
         ({"limit": 24}, "--limit"),
         ({"seed": 1}, "--seed"),
-        ({"selection_book": Path("other.jsonl.gz")}, "--selection-book"),
         ({"hide_bench": False}, "--hide-bench"),
         ({"rest": ["--rank-leaf", "--mirror-share", "0.1"]}, "from the tail"),
     ],
@@ -109,8 +105,7 @@ def test_delivery_passes_the_run_that_was_asked_for(tool: Any) -> None:
 def test_delivery_names_a_setting_that_did_not_arrive(
     tool: Any, change: dict[str, Any], said: str
 ) -> None:
-    asked = {"seed": 6601, "limit": 12, "selection_book": Path("book.jsonl.gz"),
-             "hide_bench": True, "rest": ["--rank-leaf"]}
+    asked = {"seed": 6601, "limit": 12, "hide_bench": True, "rest": ["--rank-leaf"]}
     asked.update(change)
     found = tool.delivery([worker(tool)], namespace(**asked))
     assert any(said in problem for problem in found["problems"])

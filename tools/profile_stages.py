@@ -22,13 +22,11 @@ the processes wrote about themselves::
     uv run --group learn python tools/profile_stages.py analysis --limit 16
 
 Generation takes `generate_queue.py`'s own options and passes on only the ones given, so
-the shipping command line (tools/ika73_generate.sh) goes in as it is::
+the shipping command line goes in as it is::
 
     uv run --group learn python tools/profile_stages.py generation --games 600 \\
         --seed 6601 --served --servers 2 --workers 24 --limit 12 \\
-        --value data/models/value-gen11L.pt \\
-        --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz \\
-        --hide-bench -- --rank-leaf
+        --value data/models/value-mc7.pt --pool regmc-matchupweb -- --rank-leaf
 
 After the stage table it prints what IKA-98 added: the CPU of the tree by role, the
 servers' CPU over the time they held a request, what one decision of each kind costs in
@@ -1169,7 +1167,7 @@ def delivery(
     workers = [[str(item) for item in r.get("argv") or []] for r in _worker_reports(reports)]
     seen: dict[str, dict[str, int]] = {}
     for argv in workers:
-        for flag in ("--limit", "--seed", "--roster", "--selection-book", "--force-lead",
+        for flag in ("--limit", "--seed",
                      "--inference-arm", "--value", "--pool", "--selection-store",
                      "--rank-fill", "--bench-drop", "--deepen", "--depth", "--q-arm"):
             value = _flag(argv, flag)
@@ -1182,20 +1180,12 @@ def delivery(
             seen[flag][present] = seen[flag].get(present, 0) + 1
     if args is not None and args.workload == "generation":
         wanted = {
-            "--limit": args.limit, "--seed": args.seed, "--roster": args.roster,
-            "--force-lead": args.force_lead, "--pool": getattr(args, "pool", None),
+            "--limit": args.limit, "--seed": args.seed, "--pool": getattr(args, "pool", None),
         }
         for argv in workers:
             for flag, value in wanted.items():
                 if value is not None and _flag(argv, flag) != str(value):
                     problems.append(f"a worker ran {flag} {_flag(argv, flag)}, asked {value}")
-            if args.selection_book is not None:
-                got = _flag(argv, "--selection-book")
-                if got is None or not _same_path(got, str(args.selection_book)):
-                    problems.append(f"a worker ran --selection-book {got}, "
-                                    f"asked {args.selection_book}")
-            if args.uniform_selection and "--selection-book" in argv:
-                problems.append("a worker drew from a book under --uniform-selection")
             if args.hide_bench is not None and args.hide_bench != ("--hide-bench" in argv):
                 problems.append(f"a worker's --hide-bench is {'--hide-bench' in argv}, "
                                 f"asked {args.hide_bench}")
@@ -1264,9 +1254,8 @@ def build(args: argparse.Namespace) -> list[str]:
     """The real driver's command line for the named workload.
 
     Whatever follows `--` is handed to the driver's own tail, unchanged. It is not a
-    convenience: `match_queue.py` refuses to run without a `--selection-book` in that
-    tail, because a uniform draw is worth about -141 Elo and a timing run played that way
-    would be timing an agent nobody plays.
+    convenience: a timing run that dropped an option of the shipped agent would be timing an
+    agent nobody plays.
     """
     tail = list(args.rest)
     python = sys.executable
@@ -1286,13 +1275,10 @@ def build(args: argparse.Namespace) -> list[str]:
             *given("--first-game", args.first_game),
             *given("--workers", args.workers),
             *given("--seed", args.seed),
-            *given("--roster", args.roster),
             "--value", str(args.value),
             *given("--q-model", getattr(args, "q_model", None)),
             *given("--limit", args.limit),
-            *given("--selection-book", args.selection_book),
             *(["--uniform-selection"] if args.uniform_selection else []),
-            *given("--force-lead", args.force_lead),
             *given("--pool", getattr(args, "pool", None)),
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
@@ -1312,6 +1298,7 @@ def build(args: argparse.Namespace) -> list[str]:
             "--games", str(args.games),
             "--workers", str(args.workers or (24 if args.served else 6)),
             "--value", str(args.value),
+            *given("--pool", getattr(args, "pool", None)),
             "--baseline", str(args.baseline),
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
@@ -1339,10 +1326,7 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None, help="analysis: 24 when unset")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--first-game", type=int, default=None)
-    ap.add_argument("--roster", default=None)
-    ap.add_argument("--selection-book", type=Path, default=None)
     ap.add_argument("--uniform-selection", action="store_true")
-    ap.add_argument("--force-lead", default=None)
     ap.add_argument("--pool", default=None, help="generation: generate_queue.py's --pool (M-C)")
     ap.add_argument(
         "--no-timing",
@@ -1423,8 +1407,7 @@ def main() -> None:
     args = ap.parse_args(argv)
     args.rest = tail
     generation_only = {
-        "--seed": args.seed, "--first-game": args.first_game, "--roster": args.roster,
-        "--selection-book": args.selection_book, "--force-lead": args.force_lead,
+        "--seed": args.seed, "--first-game": args.first_game,
         "--uniform-selection": args.uniform_selection or None, "--pool": args.pool,
     }
     stray = [flag for flag, value in generation_only.items() if value is not None]

@@ -106,12 +106,10 @@ def pool_file(tmp_path):  # noqa: ANN001, ANN201
 
 
 def test_the_driver_refuses_an_unnamed_other_arm(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
-    for argv in (["--pool", pool_file, "--hide-bench"],
-                 ["--uniform-selection", "--hide-bench"]):
-        code, command = _driver(tmp_path, monkeypatch, argv)
-        assert command is None, "a worker was built for a match with no named other arm"
-        assert isinstance(code, str) and "--baseline-hp-share" in code
-        assert "--baseline" in code
+    code, command = _driver(tmp_path, monkeypatch, ["--pool", pool_file, "--hide-bench"])
+    assert command is None, "a worker was built for a match with no named other arm"
+    assert isinstance(code, str) and "--baseline-hp-share" in code
+    assert "--baseline" in code
 
 
 def test_the_driver_passes_hp_share_on(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
@@ -119,11 +117,6 @@ def test_the_driver_passes_hp_share_on(tmp_path, monkeypatch, pool_file) -> None
                             ["--pool", pool_file, "--hide-bench", "--baseline-hp-share"])
     assert code == 0
     assert "--baseline-hp-share" in command and "--baseline" not in command
-    # M-B: generation_match.py has no such flag; its other arm is its --objective.
-    code, command = _driver(tmp_path, monkeypatch,
-                            ["--uniform-selection", "--hide-bench", "--baseline-hp-share"])
-    assert code == 0
-    assert "--baseline-hp-share" not in command and "--baseline" not in command
 
 
 def test_an_explicit_baseline_is_passed_as_before(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
@@ -142,15 +135,9 @@ def test_an_explicit_baseline_is_passed_as_before(tmp_path, monkeypatch, pool_fi
     assert command[-len(tail):] == tail and "--baseline-hp-share" not in command
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["--baseline", "b.pt", "--baseline-hp-share"],
-        ["--baseline-hp-share", "--", "--objective", "faints"],
-    ],
-)
-def test_the_driver_refuses_a_contradiction(tmp_path, monkeypatch, argv) -> None:  # noqa: ANN001
+@pytest.mark.parametrize("argv", [["--baseline", "b.pt", "--baseline-hp-share"]])
+def test_the_driver_refuses_a_contradiction(tmp_path, monkeypatch, pool_file, argv) -> None:  # noqa: ANN001
     code, command = _driver(tmp_path, monkeypatch,
-                            ["--uniform-selection", "--hide-bench", *argv])
+                            ["--pool", pool_file, "--hide-bench", *argv])
     assert command is None
     assert isinstance(code, str) and "contradicts" in code

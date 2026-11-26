@@ -84,13 +84,6 @@ def check_other_arm(args: argparse.Namespace, extra: list[str]) -> None:
             "the other arm's leaf -- the same files as --value for a null control -- or "
             "--baseline-hp-share to mean hp-share (IKA-335)."
         )
-    if args.baseline_hp_share and args.pool is None and "--objective" in extra:
-        given = extra[extra.index("--objective") + 1: extra.index("--objective") + 2]
-        if given != ["hp-share"]:
-            raise SystemExit(
-                f"--baseline-hp-share contradicts --objective {' '.join(given)} in the tail: "
-                "without --baseline generation_match.py's other arm is its --objective."
-            )
 
 
 def corrected_monitor(args: argparse.Namespace, out_dir: Path) -> object:
@@ -151,9 +144,8 @@ def main() -> None:
     ap.add_argument(
         "--baseline-hp-share",
         action="store_true",
-        help="the other arm has no leaf and you mean it: hp-share (with --pool the M-C "
-        "origin, passed on to every worker; without, generation_match.py's --objective, "
-        "which must then be hp-share). Leaving --baseline out used to mean this silently, "
+        help="the other arm has no leaf and you mean it: hp-share (the M-C origin, "
+        "passed on to every worker). Leaving --baseline out used to mean this silently, "
         "and IKA-296's null control -- an arm against itself -- ran against hp-share "
         "because its driver left it out (IKA-335).",
     )
@@ -197,14 +189,7 @@ def main() -> None:
         "a direct run at all. Answers do not depend on this: requests are never merged, "
         "so a batch gets the same numbers wherever it is served.",
     )
-    add_bench_flags(
-        ap,
-        hidden_help="pass --hide-bench to every worker: the condition that ships "
-        "(tools/ika73_match.sh). One of this or --open-bench is required.",
-        open_help="pass --open-bench to every worker. A model trained on hidden-bench "
-        "games judged in the open game measures which model suits the open game, so this "
-        "is a reference; before IKA-123 it was what omitting both flags meant.",
-    )
+    add_bench_flags(ap)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
@@ -248,7 +233,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--pool",
-        default=None,
+        required=True,
         help="an M-C match (IKA-259): both seats from this pool (data/pool/<id>.json), "
         "played by tools/pool_match.py. Each arm solves each pair's selection with its own "
         "leaf and believes the opponent's bench from that solve, so there is no book; "
@@ -344,18 +329,6 @@ def main() -> None:
         pool_regulation = json.loads(find_pool(args.pool).read_bytes().decode("utf-8"))[
             "regulation"
         ]
-    elif "--selection-book" not in extra and not args.uniform_selection:
-        raise SystemExit(
-            "no --selection-book in the options passed after `--`, so both arms will "
-            "draw their four of six uniformly. That is worth about -141 Elo against the "
-            "advice and is not a default: pass a book, or pass --uniform-selection to "
-            "mean it (which the hp-share anchors do)."
-        )
-    if args.uniform_selection and "--selection-book" in extra:
-        raise SystemExit(
-            "--uniform-selection contradicts the --selection-book in the tail; one of "
-            "them is not what you meant."
-        )
 
     check_other_arm(args, extra)
     if args.q_model is None and args.pool is not None:
@@ -488,10 +461,9 @@ def main() -> None:
               + " (workers hold no model)", file=sys.stderr, flush=True)
 
     def build(worker: int, address: str) -> list[str]:
-        program = "pool_match.py" if args.pool is not None else "generation_match.py"
         command = [
-            sys.executable, str(ROOT / "tools" / program),
-            *(["--pool", args.pool] if args.pool is not None else []),
+            sys.executable, str(ROOT / "tools" / "pool_match.py"),
+            "--pool", args.pool,
             "--queue", address,
             "--seed", str(args.seed),
             "--games", str(args.games),

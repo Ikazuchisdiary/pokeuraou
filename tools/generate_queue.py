@@ -19,14 +19,14 @@ and makes a retry after a death a retry of the game that was lost.
 The driver itself lives in `pokeuraou.workqueue`, shared with `tools/match_queue.py`.
 
     uv run --group learn python tools/generate_queue.py --out data/selfplay-gen9 \\
-        --games 12000 --workers 8 --value data/models/value-all.pt --limit 48 --hide-bench
+        --games 12000 --workers 8 --pool regmc-matchupweb --value data/models/value-all.pt
 
-`--hide-bench` or `--open-bench` is required, as `--uniform-selection` is for a missing
-book: the condition that does not ship has to be asked for by name (IKA-123).
+The bench is hidden in every game; `--hide-bench` is accepted and changes nothing (IKA-460
+removed the open game and M-B's roster path, so `--pool` is the only generation).
 
 Everything after `--` goes to the workers untouched, for options this does not name:
 
-    ... --workers 8 -- --mirror-share 0.1 --rank-leaf
+    ... --workers 8 -- --rank-leaf
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -61,7 +60,6 @@ def main() -> None:
     # lives: 8 when every worker carries one, 24 when they are served.
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--seed", type=int, default=1, help="seeds the run, not a worker")
-    ap.add_argument("--roster", default="rizabanadohido", help="also names the book")
     ap.add_argument("--value", default=None)
     ap.add_argument("--q-model", default=None,
                     help="the Q a q / q-nocover --rank-fill ranks by (IKA-274): the servers "
@@ -173,39 +171,12 @@ def main() -> None:
         "launcher and asks for this flag.",
     )
     ap.add_argument(
-        "--selection-book",
-        type=Path,
-        default=None,
-        help="the 6-of-4 selection equilibrium both sides draw from. Derived from --value "
-        "when not given, because a book is one model's opinion about selection and the two "
-        "have to move together. Drawing the four uniformly instead costs +18.9 against "
-        "+22.1 for the advice -- about 141 Elo, the whole distance from the parameter-free "
-        "baseline to the best agent on this scale -- so this is the most expensive thing "
-        "on the command line to forget.",
-    )
-    ap.add_argument(
         "--uniform-selection",
         action="store_true",
-        help="draw the four of six uniformly and say so out loud. Without this a missing "
-        "book is an error rather than a silent -141 Elo.",
+        help="draw the four of six uniformly (a reference) instead of solving each pair's "
+        "selection with the leaf, which is what ships.",
     )
-    # Like --uniform-selection above: the condition that does not ship has to be named.
-    # Before IKA-123 a run without --hide-bench generated open teacher data and said so
-    # only in each game's `information` field.
-    add_bench_flags(
-        ap,
-        hidden_help="pass --hide-bench to every worker: neither search sees the other "
-        "side's unplayed bench. What ships (tools/ika73_generate.sh). One of this or "
-        "--open-bench is required.",
-        open_help="pass --open-bench to every worker: open teacher data, which the pools "
-        "before the hidden bench are and which a training set keeps apart by its "
-        "`information` field. What omitting both flags meant before IKA-123.",
-    )
-    ap.add_argument(
-        "--force-lead",
-        default=None,
-        help="passed to every worker: species that must lead. See tools/selfplay.py.",
-    )
+    add_bench_flags(ap)
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
         "--no-port-node", action="store_true",
@@ -214,10 +185,9 @@ def main() -> None:
     )
     ap.add_argument(
         "--pool",
-        default=None,
+        required=True,
         help="M-C generation (IKA-81): both seats from this pool (data/pool/<id>.json), "
-        "no --roster and no book -- each worker solves a pair's selection with the leaf "
-        "the first time it meets it. Hidden bench unless --open-bench (IKA-128). "
+        "each worker solves a pair's selection with the leaf the first time it meets it. "
         "--uniform-selection draws the fours uniformly instead.",
     )
     ap.add_argument(
@@ -244,10 +214,6 @@ def main() -> None:
         help="after --, options passed to every worker unchanged",
     )
     args = ap.parse_args()
-    if args.record_rank_scores and args.pool is None:
-        raise SystemExit("--record-rank-scores is the pool path's (IKA-278); pass --pool")
-    if args.pool is not None and args.hide_bench is None:
-        args.hide_bench = True
     require_bench(args)
     if args.workers is None:
         # Swept on the board, width 16 against 48, startup discarded, one machine, back to
@@ -275,7 +241,7 @@ def main() -> None:
     )
 
     extra = args.rest[1:] if args.rest and args.rest[0] == "--" else args.rest
-    if args.q_model is None and args.pool is not None:
+    if args.q_model is None:
         from pokeuraou import qrank
 
         # IKA-338: M-C generation ranks its leaf-ranked menus by the default Q unless the
@@ -287,47 +253,14 @@ def main() -> None:
                 raise SystemExit(qrank.missing_q(q_path))
             args.q_model = str(q_path)
 
-    # The guard `generate_parallel.sh` has and this did not. A book missing from the
-    # command line looked exactly like a book that was not wanted, and the two differ by
-    # about 141 Elo in the generated games.
-    # The roster the workers will actually use, which is the tail's when the tail names
-    # one. Deriving the book from this side's default while the workers played another
-    # roster would look for a book that cannot exist, and land on the uniform draw for a
-    # reason nobody would guess.
-    roster = args.roster
-    if "--roster" in extra:
-        roster = extra[extra.index("--roster") + 1]
+    # The servers build their encoder from the pool's regulation.
+    from pokeuraou.pool import find_pool
 
-    book = args.selection_book
-    # The servers build their encoder from this; without a roster it has to be the pool's.
-    pool_regulation = None
-    if args.pool is not None:
-        from pokeuraou.pool import find_pool
-
-        pool_regulation = json.loads(
-            find_pool(args.pool).read_bytes().decode("utf-8")
-        )["regulation"]
-    if args.pool is not None:
-        if book is not None or "--roster" in extra or "--selection-book" in extra:
-            raise SystemExit("--pool has no own side: no --roster and no --selection-book")
-        if not args.uniform_selection:
-            print("  selection: solved per pair with the leaf, in each worker",
-                  file=sys.stderr)
-    elif book is None and args.value and not args.uniform_selection:
-        stem = re.sub(r"-s\d+$", "", Path(args.value).stem)
-        book = ROOT / "data" / "selection" / f"{roster}-{stem}.jsonl.gz"
+    pool_regulation = json.loads(find_pool(args.pool).read_bytes().decode("utf-8"))["regulation"]
     if args.uniform_selection:
-        book = None
         print("  selection: uniform 4-of-6, as asked", file=sys.stderr)
-    elif book is not None and not Path(book).exists():
-        raise SystemExit(
-            f"no selection book at {book}. Solve one with tools/solve_book_parallel.sh, "
-            f"pass --selection-book, or pass --uniform-selection to mean it -- a uniform "
-            f"draw is worth about -141 Elo against the advice and is not a default."
-        )
-    if book is not None and "--selection-book" not in extra:
-        extra = ["--selection-book", str(book), *extra]
-        print(f"  selection: {Path(book).name}", file=sys.stderr)
+    else:
+        print("  selection: solved per pair with the leaf, in each worker", file=sys.stderr)
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -350,10 +283,9 @@ def main() -> None:
             if not args.python_server and args.device == "cuda":
                 # IKA-461: the value arm and the Q arm both in the Rust server.
                 from pokeuraou.rustnet import server_command
-                from pokeuraou.teams import load_roster
 
                 command = server_command(
-                    pool_regulation or load_roster(args.roster).reg.format_id,
+                    pool_regulation,
                     {"value": [args.value]},
                     {"q": args.q_model} if args.q_model else {},
                     out_dir,
@@ -362,7 +294,7 @@ def main() -> None:
                 command = [
                     sys.executable, str(ROOT / "tools" / "inference_server.py"),
                     "--device", args.device,
-                    *(["--regulation", pool_regulation] if pool_regulation else []),
+                    "--regulation", pool_regulation,
                     "--arm", "value", args.value,
                     *(["--q-arm", "q", args.q_model] if args.q_model else []),
                 ]
@@ -397,14 +329,9 @@ def main() -> None:
             "--limit", str(args.limit),
             "--device", args.device,
             "--torch-threads", "1",
-            *(
-                ["--pool", args.pool,
-                 *(["--uniform-selection"] if args.uniform_selection else [])]
-                if args.pool is not None
-                else ["--roster", args.roster]
-            ),
+            "--pool", args.pool,
+            *(["--uniform-selection"] if args.uniform_selection else []),
             *bench_argv(args.hide_bench),
-            *(["--force-lead", args.force_lead] if args.force_lead else []),
             "--out", str(out_dir / f"games-worker{worker}.jsonl"),
             *(["--record-rank-scores"] if args.record_rank_scores else []),
         ]
@@ -433,7 +360,7 @@ def main() -> None:
         f"  run seed {args.seed}, search {args.limit}, "
         f"leaf {args.value or 'hp-share'} on {args.device}, "
         f"{'Q ' + Path(args.q_model).name + ', ' if args.q_model else ''}"
-        f"bench {'hidden' if args.hide_bench else 'OPEN (reference)'}"
+        "bench hidden"
         f"{', rank scores recorded (rank-worker*.jsonl.gz)' if args.record_rank_scores else ''}"
         f"\n  worker failures: stop after "
         f"{'none (never)' if max_failures is None else max_failures} "

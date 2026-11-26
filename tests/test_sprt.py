@@ -389,6 +389,9 @@ def test_match_queue_registers_its_test_before_the_first_game(tmp_path, monkeypa
     driver starts a worker, the driver is handed the monitor, and a second run into the same
     directory is refused -- a test whose bounds could be rewritten after games exist is not
     a test fixed in advance."""
+    from .test_poolplay import _variants, _write_pool
+
+    pool_file = _write_pool(tmp_path / "pool.json", _variants())
     match_queue = load_tool("match_queue")
     seen: dict[str, object] = {}
 
@@ -404,8 +407,8 @@ def test_match_queue_registers_its_test_before_the_first_game(tmp_path, monkeypa
         "argv",
         [
             "match_queue.py", "--out", str(tmp_path), "--games", "5", "--value", "a.pt",
-            "--baseline-hp-share", "--sprt", "-5", "15", "--sprt-beta", "0.1", "--uniform-selection",
-            "--hide-bench", "--",
+            "--baseline-hp-share", "--sprt", "-5", "15", "--sprt-beta", "0.1",
+            "--pool", str(pool_file), "--hide-bench", "--",
         ],
     )
     with pytest.raises(SystemExit) as ended:

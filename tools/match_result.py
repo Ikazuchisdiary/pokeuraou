@@ -198,7 +198,7 @@ def main() -> None:
                     "    A defect looks different: the gap survives the swap, or the\n"
                     "    tested arm beats its own mirror. Compare side 0's rate here\n"
                     "    against the book's mean equilibrium value for the roster\n"
-                    "    (`tools/ordering_result.py` prints that comparison per opponent);\n"
+                    "    (the ordering comparison tool was removed in IKA-460);\n"
                     "    a large disagreement is the matrix, not the harness."
                 )
 
