@@ -49,20 +49,20 @@ impl From<String> for Failure {
     }
 }
 
-struct Hidden {
-    game: u64,
-    seen: [Vec<String>; 2],
-    leads: [Option<Vec<String>>; 2],
+pub(crate) struct Hidden {
+    pub(crate) game: u64,
+    pub(crate) seen: [Vec<String>; 2],
+    pub(crate) leads: [Option<Vec<String>>; 2],
 }
 
 /// The caller's side of the request: the leaf each side scores with, and what a hidden bench
 /// is read from.
 pub struct Context {
-    servers: Vec<Server>,
-    net_scores_ends: Vec<bool>,
-    rules: Vec<EncodeRules>,
-    leaf: [usize; 2],
-    hidden: Option<Hidden>,
+    pub(crate) servers: Vec<Server>,
+    pub(crate) net_scores_ends: Vec<bool>,
+    pub(crate) rules: Vec<EncodeRules>,
+    pub(crate) leaf: [usize; 2],
+    pub(crate) hidden: Option<Hidden>,
 }
 
 fn strings(value: &Value) -> Vec<String> {
@@ -242,7 +242,7 @@ fn copy<'a>(pause: &Suspended<'a>) -> Suspended<'a> {
 }
 
 /// `SideAction.to_choice` of a replacement: what the record writes.
-fn choice_string(option: &[SlotAction]) -> Result<String, String> {
+pub(crate) fn choice_string(option: &[SlotAction]) -> Result<String, String> {
     let mut parts = Vec::new();
     for action in option {
         parts.push(match action {

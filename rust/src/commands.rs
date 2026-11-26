@@ -713,6 +713,30 @@ pub fn lead_phase(
     }
 }
 
+/// `resolve_replacements` with each draw it opens answered by `draw` (the weights in, the index
+/// out), the phase replayed with the answers so far as `RustNode._phase` does over the pipe
+/// (IKA-458 stage 3.6a). The position and the notes of the last replay.
+pub fn replacement_phase_drawn(
+    reg: &Reg,
+    position: &Position,
+    choices: [Vec<SlotAction>; 2],
+    mut draw: impl FnMut(&[f64]) -> Result<usize, String>,
+) -> Result<(Position, std::collections::BTreeSet<String>), String> {
+    if &*position.format != reg.format_id.as_str() {
+        return Err("position is for another regulation".into());
+    }
+    let mut presets: Vec<usize> = Vec::new();
+    loop {
+        let value = json!({ "presets": presets });
+        let (after, notes, opened, _log) =
+            phase_position(reg, position.clone(), &value, Phase::Replacements, choices.clone())?;
+        match opened.first() {
+            Some(weights) if !weights.is_empty() => presets.push(draw(weights)?),
+            _ => return Ok((after, notes)),
+        }
+    }
+}
+
 /// The phase's position, its notes, the draws it opened and its trace: `phase_command`'s
 /// answer before it is written out (IKA-350: `replacements_encoded` encodes it instead).
 type Phased = (Position, std::collections::BTreeSet<String>, Vec<Vec<f64>>, Option<Box<EventLog>>);
@@ -867,7 +891,21 @@ pub fn replacements_encoded(
             .and_then(Value::as_bool)
             .unwrap_or(false),
     };
-    let pairs = value["pairs"].as_array().cloned().unwrap_or_default();
+    let pairs: Vec<[Vec<SlotAction>; 2]> =
+        value["pairs"].as_array().map(|a| a.iter().map(two_sides).collect()).unwrap_or_default();
+    replacements_encoded_of(reg, encoder, &position, rules, &pairs)
+}
+
+/// `replacements_encoded` over a position and pairs already read (IKA-458 stage 3.6a: the
+/// replacement phase of a game asks for it without a request's JSON).
+pub(crate) fn replacements_encoded_of(
+    reg: &Reg,
+    encoder: &crate::encode::Encoder,
+    position: &Position,
+    rules: crate::encode::EncodeRules,
+    pairs: &[[Vec<SlotAction>; 2]],
+) -> Result<(Value, crate::encode::Encoded), String> {
+    let value = &Value::Null;
     let mut leaves: Vec<Position> = Vec::with_capacity(pairs.len());
     // IKA-352: a pair whose phase draws (a Speed tie among the switch-ins that changes where
     // they end, a Trace between two foes) is every outcome at its weight -- one row each,
@@ -877,7 +915,7 @@ pub fn replacements_encoded(
     let mut drew = false;
     for (cell, pair) in pairs.iter().enumerate() {
         let (after, notes, _opened, _log) =
-            phase_position(reg, position.clone(), value, Phase::Replacements, two_sides(pair))?;
+            phase_position(reg, position.clone(), value, Phase::Replacements, pair.clone())?;
         if !notes.iter().any(|note| note.ends_with(DRAWN)) {
             leaves.push(after);
             branches.push((cell, 1.0));
@@ -889,7 +927,7 @@ pub fn replacements_encoded(
         while let Some((presets, weight)) = pending.pop_front() {
             let asked = json!({ "presets": presets });
             let (after, _notes, opened, _log) =
-                phase_position(reg, position.clone(), &asked, Phase::Replacements, two_sides(pair))?;
+                phase_position(reg, position.clone(), &asked, Phase::Replacements, pair.clone())?;
             match opened.first() {
                 None => {
                     leaves.push(after);

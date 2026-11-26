@@ -82,7 +82,9 @@ COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps"
           # IKA-458 stage 3.5: the games whose preparation the port made.
           "prepared": 0,
           # IKA-458 stage 3.2: the self-switch nodes the port chose and played on.
-          "selfswitched": 0}
+          "selfswitched": 0,
+          # IKA-458 stage 3.6a: the replacement phases the port chose and played in one request.
+          "phased": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -303,6 +305,23 @@ def set_selfswitch(on: bool) -> None:
 
 set_selfswitch(SELFSWITCH[0])
 
+PLAY_ENV = "POKEURAOU_GEN_PORT_PLAY"
+#: IKA-458 stage 3.6: whether the game's own steps are the port's -- stage 3.6a: a replacement phase
+#: (the options, the node, both draws and the phase) is one request (`replacephase`,
+#: `rust/src/replacephase.rs`). Off by default, and off in `default_on_for_generation`. On includes
+#: `SELFSWITCH` (and so the stages below it).
+PLAY = [os.environ.get(PLAY_ENV, "0").strip() == "1"]
+
+
+def set_play(on: bool) -> None:
+    """Turn stage 3.6 on or off in this process; on turns `SELFSWITCH` on too."""
+    PLAY[0] = bool(on)
+    if on:
+        set_selfswitch(True)
+
+
+set_play(PLAY[0])
+
 
 def default_on_for_generation() -> None:
     """Generation's, and its board's, default: stage 1.4's whole-node road, unless
@@ -340,7 +359,8 @@ def echo() -> str:
         f"advance {word[ADVANCE[0]]} ({ADVANCE_ENV}={os.environ.get(ADVANCE_ENV, '(unset)')}), "
         f"hidden {word[HIDDEN[0]]} ({HIDDEN_ENV}={os.environ.get(HIDDEN_ENV, '(unset)')}), "
         f"prep {word[PREP[0]]} ({PREP_ENV}={os.environ.get(PREP_ENV, '(unset)')}), "
-        f"selfswitch {word[SELFSWITCH[0]]} ({SELFSWITCH_ENV}={os.environ.get(SELFSWITCH_ENV, '(unset)')}); "
+        f"selfswitch {word[SELFSWITCH[0]]} ({SELFSWITCH_ENV}={os.environ.get(SELFSWITCH_ENV, '(unset)')}), "
+        f"play {word[PLAY[0]]} ({PLAY_ENV}={os.environ.get(PLAY_ENV, '(unset)')}); "
         f"faults solved in Python: {COUNTS['faults']}; {counts()}"
     )
 
@@ -565,7 +585,8 @@ def counts() -> dict[str, int]:
 
 
 __all__ = ["ADVANCE", "ADVANCE_ENV", "COUNTS", "DECIDE", "DECIDE_ENV", "ENV", "EXACT",
-           "PREP", "PREP_ENV", "set_prep", "SELFSWITCH", "SELFSWITCH_ENV", "set_selfswitch",
+           "PLAY", "PLAY_ENV", "set_play", "PREP", "PREP_ENV", "set_prep",
+           "SELFSWITCH", "SELFSWITCH_ENV", "set_selfswitch",
            "EXACT_ENV", "FOLD", "FOLD_ENV",
            "GEN", "GEN_ENV", "NODE", "NODE_ENV", "MENUS", "MENUS_ENV", "ON", "REPLACE",
            "REPLACE_ENV", "PortFault", "STACK", "STACK_ENV", "bayesian_answer", "counts",

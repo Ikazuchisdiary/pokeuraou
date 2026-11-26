@@ -52,6 +52,7 @@ mod prep;
 mod reg;
 mod residual;
 mod replacenode;
+mod replacephase;
 mod resolve;
 mod qfeatures;
 mod qmenus;

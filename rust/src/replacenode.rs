@@ -49,6 +49,59 @@ fn settle(values: &mut [f64], header: &Value, net_scores_ends: bool) -> u64 {
     ended
 }
 
+/// One completion's matrix of the replacement node, from a position and the pairs of options
+/// already read (IKA-458 stage 3.6a: `node`'s per-job work without a request's JSON): every
+/// pair's phase filled and encoded, scored on `server`, an ended leaf settled, a phase that draws
+/// folded into its cell by weight. The matrix (row-major) and the fill's account for Python's
+/// counters; an `Err` is an answer to hand back (a fault, or the server's failure).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn score_job(
+    reg: &Reg,
+    encoder: &Encoder,
+    position: &crate::position::Position,
+    pairs: &[[Vec<crate::resolve::SlotAction>; 2]],
+    rules: crate::encode::EncodeRules,
+    server: &Server,
+    net_scores_ends: bool,
+    stats: &mut Stats,
+    ended: &mut u64,
+    m: usize,
+    n: usize,
+) -> Result<(Vec<f64>, Value), Value> {
+    let fault = |e: String| json!({ "fault": e });
+    let per_row = (2 * encoder.widths.mons_per_side).max(1);
+    let (header, encoded) = crate::resolve::commands::replacements_encoded_of(reg, encoder, position, rules, pairs)
+        .map_err(|why| fault(format!("the port refused a replacement phase: {why}")))?;
+    let rows = encoded.species.len() / per_row;
+    let batch = crate::served::begin(server, &encoder.widths, &[&encoded], &[rows], stats).map_err(server_failed)?;
+    let mut values = crate::served::finish(server, batch, stats).map_err(server_failed)?;
+    *ended += settle(&mut values, &header, net_scores_ends);
+    let cell_values = match header.get("branches").and_then(Value::as_array).filter(|b| !b.is_empty()) {
+        Some(branches) => {
+            if branches.len() != values.len() {
+                return Err(fault("the branches are not the rows".into()));
+            }
+            let mut out = vec![0.0f64; m * n];
+            for (row, branch) in branches.iter().enumerate() {
+                let cell = branch.get(0).and_then(Value::as_u64).ok_or_else(|| fault("a branch's cell".into()))? as usize;
+                let weight = branch.get(1).and_then(Value::as_f64).ok_or_else(|| fault("a branch's weight".into()))?;
+                if cell >= out.len() {
+                    return Err(fault("a branch's cell is outside the node".into()));
+                }
+                out[cell] += weight * values[row];
+            }
+            out
+        }
+        None => {
+            if values.len() != m * n {
+                return Err(fault("the rows are not one a pair".into()));
+            }
+            values
+        }
+    };
+    Ok((cell_values, json!({ "leaves": rows, "mega": header["encoding"]["megaFromSlots"], "pairs": m * n })))
+}
+
 fn node(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
     let fault = |e: String| json!({ "fault": e });
     let m = value["rows"].as_u64().ok_or_else(|| fault("replacementNode without rows".into()))? as usize;

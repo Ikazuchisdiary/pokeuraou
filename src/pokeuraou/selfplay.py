@@ -1637,6 +1637,7 @@ def play_game(
                 sheets=sheets, shown=shown, bench_prior=bench_prior, leads=leads,
                 recorded_shown=recorded_shown, dex_base=dex_bases, selects=selects,
                 stepped=stepped,
+                hidden_number=hidden_game.number if stepped is not None and hidden_game is not None else None,
             )
             continue
 
@@ -2912,6 +2913,7 @@ def _do_replacement_node(
     dex_base: tuple[bool, bool] = (False, False),
     selects: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
     stepped: Any = None,  # noqa: ANN401 - `hiddenstep.Step`: the completions the port made
+    hidden_number: int | None = None,
 ) -> Position:
     """Solves and applies the replacement phase.
 
@@ -2937,6 +2939,33 @@ def _do_replacement_node(
     completion: a replacement names a *slot*, and which slots are free is public even when
     who is standing in them is not.
     """
+    if sheets is not None and stepped is not None and stepped.error is None:
+        # IKA-458 stage 3.6a: the options, the node, both draws and the phase in one request.
+        from . import replacephase
+
+        played = replacephase.play(
+            reg, rng, pos, leaves, selects, hidden_number, stepped.seen, leads or [None, None]
+        )
+        if played is not None:
+            record.decisions.append(
+                Decision(
+                    turn=pos.turn,
+                    kind="replacement",
+                    position=pos.to_json(),
+                    own_actions=played.options[0],
+                    own_policy=played.policy[0],
+                    foe_actions=played.options[1],
+                    foe_policy=played.policy[1],
+                    search_value=played.value,
+                    own_chosen=played.options[0][played.chosen[0]],
+                    foe_chosen=played.options[1][played.chosen[1]],
+                    shown=recorded_shown,
+                    foe_search_value=played.foe_value,
+                )
+            )
+            timing.decided("replacement")
+            record.unmodelled.extend(played.notes)
+            return played.position
     options: list[list[SideAction]] = []
     for side_index in range(2):
         must = list(owed[side_index])

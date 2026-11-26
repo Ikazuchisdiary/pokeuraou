@@ -2854,7 +2854,7 @@ pub fn self_switches_needed(pos: &Position) -> [[bool; 2]; 2] {
 ///
 /// `switch_actions_after_faint`: fill as many slots as there are Pokemon to fill them
 /// with, and which slot the last one takes is the player's choice.
-fn replacement_options(
+pub(crate) fn replacement_options(
     pos: &Position,
     side_index: usize,
     owed: [bool; 2],

@@ -1054,6 +1054,12 @@ class RustNode:
         the replacement fills it replaces were (`rust.replacements`)."""
         return self._exchange(request)
 
+    @timing.timed("rust.replacements")
+    def replacement_phase(self, request: dict[str, Any]) -> dict[str, Any]:
+        """IKA-458 stage 3.6a: a replacement phase's options, node, draws and phase
+        (`replacementPhase`) in one crossing."""
+        return self._exchange(request)
+
     def parallel(self) -> dict[str, Any]:
         """The port's cell-thread counters (IKA-32): `threads`, and how many maps and items
         ran on the pool, `offMain` of them on a thread other than the one reading requests."""

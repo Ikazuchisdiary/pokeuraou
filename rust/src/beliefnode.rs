@@ -286,32 +286,14 @@ pub(crate) fn solve_games(
     m: usize,
     n: usize,
 ) -> Result<Value, String> {
-    // The games Python names: side `s`'s is over the matrices of the jobs of side `1 - s`, side
-    // 1's as the transpose of the negation (`search.belief_solve`).
     let before = LPS.load(Ordering::Relaxed);
-    let mut answers = Vec::new();
+    let mut asks: Vec<(i64, Vec<f64>)> = Vec::new();
     for ask in value["solve"].as_array().map(Vec::as_slice).unwrap_or_default() {
-        let side = ask["side"].as_i64().ok_or("a solve without side")?;
-        let weights = f64s(&ask["weights"])?;
-        let mut mats: Vec<(Vec<f64>, usize, usize)> = Vec::new();
-        for (payoff, job_side) in matrices.iter().zip(sides) {
-            if 1 - job_side != side {
-                continue;
-            }
-            if side == 0 {
-                mats.push((payoff.clone(), m, n));
-            } else {
-                let mut t = vec![0.0; m * n];
-                for i in 0..m {
-                    for j in 0..n {
-                        t[j * m + i] = -payoff[i * n + j];
-                    }
-                }
-                mats.push((t, n, m));
-            }
-        }
-        GAMES.fetch_add(1, Ordering::Relaxed);
-        answers.push(match solve_bayesian(&mats, &weights, 1e-9) {
+        asks.push((ask["side"].as_i64().ok_or("a solve without side")?, f64s(&ask["weights"])?));
+    }
+    let mut answers = Vec::new();
+    for (side, solved) in solve_asks(&asks, matrices, sides, m, n) {
+        answers.push(match solved {
             Ok(s) => json!({
                 "side": side,
                 "valueRow": s.value_row,
@@ -333,6 +315,41 @@ pub(crate) fn solve_games(
         "answers": answers,
         "lps": LPS.load(Ordering::Relaxed) - before,
     }))
+}
+
+/// The games `asks` name (side, weights), over `matrices` (job k's, `sides[k]` its side): side
+/// `s`'s game is over the matrices of the jobs of side `1 - s`, side 1's as the transpose of the
+/// negation (`search.belief_solve`).
+pub(crate) fn solve_asks(
+    asks: &[(i64, Vec<f64>)],
+    matrices: &[Vec<f64>],
+    sides: &[i64],
+    m: usize,
+    n: usize,
+) -> Vec<(i64, Result<crate::lp::Solved, crate::lp::Unsolved>)> {
+    let mut out = Vec::new();
+    for (side, weights) in asks {
+        let mut mats: Vec<(Vec<f64>, usize, usize)> = Vec::new();
+        for (payoff, job_side) in matrices.iter().zip(sides) {
+            if 1 - job_side != *side {
+                continue;
+            }
+            if *side == 0 {
+                mats.push((payoff.clone(), m, n));
+            } else {
+                let mut t = vec![0.0; m * n];
+                for i in 0..m {
+                    for j in 0..n {
+                        t[j * m + i] = -payoff[i * n + j];
+                    }
+                }
+                mats.push((t, n, m));
+            }
+        }
+        GAMES.fetch_add(1, Ordering::Relaxed);
+        out.push((*side, solve_bayesian(&mats, weights, 1e-9)));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
