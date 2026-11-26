@@ -149,6 +149,32 @@ def test_a_fault_leaves_the_menus_to_python(roster, served, monkeypatch) -> None
     assert got[0] == want[0] and got[1] == want[1]
 
 
+def test_a_collecting_worker_gets_the_rows_the_python_road_writes(roster, served) -> None:  # noqa: ANN001, F811
+    """`--record-rank-scores` (IKA-278) wraps the *leaf* ranking in `rank_scores.watch`; a Q
+    ranking (`_q_ranker`) returns before that wrap, so the Python road writes no row for a Q
+    fill. The port's road must leave the collector as that road does: the same rows, the same
+    cursor. The positive control is that the collector collects (a leaf ranking's matrix) and
+    that the port took the node while it was on."""
+    from pokeuraou import rank_scores
+
+    stub, _model = served
+    reg, pos, spreads = _nodes(roster)[-1]
+    seen = []
+    for menus in (False, True):
+        with rank_scores.collecting() as sink:
+            rank_scores.at_node(7, pos.turn, 0)
+            before = portlp.COUNTS["menus"]
+            got = _build(reg, pos, (12, 12), spreads, stub, menus=menus)
+            took = portlp.COUNTS["menus"] - before
+            rows, pending, node = list(sink.rows), list(sink.pending), sink.node
+            first = got[0][0][0]
+            rank_scores.saw_fill(0, [first], [first], np.zeros((1, 1)))
+            assert len(sink.pending) == len(pending) + 1, "control: the collector does not collect"
+        assert took == int(menus), "the port did not take the node while collecting"
+        seen.append((got[0], rows, pending, node))
+    assert seen[0] == seen[1]
+
+
 def test_another_q_is_other_menus(roster, flags_off) -> None:  # noqa: ANN001, F811
     """The check above is not vacuous: a Q with its rows the other way round gives other menus."""
     menus_of = []
