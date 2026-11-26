@@ -1634,9 +1634,17 @@ def play_game(
         record.leads = [None, None]
 
     steps_left = max_turns * 2
+    # IKA-458 stage 3.6d: a game nobody prepared in the port (a board's) is defined to it here,
+    # as the loop below would at its first step. `one_agent` only prices a side's search when no
+    # hidden bench is solved for both, and a hidden bench is the only game this road plays.
+    if (
+        portlp.PLAY[0] and sheets is not None and hidden_game is None and portlp.HIDDEN[0]
+        and not any(dex_bases) and not luck.active()
+    ):
+        hidden_game = hiddenstep.Game.of(sheets, bench_prior if bench_prior is not None else (None, None))
     if (
         portlp.PLAY[0] and sheets is not None and hidden_game is not None
-        and portlp.HIDDEN[0] and not any(dex_bases) and one_agent and first_action is None
+        and portlp.HIDDEN[0] and not any(dex_bases) and first_action is None
         and all(f is None for f in forced_species) and all(h is None for h in holds)
         and allies == ("off", "off") and binaries == (None, None)
         and set(drops) == {DEFAULT_BENCH_DROP} and tuple(cells) == (0, 0)
@@ -1654,7 +1662,7 @@ def play_game(
         )
         if ready is not None and not pos.ended:
             played = playgame.play(
-                reg, rng, pos, record, ready, steps_left, seen, leads, hidden_game.number
+                reg, rng, pos, record, ready, steps_left, seen, leads, hidden_game
             )
             if played is not None:
                 pos, seen = played.position, played.seen

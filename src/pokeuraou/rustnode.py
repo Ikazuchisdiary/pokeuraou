@@ -1044,8 +1044,15 @@ class RustNode:
         return self._exchange(request)
 
     @timing.timed("rust.game")
-    def play_game(self, request: dict[str, Any]) -> dict[str, Any]:
-        """IKA-458 stage 3.6b: a game's turns (`playGame`) in one crossing."""
+    def play_game(self, request: dict[str, Any], game: Any) -> dict[str, Any]:  # noqa: ANN401
+        """IKA-458 stage 3.6b: a game's turns (`playGame`) in one crossing, the game's sheets and
+        priors defined first if this process has not been given them (a board's game; a
+        generation game's `prepGame` defined it, and its line is empty)."""
+        if game.number not in self._games:
+            if len(self._games) >= 16:  # the port's own bound (`hiddenbench.rs`)
+                self._games.clear()
+            self._process.stdin.write(game.line)
+            self._games.add(game.number)
         return self._exchange(request)
 
     def parallel(self) -> dict[str, Any]:

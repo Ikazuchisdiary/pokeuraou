@@ -140,7 +140,7 @@ def play(  # noqa: PLR0913 - the loop's state
     steps: int,
     seen: list[frozenset[str]],
     leads: list[frozenset[str] | None],
-    game: int,
+    hidden: Any,  # noqa: ANN401 - hiddenstep.Game
 ) -> Played | None:
     """Plays the steps the port does, up to ``steps``, and writes them into ``record``; None where
     the port answered a fault before any step (nothing was written, the generator untouched)."""
@@ -151,7 +151,7 @@ def play(  # noqa: PLR0913 - the loop's state
     before = rng.bit_generator.state
     context = dict(setup.context)
     context["hidden"] = {
-        "game": game,
+        "game": hidden.number,
         "seen": [sorted(s) for s in seen],
         "leads": [None if lead is None else sorted(lead) for lead in leads],
     }
@@ -169,7 +169,7 @@ def play(  # noqa: PLR0913 - the loop's state
         "exactBudget": rustnode.dump_budget(Budget.exact()),
         "steps": steps,
     }
-    answer = port.ask(reg, lambda node: node.play_game(request))
+    answer = port.ask(reg, lambda node: node.play_game(request, hidden))
     portlp.COUNTS["crossings"] += 1
     if "fault" in answer:
         portlp.faulted("playGame", str(answer["fault"]))

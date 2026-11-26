@@ -138,7 +138,7 @@ def test_a_fault_leaves_the_game_to_python(roster, flags, monkeypatch) -> None: 
     try:
         want, want_state = _play(roster, leaf, 2, play=False)
         monkeypatch.setattr(
-            rustnode.RustNode, "play_game", lambda self, request: {"fault": "injected"}  # noqa: ARG005
+            rustnode.RustNode, "play_game", lambda self, request, game: {"fault": "injected"}  # noqa: ARG005
         )
         faults, played = portlp.COUNTS["faults"], portlp.COUNTS.get("played", 0)
         got, got_state = _play(roster, leaf, 2, play=True)
