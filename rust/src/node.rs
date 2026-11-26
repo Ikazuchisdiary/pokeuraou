@@ -1310,6 +1310,13 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if crate::resolve::commands::handles(value["kind"].as_str()) => {
             crate::resolve::commands::answer(reg, &value)
         }
+        // IKA-458: a request that names a kind this binary does not know is answered at once.
+        // It used to fall through to a fill, which waited for a body that never came, so a
+        // caller newer than the binary hung instead of failing.
+        Ok(value) if value.get("kind").is_some_and(Value::is_string) => json!({
+            "error": format!("unknown request kind {}", value["kind"]),
+            "unknownKind": true,
+        }),
         Ok(value) => match parse_request(&value) {
             Err(reason) => json!({ "error": reason }),
             Ok(request) => {

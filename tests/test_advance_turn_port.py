@@ -189,6 +189,14 @@ def test_a_fault_leaves_the_turn_to_python(turns, flags_off, monkeypatch) -> Non
         assert landed.to_json() == want[0].to_json()
 
 
+def test_an_unknown_kind_is_answered_at_once(turns) -> None:  # noqa: ANN001
+    """A request the binary does not know fails the caller instead of waiting for a body."""
+    reg = turns[0][0]
+    node = rustnode.require_node(reg)
+    with pytest.raises(RuntimeError, match="unknown request kind"):
+        node._exchange({"kind": "aRequestFromTheFuture"})  # noqa: SLF001
+
+
 def test_a_generator_that_is_not_pcg64_is_python_s(turns, flags_off) -> None:  # noqa: ANN001
     reg, pos, chosen = turns[0]
     portlp.set_advance(True)
