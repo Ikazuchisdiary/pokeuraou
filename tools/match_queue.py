@@ -52,16 +52,6 @@ from pokeuraou.sprt import Sprt, StopWhenDecided  # noqa: E402
 from pokeuraou.workqueue import run_workers  # noqa: E402
 
 
-def check_aivat(args: argparse.Namespace) -> None:
-    """`--aivat` / `--sprt-aivat` go with a pool match (IKA-193 stage 3)."""
-    if args.sprt_aivat:
-        if args.sprt is None:
-            raise SystemExit("--sprt-aivat takes its hypotheses from --sprt ELO0 ELO1")
-        args.aivat = True
-    if args.aivat and args.pool is None:
-        raise SystemExit("--aivat is written by tools/pool_match.py: it goes with --pool")
-
-
 def check_other_arm(args: argparse.Namespace, extra: list[str]) -> None:
     """The other arm is named, never defaulted (IKA-335).
 
@@ -90,30 +80,6 @@ def check_other_arm(args: argparse.Namespace, extra: list[str]) -> None:
             "the other arm's leaf -- the same files as --value for a null control -- or "
             "--baseline-hp-share to mean hp-share (IKA-335)."
         )
-
-
-def corrected_monitor(args: argparse.Namespace, out_dir: Path) -> object:
-    """The corrected test's monitor, registered in sprt.json before the first game."""
-    from pokeuraou.luck import NormalTest, StopWhenCorrectedDecided
-
-    record = out_dir / "sprt.json"
-    if record.exists():
-        raise SystemExit(
-            f"{record} already exists: a registered test belongs to one run. Use a new "
-            "--out, or remove the file if that run is being discarded."
-        )
-    test = NormalTest(args.sprt[0], args.sprt[1], alpha=args.sprt_alpha, beta=args.sprt_beta)
-    trinomial = Sprt(args.sprt[0], args.sprt[1], alpha=args.sprt_alpha, beta=args.sprt_beta)
-    monitor = StopWhenCorrectedDecided(out_dir, test, trinomial, record=record)
-    monitor.save()
-    print(
-        f"  registered the corrected SPRT({test.elo0:+g}, {test.elo1:+g}), alpha "
-        f"{test.alpha}, beta {test.beta}, burn-in {test.burn} pairs: LLR bounds "
-        f"[{test.lower:+.3f}, {test.upper:+.3f}] -> {record}",
-        file=sys.stderr,
-        flush=True,
-    )
-    return monitor
 
 
 def main() -> None:
@@ -242,21 +208,6 @@ def main() -> None:
         "the pool's vocabulary.",
     )
     ap.add_argument(
-        "--aivat",
-        action="store_true",
-        help="with --pool: each worker writes its games' luck (AIVAT's chance and action "
-        "terms, IKA-193) into the records, and the run ends with the corrected pairs beside "
-        "the raw ones. Decides nothing: the stop is still --sprt's trinomial test.",
-    )
-    ap.add_argument(
-        "--sprt-aivat",
-        action="store_true",
-        help="with --sprt and --pool (implies --aivat): the stop is decided by the "
-        "normal-approximation GSPRT on the corrected pair scores instead, with a 30-pair "
-        "burn-in (registered in records/IKA-193.md §11.0), the trinomial test on the raw "
-        "pairs written beside it. Off by default.",
-    )
-    ap.add_argument(
         "--q-model",
         type=Path,
         default=None,
@@ -345,17 +296,12 @@ def main() -> None:
             args.q_model = q_path
     if args.pool is not None and args.baseline_hp_share:
         extra = [*extra, "--baseline-hp-share"]
-    check_aivat(args)
-    if args.aivat:
-        extra = [*extra, "--aivat"]
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
 
     monitor = None
-    if args.sprt_aivat:
-        monitor = corrected_monitor(args, out_dir)
-    elif args.sprt is not None:
+    if args.sprt is not None:
         record = out_dir / "sprt.json"
         # One registration per run. A test whose bounds could be rewritten after games
         # exist is not a test fixed in advance, and a leftover file from an earlier run in
@@ -531,23 +477,7 @@ def main() -> None:
                 file=sys.stderr,
                 flush=True,
             )
-        if args.aivat:
-            from pokeuraou.luck import summary
-
-            elo0, elo1 = args.sprt if args.sprt is not None else (0.0, 10.0)
-            print(summary(out_dir, elo0=elo0, elo1=elo1), file=sys.stderr, flush=True)
-        if args.sprt_aivat:
-            monitor.save()
-            state = monitor.state()
-            print(
-                f"  corrected SPRT: {state['decision'] or 'no decision'} after "
-                f"{state['pairs']} pairs, LLR {state['llr']:+.3f} (trinomial on the raw "
-                f"pairs: {state['trinomial']['decision'] or 'no decision'}, LLR "
-                f"{state['trinomial']['llr']:+.3f}) -> {out_dir / 'sprt.json'}",
-                file=sys.stderr,
-                flush=True,
-            )
-        elif monitor is not None:
+        if monitor is not None:
             monitor.save()
             state = monitor.state()
             print(

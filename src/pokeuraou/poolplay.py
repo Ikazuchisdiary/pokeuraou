@@ -574,10 +574,6 @@ class PoolArm:
     #: Whether its matrix budget takes the knock-out branch (`Budget.enumerate_knockouts`,
     #: IKA-359); off ships.
     knockouts: bool = False
-    #: Whether its belief keeps the pre-IKA-411 rule: an opponent's Mega of Floette-Eternal
-    #: or Meowstic-F stops naming its sheet member (`play_game`'s ``dex_base_belief``).
-    #: Off ships; on is only for measuring the fix.
-    dex_base_belief: bool = False
     #: The port executable this arm's move-node search is read through, or None for the
     #: process's own (`play_game`'s ``rust_binary``, IKA-413). Only for measuring a port
     #: change against the port before it; the game itself is resolved by the process's.
@@ -995,7 +991,6 @@ def pool_match_game(
         depth=(side_arms[0].depth, side_arms[1].depth),
         solve_restricted=(side_arms[0].solve_restricted, side_arms[1].solve_restricted),
         knockouts=(side_arms[0].knockouts, side_arms[1].knockouts),
-        dex_base_belief=(side_arms[0].dex_base_belief, side_arms[1].dex_base_belief),
         rust_binary=(side_arms[0].rust_binary, side_arms[1].rust_binary),
         ally_targets=allies,
         eq_select=(side_arms[0].eq_select, side_arms[1].eq_select),
@@ -1022,7 +1017,6 @@ def pool_match_game(
         "deepens": tuple(arm.deepen for arm in side_arms),
         "depths": tuple(arm.depth for arm in side_arms),
         "knockouts": tuple(arm.knockouts for arm in side_arms),
-        "dex_base": tuple(arm.dex_base_belief for arm in side_arms),
         "allies": allies,
         "lines": tuple(line_notes),
         "eq_selects": tuple(arm.eq_select for arm in side_arms),

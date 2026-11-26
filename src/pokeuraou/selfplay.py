@@ -36,7 +36,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import luck, port, qrank, rank_scores, rustnode, timing
+from . import port, qrank, rank_scores, rustnode, timing
 from .actions import (
     ALLY_TARGET_MODES,
     MoveAction,
@@ -333,11 +333,6 @@ class GameRecord:
     #: Whether each side's matrix budget took the knock-out branch
     #: (`Budget.enumerate_knockouts`, IKA-359). Written only when a side did.
     knockouts: list[bool] = field(default_factory=lambda: [False, False])
-    #: Whether each side's belief read the opponent's Megas by the dex's base species, as
-    #: before IKA-411 (`play_game`'s ``dex_base_belief``, for measuring the fix), and how
-    #: many of its beliefs that changed. Written only when a side did.
-    dex_base_belief: list[bool] = field(default_factory=lambda: [False, False])
-    dex_base_rewrites: list[int] = field(default_factory=lambda: [0, 0])
     #: Each side's port executable when it was not the process's own (`play_game`'s
     #: ``rust_binary``, IKA-413): its fingerprint (path, size, sha256, build time), else
     #: None. Written only when a side had one.
@@ -448,12 +443,6 @@ class GameRecord:
                 else {}
             ),
             **({"knockouts": list(self.knockouts)} if any(self.knockouts) else {}),
-            **(
-                {"dexBaseBelief": list(self.dex_base_belief),
-                 "dexBaseRewrites": list(self.dex_base_rewrites)}
-                if any(self.dex_base_belief)
-                else {}
-            ),
             **({"rustBinary": list(self.rust_binary)} if any(self.rust_binary) else {}),
             **(
                 {"allyTargets": list(self.ally_targets), "allyMenus": list(self.ally_menus),
@@ -1119,44 +1108,6 @@ def _rank_views(
     return [None if g is None else [g[0], list(g[1])] for g in got]
 
 
-def _belief_view(
-    reg: Regulation, pos: Position, side: int, seen: frozenset[int], dex_base: bool,
-    record: GameRecord, believer: int,
-) -> Position:
-    """`pos` as the believer's belief about `side` reads it (IKA-411).
-
-    Unchanged, unless ``dex_base``: then `side`'s Pokemon carry the dex's base species, as
-    `_make_pokemon` wrote it before IKA-411, so a Mega of Floette-Eternal or Meowstic-F no
-    longer names its sheet member and the belief puts it back on the bench -- the old rule,
-    kept per side only to measure the fix against it.
-
-    Only a Pokemon whose species has left its set's (a Mega) is rewritten: one still
-    wearing its set's species names its sheet member by `species` under either rule, and
-    the dex's base it would add names no other member (Species Clause). With nothing to
-    rewrite the position itself is returned; otherwise the believer's
-    ``dex_base_rewrites`` counts the belief it changed.
-    """
-    if not dex_base or len(seen) == len(pos.sides[side].pokemon):
-        # Nothing hidden: the belief is the position itself under either rule.
-        return pos
-    from .regulation import to_id
-
-    rewrite: dict[int, str] = {}
-    for index, mon in enumerate(pos.sides[side].pokemon):
-        found = reg.species.get(to_id(mon.base_species))
-        if found is None or to_id(mon.species) == to_id(mon.base_species):
-            continue
-        if to_id(found.base_species) != to_id(mon.base_species):
-            rewrite[index] = found.base_species
-    if not rewrite:
-        return pos
-    view = pos.copy()
-    for index, base in rewrite.items():
-        view.sides[side].pokemon[index].base_species = base
-    record.dex_base_rewrites[believer] += 1
-    return view
-
-
 def _bench_weights(
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None,
     side: int,
@@ -1219,7 +1170,6 @@ def play_game(
     bench_drop: str | tuple[str, str] = DEFAULT_BENCH_DROP,
     deepen: str | tuple[str, str] = DEFAULT_DEEPEN,
     knockouts: bool | tuple[bool, bool] = False,
-    dex_base_belief: bool | tuple[bool, bool] = False,
     rust_binary: Path | str | None | tuple[Path | str | None, Path | str | None] = None,
     ally_targets: str | tuple[str, str] = "off",
     eq_select: str | tuple[str, str] = DEFAULT_EQ_SELECT,
@@ -1317,10 +1267,6 @@ def play_game(
     the full-matrix solve on that side; it replaces the strategy a side samples from and
     never a value.
 
-    ``dex_base_belief`` (a pair too) has that side believe the opponent's bench as before
-    IKA-411: a Mega of Floette-Eternal or Meowstic-F stops naming its sheet member, which
-    goes back on the bench (`_belief_view`). Off ships; on is only for measuring the fix.
-
     ``ally_targets`` (a pair too, IKA-181) is which ally targets of `normal` moves that
     side's move-node menus list (`actions.ALLY_TARGET_MODES`): the side's menus and solves
     run under it (`actions.ally_targets`), both sides' pools in them, as for the other
@@ -1397,10 +1343,6 @@ def play_game(
     deepens = (deepen, deepen) if isinstance(deepen, str) else tuple(deepen)
     specs = [deepen_spec(label) for label in deepens]
     kos = (knockouts, knockouts) if isinstance(knockouts, bool) else tuple(knockouts)
-    dex_bases = (
-        (dex_base_belief, dex_base_belief) if isinstance(dex_base_belief, bool)
-        else tuple(bool(d) for d in dex_base_belief)
-    )
     binaries = tuple(
         None if b is None else Path(b)
         for b in (
@@ -1500,7 +1442,6 @@ def play_game(
     record.bench_drop = list(drops)
     record.deepen = list(deepens)
     record.knockouts = [bool(k) for k in kos]
-    record.dex_base_belief = list(dex_bases)
     record.rust_binary = [None if b is None else _fingerprint(b) for b in binaries]
     record.ally_targets = list(allies)
     record.force_mega = list(forced_species)
@@ -1573,11 +1514,11 @@ def play_game(
     # IKA-458 stage 3.6d: a game nobody prepared in the port (a board's) is defined to it here,
     # as the loop below would at its first step. `one_agent` only prices a side's search when no
     # hidden bench is solved for both, and a hidden bench is the only game this road plays.
-    if hidden_game is None and not any(dex_bases) and not luck.active():
+    if hidden_game is None:
         hidden_game = hiddenstep.Game.of(sheets, bench_prior if bench_prior is not None else (None, None))
     if (
         hidden_game is not None
-        and not any(dex_bases) and first_action is None
+        and first_action is None
         and all(f is None for f in forced_species) and all(h is None for h in holds)
         and allies == ("off", "off") and binaries == (None, None)
         and set(drops) == {DEFAULT_BENCH_DROP} and tuple(cells) == (0, 0)
@@ -1609,13 +1550,11 @@ def play_game(
 
         # IKA-458 stage 3.4: the seen identities and slots and each side's completions from
         # the port, where it holds positions and nothing makes the belief another's.
-        stepped = None
-        if not any(dex_bases):
-            if hidden_game is None:
-                hidden_game = hiddenstep.Game.of(
-                    sheets, bench_prior if bench_prior is not None else (None, None)
-                )
-            stepped = hiddenstep.step(reg, pos, hidden_game, seen, leads)
+        if hidden_game is None:
+            hidden_game = hiddenstep.Game.of(
+                sheets, bench_prior if bench_prior is not None else (None, None)
+            )
+        stepped = hiddenstep.step(reg, pos, hidden_game, seen, leads)
         if stepped is not None:
             seen, shown, recorded_shown = stepped.seen, stepped.shown, stepped.recorded
             for note in stepped.notes:
@@ -1630,7 +1569,7 @@ def play_game(
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
                 sheets=sheets, shown=shown, bench_prior=bench_prior, leads=leads,
-                recorded_shown=recorded_shown, dex_base=dex_bases, selects=selects,
+                recorded_shown=recorded_shown, selects=selects,
                 stepped=stepped,
                 hidden_number=hidden_game.number if stepped is not None and hidden_game is not None else None,
             )
@@ -1650,15 +1589,11 @@ def play_game(
             spreads = _believed(stepped.spreads, drops)
         else:
             try:
-                views = [
-                    _belief_view(reg, pos, side, shown[side], dex_bases[1 - side], record, 1 - side)
-                    for side in (0, 1)
-                ]
                 spreads = {
                     side: completions(
-                        reg, views[side], side, sheets[side], seen=shown[side],
+                        reg, pos, side, sheets[side], seen=shown[side],
                         weights=_bench_weights(
-                            bench_prior, side, views[side], shown[side], record, leads[side]
+                            bench_prior, side, pos, shown[side], record, leads[side]
                         ),
                     )
                     for side in (0, 1)
@@ -1750,8 +1685,6 @@ def play_game(
         foe_search_value: float | None = None
         # What each side's best-first deepening did here (IKA-33); None where it did not.
         deepened: list[Any] = [None, None]
-        # (side whose leaf built it, its search's answer): the matrices `luck` reads.
-        solved: list[tuple[int, Any]] = []
 
         if spreads is not None:
             # Each side is uncertain about a different bench, so each gets its own answer.
@@ -1828,8 +1761,6 @@ def play_game(
             except EquilibriumError:
                 break
             own_seconds = perf_counter() - solve_started
-            solved.extend(answers.items())
-            solved.extend((s, got) for s, got in ((0, own_deep), (1, foe_deep)) if got is not None)
             record.unmodelled.extend(
                 set().union(*(answer.unmodelled for answer in answers.values()))
             )
@@ -1909,7 +1840,6 @@ def play_game(
                             )
                 except EquilibriumError:
                     break
-                solved.append((1, foe_deep if foe_deep is not None else foe_answers[1]))
                 if foe_deep is not None:
                     record.unmodelled.extend(foe_deep.unmodelled)
                     foe_strategy = np.asarray(
@@ -1945,7 +1875,6 @@ def play_game(
             except EquilibriumError:
                 break
             own_seconds = perf_counter() - solve_started
-            solved.append((0, own_search))
             record.unmodelled.extend(own_search.unmodelled)
             equilibrium = own_search.equilibrium
 
@@ -1999,7 +1928,6 @@ def play_game(
                         )
                 except EquilibriumError:
                     break
-                solved.append((1, foe_search))
                 record.unmodelled.extend(foe_search.unmodelled)
                 foe_equilibrium = foe_search.equilibrium
                 deepened[1] = foe_search.deepened
@@ -2129,19 +2057,11 @@ def play_game(
                 ),
             )
         )
-        if luck.active():
-            # AIVAT's action term off the searches' own matrices (IKA-193); a leafless
-            # side's matrix is not in win probability and is left out.
-            luck.saw_mixtures(
-                len(record.decisions) - 1, pos.turn, ours, own_strategy, foe_theirs,
-                foe_strategy, chosen, [r for s, r in solved if leaves[s] is not None],
-                forced=first_action is not None and len(record.decisions) == 1,
-            )
         timing.decided("move")
         advanced = _advance_turn(
             reg, rng, pos, chosen, record, leaves, objective,
             hidden=_HiddenBench(
-                sheets, list(seen), bench_prior, list(leads), dex_bases,
+                sheets, list(seen), bench_prior, list(leads),
                 hidden_game.number if stepped is not None and hidden_game is not None else None,
             ),
         )
@@ -2196,7 +2116,6 @@ def _advance_turn(
     portlp.COUNTS["advanced"] += 1
     weights = advanced
     record.unmodelled.extend(weights.unmodelled)
-    counts = np.array(weights.branches + weights.suspended, dtype=np.float64)
     if advanced.index is None:
         return None
     index = advanced.index
@@ -2204,9 +2123,7 @@ def _advance_turn(
     if advanced.chain is not None:
         return _apply_chain(record, advanced, ready[1])
     if index < len(weights.branches):
-        luck.saw_turn(reg, pos, chosen, counts, index, landed)
         return landed
-    luck.saw_turn(reg, pos, chosen, counts, index)
     paused = port.turn(reg, pos, chosen, Budget.exact(), select=index).pause
     if paused is None:
         raise port.PortRefused(f"the port gave no pause at index {index} of the turn")
@@ -2221,9 +2138,9 @@ def _self_switch_request(
     """IKA-458 stage 3.2: what the port needs to choose a self-switch and play the turn on --
     the inference server each side's leaf is, and where a hidden bench's completions are read
     from -- and the leaves it names; None where this road does not go (Python plays the pause)."""
-    if luck.active() or timing.DUPES:
+    if timing.DUPES:
         return None
-    if hidden is not None and (hidden.game is None or any(hidden.dex_base)):
+    if hidden is not None and hidden.game is None:
         return None
     from .encode import rules_of
     from .inference import RemoteValue
@@ -2323,9 +2240,6 @@ class _HiddenBench:
     seen: list[frozenset[str]]
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None
     leads: list[frozenset[str] | None]
-    #: Per side, whether its belief keeps the pre-IKA-411 rule (`play_game`'s
-    #: ``dex_base_belief``).
-    dex_base: tuple[bool, bool] = (False, False)
     #: IKA-458 stage 3.4: this game's number in the port (`hiddenstep.Game`), or None where the
     #: port does not hold the game (stage 3.2's road then leaves a pause to Python).
     game: int | None = None
@@ -2361,7 +2275,6 @@ def _advance(
             if not weights.size or float(weights.sum()) <= 0:
                 return None
             index = _sample_index(rng, weights)
-            luck.saw_resumed(result, index)
             # The drawn outcome alone (IKA-350): a resumed turn's weights came first, and
             # only this branch or pause is asked for, not every branch's position.
             picked = result.pick(index)
@@ -2516,14 +2429,11 @@ def _self_switch_spread(
     with timing.stage("selfswitch.complete"):
         carried = seen_identities(pause.position, other, hidden.seen[other])
         shown = seen_slots(pause.position, other, carried)
-        view = _belief_view(
-            reg, pause.position, other, shown, hidden.dex_base[chooser], record, chooser
-        )
         try:
             spread = completions(
-                reg, view, other, hidden.sheets[other], seen=shown,
+                reg, pause.position, other, hidden.sheets[other], seen=shown,
                 weights=_bench_weights(
-                    hidden.bench_prior, other, view, shown, record,
+                    hidden.bench_prior, other, pause.position, shown, record,
                     hidden.leads[other],
                 ),
             )
@@ -2886,7 +2796,6 @@ def _do_replacement_node(
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
     leads: list[frozenset[str] | None] | None = None,
     recorded_shown: list[list[str]] | None = None,
-    dex_base: tuple[bool, bool] = (False, False),
     selects: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
     stepped: Any = None,  # noqa: ANN401 - `hiddenstep.Step`: the completions the port made
     hidden_number: int | None = None,
@@ -2960,15 +2869,11 @@ def _do_replacement_node(
         spreads = {} if stepped.error is not None else stepped.spreads
     else:
         try:
-            views = [
-                _belief_view(reg, pos, side, seen[side], dex_base[1 - side], record, 1 - side)
-                for side in (0, 1)
-            ]
             spreads = {
                 side: completions(
-                    reg, views[side], side, sheets[side], seen=seen[side],
+                    reg, pos, side, sheets[side], seen=seen[side],
                     weights=_bench_weights(
-                        bench_prior, side, views[side], seen[side], record,
+                        bench_prior, side, pos, seen[side], record,
                         (leads or [None, None])[side],
                     ),
                 )

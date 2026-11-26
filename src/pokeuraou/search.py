@@ -1532,8 +1532,7 @@ class BeliefResult:
     deepened: _deepen.Deepened | None = None
     #: The depth-1 node this answer was solved over, as (side 0's menu, side 1's menu, one
     #: matrix per completion in side 0's orientation, their weights) -- references, nothing
-    #: computed. Read by `luck.matrix_of` for AIVAT's action term (IKA-193); the menus are
-    #: the ones passed in, before any growth by a deepening.
+    #: computed. The menus are the ones passed in, before any growth by a deepening.
     node_payoff: tuple | None = None
 
 

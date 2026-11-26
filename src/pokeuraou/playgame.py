@@ -23,7 +23,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from . import luck, port, portlp, rank_scores, rustnode, timing
+from . import port, portlp, rank_scores, rustnode, timing
 from .position import Position
 from .regulation import Regulation
 
@@ -75,7 +75,7 @@ def prepare(  # noqa: PLR0913 - the loop's settings
     from .encode import HP_SCALE, rules_of
     from .selfplay import _HiddenBench, _self_switch_request
 
-    if game is None or luck.active() or timing.DUPES or rank_scores._SINK.get() is not None:  # noqa: SLF001
+    if game is None or timing.DUPES or rank_scores._SINK.get() is not None:  # noqa: SLF001
         return None
     if leaves[0] is None or leaves[0] is not leaves[1]:
         return None
@@ -89,7 +89,7 @@ def prepare(  # noqa: PLR0913 - the loop's settings
     if leaf is None:
         return None
     ready = _self_switch_request(
-        leaves, _HiddenBench((), list(seen), None, list(leads), (False, False), game)
+        leaves, _HiddenBench((), list(seen), None, list(leads), game)
     )
     if ready is None:
         return None

@@ -17,9 +17,6 @@ What an arm is, per arm, and so in whichever seat it sits:
   `--q-arm` on the server or `--q-model` here). An arm with `--rank-leaf` and no fill named
   plays `q-nocover` by `data/models/q-mc6.pt`, as M-C generation does, and stops without
   that file; `refs2` is played when named (IKA-338),
-* whether its belief keeps the pre-IKA-411 rule, under which an opponent's Mega of
-  Floette-Eternal or Meowstic-F stops naming its sheet member (`--dex-base-belief` /
-  `--baseline-dex-base-belief`; only for measuring the fix),
 * which ally targets of `normal` moves its menus list (`--ally-targets` /
   `--baseline-ally-targets`: off ships, benefit, all; IKA-181),
 * which point of its optimal set it plays (`--eq-select` / `--baseline-eq-select`,
@@ -63,7 +60,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou import actions, eqselect, portlp, qrank  # noqa: E402
+from pokeuraou import actions, eqselect, portlp, qrank, rustnode  # noqa: E402
 from pokeuraou import narrow as narrowing  # noqa: E402
 from pokeuraou.actions import ALLY_TARGET_MODES, team_ally_benefits  # noqa: E402
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
@@ -155,32 +152,6 @@ def build_leaves(
         value, baseline, leaf_name(args.value),
         leaf_name(args.baseline) if args.baseline else None,
     )
-
-
-def luck_leaf(args: argparse.Namespace, value: object, encoder: Encoder) -> object:
-    """The evaluator `--aivat` scores the luck with (IKA-193 stage 3): the tested arm's own
-    weights through their own caller, so the arm's `calls` and `ended` stay the arm's."""
-    if args.inference is not None:
-        from pokeuraou.inference import RemoteValue
-
-        return RemoteValue(args.inference, args.inference_arm, encoder, merge=args.inference_merge)
-    from pokeuraou.value import BatchedValue
-
-    return BatchedValue(value.nets, value.encoder, device=value.device)  # type: ignore[attr-defined]
-
-
-def play_with_luck(ledger_leaf: object | None, name: str, play: object) -> tuple:
-    """`play()`'s record and sides, and the game's luck when there is a ledger leaf."""
-    if ledger_leaf is None:
-        return (*play(), None)  # type: ignore[operator]
-    from pokeuraou import luck
-
-    started = time.perf_counter()
-    with luck.collecting(ledger_leaf, name) as ledger:  # type: ignore[arg-type]
-        record, sides = play()  # type: ignore[operator]
-    block = ledger.to_json()
-    block["gameSeconds"] = round(time.perf_counter() - started, 4)
-    return record, sides, block
 
 
 def _ends_rule(leaf: object) -> str:
@@ -340,12 +311,6 @@ def main(argv: list[str] | None = None) -> None:
                     "crit or the roll decides (Budget.enumerate_knockouts, IKA-359)")
     ap.add_argument("--baseline-knockouts", action="store_true",
                     help="same for the other arm")
-    ap.add_argument("--dex-base-belief", action="store_true",
-                    help="the tested arm believes the opponent's bench as before IKA-411: a "
-                    "Mega of Floette-Eternal or Meowstic-F stops naming its sheet member, which "
-                    "goes back on the bench (only for measuring the fix)")
-    ap.add_argument("--baseline-dex-base-belief", action="store_true",
-                    help="same for the other arm")
     ap.add_argument("--rust-binary", type=Path, default=None,
                     help="the tested arm's move-node search reads the port executable at this "
                     "path (IKA-413: a port change measured against the port before it); the "
@@ -439,10 +404,6 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--device", default=None)
     ap.add_argument("--torch-threads", type=int, default=1)
     ap.add_argument("--report-every", type=int, default=25)
-    ap.add_argument("--aivat", action="store_true",
-                    help="write each game's luck (AIVAT's chance and action terms, scored "
-                    "by the tested arm's leaf; `pokeuraou.luck`, IKA-193) into its record as "
-                    "`aivat`. The games are the same with or without it")
     args = ap.parse_args(argv)
     require_bench(args)
     if (args.inference is None) == (args.value is None):
@@ -553,7 +514,6 @@ def main(argv: list[str] | None = None) -> None:
         limit=args.limit, rank_by_leaf=args.rank_leaf, rank_fill=args.rank_fill,
         bench_drop=args.bench_drop, deepen=args.deepen, depth=args.depth,
         solve_restricted=args.solve_restricted, knockouts=args.knockouts,
-        dex_base_belief=args.dex_base_belief,
         rust_binary=args.rust_binary,
         ally_targets=args.ally_targets,
         eq_select=args.eq_select,
@@ -572,7 +532,6 @@ def main(argv: list[str] | None = None) -> None:
                         depth=args.baseline_depth,
                         solve_restricted=args.baseline_solve_restricted,
                         knockouts=args.baseline_knockouts,
-                        dex_base_belief=args.baseline_dex_base_belief,
                         rust_binary=args.baseline_rust_binary,
                         ally_targets=args.baseline_ally_targets,
                         eq_select=args.baseline_eq_select,
@@ -597,7 +556,6 @@ def main(argv: list[str] | None = None) -> None:
             depth=args.baseline_depth,
             solve_restricted=args.baseline_solve_restricted,
             knockouts=args.baseline_knockouts,
-            dex_base_belief=args.baseline_dex_base_belief,
             rust_binary=args.baseline_rust_binary,
             ally_targets=args.baseline_ally_targets,
             eq_select=args.baseline_eq_select,
@@ -627,7 +585,6 @@ def main(argv: list[str] | None = None) -> None:
             + (f" / ends {_ends_rule(arm.evaluate)}" if arm.evaluate is not None else "")
             + (f" / depth {arm.depth} restricted" if arm.depth != 1 else "")
             + (" / knockout branch" if arm.knockouts else "")
-            + (" / belief by the dex's base species (pre-IKA-411)" if arm.dex_base_belief else "")
             + (f" / port {arm.rust_binary}" if arm.rust_binary is not None else "")
             + (f" / ally targets {arm.ally_targets}" if arm.ally_targets != "off" else "")
             + (f" / equilibrium {arm.eq_select}" if arm.eq_select != DEFAULT_EQ_SELECT else "")
@@ -663,8 +620,6 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@d{tested.depth}"
     if tested.knockouts != other.knockouts:
         tags += "@ko" if tested.knockouts else "@noko"
-    if tested.dex_base_belief != other.dex_base_belief:
-        tags += "@dexbase" if tested.dex_base_belief else "@setbase"
     if tested.rust_binary != other.rust_binary:
         tags += "@port" if tested.rust_binary is not None else "@ownport"
     if tested.ally_targets != other.ally_targets:
@@ -682,10 +637,12 @@ def main(argv: list[str] | None = None) -> None:
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
-    ledger_leaf = luck_leaf(args, value, encoder) if args.aivat else None
-    if ledger_leaf is not None:
-        print(f"  aivat: luck scored by {value_name} (the tested arm's leaf) on the true "
-              "position, written as `aivat`", file=sys.stderr)
+    # IKA-460 step 1: the board's hidden-bench completions and the game's steps are the port's,
+    # as generation's (`tools/selfplay.py`): it holds this worker's positions by number. An arm
+    # on another executable (`--rust-binary`) reads its search from that process, which does not
+    # hold the module's table, so a board with one keeps Python's completions.
+    if args.rust_binary is None and args.baseline_rust_binary is None:
+        rustnode.hold_positions()
 
     def work() -> Iterator[int]:
         if client is None:
@@ -700,7 +657,7 @@ def main(argv: list[str] | None = None) -> None:
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
-              "depth": {}, "knockouts": 0, "dexbase": 0, "dexbase_rewrites": 0, "ports": {},
+              "depth": {}, "knockouts": 0, "ports": {},
               "ally": {}, "ally_menus": 0, "ally_played": 0,
               "eq": {}, "line": {"games": 0, "selection": {}, "forced": {}},
               "hold": {"games": 0, "held": 0, "held_legal": 0, "open": 0, "open_menu": 0,
@@ -717,15 +674,12 @@ def main(argv: list[str] | None = None) -> None:
         coverless_before = {k: dict(v) for k, v in narrowing.COVERLESS.items()}
         q_before = {k: dict(v) for k, v in qrank.QRANKED.items()}
         started = time.perf_counter()
-        record, sides, luck_block = play_with_luck(
-            ledger_leaf, value_name,
-            lambda game_index=game_index, which=which: pool_match_game(
-                reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
-                max_turns=args.max_turns,
-                epsilon=args.explore_epsilon, temperature=args.explore_temperature,
-                pairs=pairs, ally_only_with=args.ally_only_with,
-                line_only_with=args.line_only_with,
-            ),
+        record, sides = pool_match_game(
+            reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
+            max_turns=args.max_turns,
+            epsilon=args.explore_epsilon, temperature=args.explore_temperature,
+            pairs=pairs, ally_only_with=args.ally_only_with,
+            line_only_with=args.line_only_with,
         )
         done += 1
         if done % args.report_every == 0:
@@ -748,8 +702,6 @@ def main(argv: list[str] | None = None) -> None:
             bucket["knockouts"] += int(record.knockouts[side])
             # Games this side believed by the old rule, and the beliefs it changed: the
             # positive control that the rule reached the arm (IKA-411).
-            bucket["dexbase"] += int(record.dex_base_belief[side])
-            bucket["dexbase_rewrites"] += record.dex_base_rewrites[side]
             # Games this side's search was read through another port, by that port's
             # fingerprint as the game recorded it (IKA-413): the positive control that the
             # executable reached the arm, and which one.
@@ -852,7 +804,6 @@ def main(argv: list[str] | None = None) -> None:
                 # The Q behind a q rank fill (IKA-274), as its holder names it, and
                 # each file's sha256 (IKA-340).
                 **q_record,
-                **({"aivat": luck_block} if luck_block is not None else {}),
             },
             source=provenance(
                 "pool-match",
@@ -893,9 +844,6 @@ def main(argv: list[str] | None = None) -> None:
                 f"rank fill {bucket['fill']}, bench drop {bucket['drop']}, "
                 + (f"knockout branch in {bucket['knockouts']:,} games, "
                    if bucket["knockouts"] else "")
-                + (f"pre-IKA-411 belief in {bucket['dexbase']:,} games "
-                   f"({bucket['dexbase_rewrites']:,} beliefs changed by it), "
-                   if bucket["dexbase"] else "")
                 + (f"port executable (sha256 -> games) {bucket['ports']}, "
                    if bucket["ports"] else "")
                 + (f"ally targets {bucket['ally']} (menus holding one {bucket['ally_menus']:,}, "

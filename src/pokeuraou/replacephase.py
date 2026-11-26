@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import luck, port, portlp, rustnode, timing
+from . import port, portlp, rustnode, timing
 from .position import Position
 from .regulation import Regulation
 
@@ -53,7 +53,7 @@ def play(  # noqa: PLR0913 - the phase's pieces
     the state after the draws only once the answer is in."""
     from .selfplay import DEFAULT_EQ_SELECT, _HiddenBench, _self_switch_request
 
-    if game is None or luck.active() or timing.DUPES:
+    if game is None or timing.DUPES:
         return None
     if type(rng.bit_generator).__name__ != "PCG64":
         return None
@@ -61,7 +61,7 @@ def play(  # noqa: PLR0913 - the phase's pieces
         return None
     ready = _self_switch_request(
         leaves,
-        _HiddenBench((), list(seen), None, list(leads), (False, False), game),
+        _HiddenBench((), list(seen), None, list(leads), game),
     )
     if ready is None:
         return None

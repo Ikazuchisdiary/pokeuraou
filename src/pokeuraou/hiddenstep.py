@@ -9,7 +9,7 @@ position is kept in the port under a number (`rustnode.HeldPosition`) and Python
 requests; it is written out only if Python reads it.
 
 Where this road does not go -- positions not held (a process that plays two executables, human
-play), a side that believes the dex's base species (`dex_base_belief`) -- `step` returns None
+play) -- `step` returns None
 and `play_game` builds them with `hidden.completions`. A fault the port answers is
 `portlp.PortFault`.
 """
