@@ -253,9 +253,17 @@ def default_on_for_generation() -> None:
     the reading are off unless their environment names the flag (IKA-455). The answers are the
     Python road's to the bit, so no agent is another because of it (`agent_drift.py` reads
     `play_game`'s arguments, and this is not one).
+
+    Since IKA-457 the default is stage 2.4's road (`DECIDE`, and so every stage below it: the
+    node with nothing hidden, the replacement node, the menus and the menus with the node in one
+    request), each the Python road's to the bit at 21 workers. ``POKEURAOU_GEN_PORT_DECIDE=0``
+    keeps the default at stage 1.4's road; ``POKEURAOU_GEN_PORT_NODE=0`` turns all of it off.
     """
-    if not os.environ.get(NODE_ENV, "").strip():
-        set_node(True)
+    if os.environ.get(NODE_ENV, "").strip():
+        return
+    set_node(True)
+    if not os.environ.get(DECIDE_ENV, "").strip():
+        set_decide(True)
 
 
 def echo() -> str:
