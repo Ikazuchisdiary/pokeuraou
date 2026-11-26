@@ -363,6 +363,25 @@ def default_on_for_generation() -> None:
         set_play(True)
 
 
+def default_on_for_play() -> None:
+    """The default of human play and the analysis (IKA-460): the roads of the hidden-bench
+    node and the menus (stage 2.4's: `DECIDE`, and so everything below it), the same
+    `POKEURAOU_GEN_PORT_NODE=0` (all off) and `POKEURAOU_GEN_PORT_DECIDE=0` (stage 1.4 only)
+    turn off.
+
+    The game's own loop (stage 3) is generation's: a person's game is played in
+    `humanplay`, so those flags stay off here. The roads engage where the leaf is on an
+    inference server (`inference.RemoteValue`); with a leaf loaded in the process they are
+    not taken and the answers are Python's.
+    """
+    if os.environ.get(NODE_ENV, "").strip():
+        return
+    set_node(True)
+    if os.environ.get(DECIDE_ENV, "").strip():
+        return
+    set_decide(True)
+
+
 def echo() -> str:
     """The worker's own line saying which roads ran and how often (a worker's end)."""
     word = {True: "on", False: "off"}

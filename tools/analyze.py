@@ -169,7 +169,12 @@ def main(argv: list[str] | None = None) -> None:
             values = found
         else:
             say(f"note: no {DEFAULT_VALUE[0]} here, so the read uses hp-share (--value names a leaf)")
-    address = humanplay.inference_address(args.inference)
+    from pokeuraou import portlp
+
+    portlp.default_on_for_play()
+    address = humanplay.inference_address_or_start(
+        args.inference, reg, None if args.hp_share else values,
+        args.q_model or (repo_root() / DEFAULT_Q), device, say)
     if values and not args.hp_share and address:
         # IKA-363: the forward passes on the machine's server; no CUDA context here.
         evaluate, encoder = humanplay.served_leaf(reg, address, values,

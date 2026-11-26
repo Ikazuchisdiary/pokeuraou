@@ -1383,6 +1383,10 @@ def main(argv: list[str] | None = None) -> None:
     rs = sub.add_parser("rescore")
     rs.add_argument("--set", type=Path, required=True)
     args = ap.parse_args(argv)
+    # IKA-460: human play's roads (stage 2.4's), as play_human.py and analyze.py take them.
+    from pokeuraou import portlp
+
+    portlp.default_on_for_play()
     {"build": build, "reference": reference, "reference3": reference3, "evaluate": evaluate,
      "rescore": rescore, "report": report, "subset": subset, "deep": deep, "sweep": sweep,
      "build-hidden": build_hidden, "ladder-ref": ladder_ref,

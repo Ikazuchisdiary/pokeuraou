@@ -692,6 +692,54 @@ def inference_address(given: str | None = None) -> str | None:
     return address
 
 
+def inference_address_or_start(
+    given: str | None, reg: Regulation, values: Sequence[Path | str] | None,
+    q_path: Path | None, device: str | None, say: Any,  # noqa: ANN401 - a callable
+) -> str | None:
+    """`inference_address`, and where none is named, the Rust inference server started for
+    this process (IKA-460): the value arm on ``values`` and the Q arm on ``q_path`` (when it
+    exists), on the card. Stops with the process (`atexit`).
+
+    Named -- ``given``, or `inference.ENV_SERVER` -- the answer is `inference_address`'s, and
+    ``local`` is still the leaf loaded here. Without a leaf, a CPU device, no card or a net
+    the Rust server cannot take (it stops, naming why) the leaf is loaded here as before and
+    ``say`` tells why.
+    """
+    import atexit
+    import os
+
+    from .inference import ENV_SERVER, start_server
+
+    named = given if given is not None else os.environ.get(ENV_SERVER, "")
+    if named:
+        return inference_address(given)
+    if not values or (device or "cuda") != "cuda":
+        return None
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            say("note: no card, so the leaf is loaded here (no Rust inference server)")
+            return None
+    except ImportError:
+        return None
+    from .regulation import repo_root
+
+    arms_q = {"q": q_path} if q_path is not None and Path(q_path).exists() else None
+    log = repo_root() / "data" / "human" / "server" / "inference.log"
+    try:
+        process, address = start_server(
+            {"value": [Path(v) for v in values]}, q_arms=arms_q,
+            regulation=reg.meta.format_id, log=log, device="cuda",
+        )
+    except (SystemExit, OSError) as problem:
+        say(f"note: no Rust inference server ({problem}); the leaf is loaded here")
+        return None
+    atexit.register(process.terminate)
+    say(f"inference server {address} started (the Rust one, log {log})")
+    return address
+
+
 def served_leaf(
     reg: Regulation, address: str, values: Sequence[Path | str], *, merge: bool = False,
     arm: str = "value", q_path: Path | None = None, q_arm: str = "q",
@@ -710,8 +758,10 @@ def served_leaf(
 
     encoder = Encoder(reg)
     leaf = RemoteValue(address, arm, encoder, merge=merge)
-    wanted = [Path(v).name for v in values]
-    have = leaf.describe()
+    # The Rust server holds the nets as `.rnet` files named for the `.pt` they came from
+    # (IKA-461), so the files are told apart by stem.
+    wanted = [Path(v).stem for v in values]
+    have = [Path(h).stem for h in leaf.describe()]
     if sorted(have) != sorted(wanted):
         leaf.close()
         raise SystemExit(f"the inference server's arm {arm!r} holds {have}, not {wanted}")
@@ -726,7 +776,7 @@ def served_q(address: str, q_path: Path, encoder: Any, *, arm: str = "q") -> Any
     from . import qrank
 
     q = qrank.RemoteQ(address, arm, encoder)
-    if [Path(f).name for f in q.describe()] != [Path(q_path).name]:
+    if [Path(f).stem for f in q.describe()] != [Path(q_path).stem]:
         raise SystemExit(
             f"the inference server's Q arm {arm!r} holds {q.describe()}, not {Path(q_path).name}"
         )
