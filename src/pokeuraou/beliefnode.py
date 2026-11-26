@@ -297,13 +297,19 @@ def belief_payoffs(
         from . import portlp
 
         if portlp.NODE[0]:
-            done = _node_in_port(
-                reg, leaf, position, row, col, budget, rules, hidden, spreads, solve, scorer,
-                encoder,
-            )
+            try:
+                done = _node_in_port(
+                    reg, leaf, position, row, col, budget, rules, hidden, spreads, solve,
+                    scorer, encoder,
+                )
+            except portlp.PortFault as fault:
+                # The port could not plan the node: Python does, down the road below (IKA-455).
+                portlp.faulted("beliefNode", fault)
+                done = None
             if done is _NOT_ON_THIS_BINARY:
                 return _per_completion(reg, row, col, evaluate, budget, spreads)
-            return done
+            if done is not None:
+                return done
 
     with timing.region("belief.ref"):
         filled = port.ask(
@@ -409,10 +415,14 @@ def belief_payoffs(
                 jobs.append(job)
 
     if leaf is not None and all(desc is not None for desc in descs):
-        served = _served_in_port(
-            reg, leaf, filled, jobs, reference_block, dirty, parts, descs, len(row), len(col),
-            solve, spreads, encoder,
-        )
+        try:
+            served = _served_in_port(
+                reg, leaf, filled, jobs, reference_block, dirty, parts, descs, len(row),
+                len(col), solve, spreads, encoder,
+            )
+        except portlp_fault() as fault:
+            portlp_faulted("beliefServed", fault)
+            served = None
         if served is not None:
             payoffs, solved = served
             shared = redone = 0
@@ -451,10 +461,14 @@ def belief_payoffs(
 
     matrices: dict[int, list[np.ndarray]] = {}
     shared = redone = 0
-    ported = _fold_in_port(
-        reg, filled, jobs, reference_block, dirty, values, starts, parts, len(row), len(col),
-        solve, spreads,
-    )
+    try:
+        ported = _fold_in_port(
+            reg, filled, jobs, reference_block, dirty, values, starts, parts, len(row),
+            len(col), solve, spreads,
+        )
+    except portlp_fault() as fault:
+        portlp_faulted("beliefFold", fault)
+        ported = None
     if ported is not None:
         # The port folded every completion's matrix; what is left is the counts, as below.
         with timing.region("belief.fold"):
@@ -508,6 +522,18 @@ def belief_payoffs(
                 redone += len(wanted) if job.resolved is None else job.resolved
             matrices.setdefault(1 - job.side, []).append(payoff)
     return BeliefNode(matrices, unmodelled, shared, redone)
+
+
+def portlp_fault() -> type[Exception]:
+    from . import portlp
+
+    return portlp.PortFault
+
+
+def portlp_faulted(where: str, why: object) -> None:
+    from . import portlp
+
+    portlp.faulted(where, why)
 
 
 def _fold_request(  # noqa: PLR0913 - the node's pieces
@@ -646,8 +672,6 @@ def _fold_in_port(  # noqa: PLR0913 - the node's pieces
     request, asks = made
     request["values"] = portlp._b64(values)  # noqa: SLF001
     answer = portlp._ask(reg, request)  # noqa: SLF001
-    if "error" in answer:
-        raise RuntimeError(f"`beliefFold`: {answer['error']}")
     return _fold_answer(answer, jobs, m, n, asks)
 
 
@@ -773,8 +797,6 @@ def _served_in_port(  # noqa: PLR0913 - the node's pieces
     if "serverError" in answer:
         raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
                               "capGb": answer.get("capGb")}, "inference failed")
-    if "error" in answer:
-        raise RuntimeError(f"`beliefServed`: {answer['error']}")
     if "served" not in answer:
         raise RuntimeError("the port did not answer `beliefServed`; the binary predates it -- rebuild it")
     served = answer["served"]
@@ -906,8 +928,8 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     wall = timing.clock() - started
     portlp.COUNTS["crossings"] += 1
     portlp.COUNTS["lps"] += int(answer.get("lps", 0))
-    if "error" in answer:
-        raise RuntimeError(f"`beliefNode`: {answer['error']}")
+    if "fault" in answer:
+        raise portlp.PortFault(str(answer["fault"]))
     if "serverError" in answer:
         raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
                               "capGb": answer.get("capGb")}, "inference failed")

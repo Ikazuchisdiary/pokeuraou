@@ -1661,9 +1661,14 @@ def belief_solve(
         # `solve_bayesian`'s answer to the bit (`portlp`).
         rest = [side for side in wanted if side not in ported]
         if rest:
-            with timing.region("lp.side"), timing.stage("lp"):
-                got = portlp.solve_bayesian_many(reg, [games[side] for side in rest])
-            ported.update(zip(rest, got, strict=True))
+            try:
+                with timing.region("lp.side"), timing.stage("lp"):
+                    got = portlp.solve_bayesian_many(reg, [games[side] for side in rest])
+            except portlp.PortFault as fault:
+                # Solved in Python below, as without the port.
+                portlp.faulted("lp", fault)
+            else:
+                ported.update(zip(rest, got, strict=True))
     # The first error is the one the loop below meets first.
     for side in wanted:
         if isinstance(ported.get(side), Exception):

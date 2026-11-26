@@ -429,6 +429,10 @@ def main(argv: list[str] | None = None) -> None:
                     "by the tested arm's leaf; `pokeuraou.luck`, IKA-193) into its record as "
                     "`aivat`. The games are the same with or without it")
     args = ap.parse_args(argv)
+    # IKA-455: the board is played with generation's roads; POKEURAOU_GEN_PORT_NODE=0 turns it off.
+    from pokeuraou import portlp
+
+    portlp.default_on_for_generation()
     hide_bench = require_bench(args)
     if (args.inference is None) == (args.value is None):
         ap.error("one of --inference or --value names the tested arm's leaf")
@@ -976,6 +980,7 @@ def main(argv: list[str] | None = None) -> None:
     if played:
         print(f"\n  both seats, {played} games: {arm_label} won {wins / played * 100:.1f}%",
               flush=True)
+    print(f"  {portlp.echo()}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

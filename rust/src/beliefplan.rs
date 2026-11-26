@@ -86,7 +86,7 @@ fn reaches(rows: &[Feat], cols: &[Feat], hidden: [&[usize]; 2], carded: [bool; 2
     let ours: HashSet<usize> = hidden[0].iter().copied().collect();
     let theirs: HashSet<usize> = hidden[1].iter().copied().collect();
     // The choice string numbers party members from 1, `Pokemon.slot` from 0.
-    let switches = |f: &Feat, hidden: &HashSet<usize>| f.switches.iter().any(|(index, _)| hidden.contains(&(index - 1)));
+    let switches = |f: &Feat, hidden: &HashSet<usize>| f.switches.iter().any(|(index, _)| index.checked_sub(1).is_some_and(|slot| hidden.contains(&slot)));
     let row_switches: Vec<bool> = rows.iter().map(|f| switches(f, &ours)).collect();
     let col_switches: Vec<bool> = cols.iter().map(|f| switches(f, &theirs)).collect();
     let mut mask = vec![false; rows.len() * cols.len()];
@@ -150,7 +150,7 @@ fn reaching(
             }
             let (own, other) = if side == 0 { (&rows[i], &cols[j]) } else { (&cols[j], &rows[i]) };
             let switches: Vec<(usize, String)> =
-                own.switches.iter().filter(|(index, _)| slots.contains(&(index - 1))).cloned().collect();
+                own.switches.iter().filter(|(index, _)| index.checked_sub(1).is_some_and(|slot| slots.contains(&slot))).cloned().collect();
             let anywhere = other.phazes || (against && own.attacks);
             out.insert((i, j), if anywhere || switches.is_empty() { None } else { Some(switches) });
         }
@@ -336,7 +336,7 @@ fn gather(
     let leaves = header["leaves"].as_u64().unwrap_or(0) as usize;
     let count = header["spanCount"].as_u64().unwrap_or(0) as usize;
     let total = header["spanLeaves"].as_u64().unwrap_or(0) as usize;
-    let spans = Spans::read(&bytes, count, total).map_err(|e| json!({ "error": e }))?;
+    let spans = Spans::read(&bytes, count, total).map_err(|e| json!({ "fault": e }))?;
     let folded = header["folded"].clone();
     let fold_cells: HashSet<(usize, usize)> = folded
         .as_array()
@@ -358,7 +358,7 @@ impl Plan<'_, '_> {
     fn fill(&mut self, position_key: &str, cells: Option<&[(usize, usize)]>, ticket: u64, purpose: &str)
         -> Result<(Value, Vec<u8>, Encoded), Value>
     {
-        let error = |e: String| json!({ "error": e });
+        let error = |e: String| json!({ "fault": e });
         let v = self.value;
         let mut request = json!({
             "position": v[position_key],
@@ -407,7 +407,7 @@ impl Plan<'_, '_> {
 }
 
 fn node(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
-    let error = |e: String| json!({ "error": e });
+    let error = |e: String| json!({ "fault": e });
     let m = value["rows"].as_u64().ok_or_else(|| error("beliefNode without rows".into()))? as usize;
     let n = value["cols"].as_u64().ok_or_else(|| error("beliefNode without cols".into()))? as usize;
     let row_feat = feats(&value["rowFeat"], "rowFeat").map_err(error)?;
@@ -742,6 +742,17 @@ mod tests {
         // With side 0 hiding nothing the same attack reaches no bench.
         let none = reaches(&rows, &cols, [&[], &[3]], [false, true]);
         assert!(!none[2 * 2]);
+    }
+
+    #[test]
+    fn a_switch_numbered_zero_reaches_no_bench_as_python_minus_one_is_in_no_set() {
+        // A party index is 1-based; 0 would be slot -1 in Python, which no hidden set holds.
+        // It must not wrap (release) or panic (debug).
+        let rows = [feat(false, false, &[(0, "a")])];
+        let cols = [feat(false, false, &[(0, "b")])];
+        assert_eq!(reaches(&rows, &cols, [&[0, 1], &[0, 1]], [false, false]), vec![false]);
+        let found = reaching(&rows, &cols, 0, &[0, 1], [false, false], &[], &[false]).unwrap();
+        assert!(found.is_empty());
     }
 
     #[test]

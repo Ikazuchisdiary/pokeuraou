@@ -159,7 +159,7 @@ fn put(part: &mut [f64], m: usize, n: usize, i: usize, j: usize, v: f64) -> Resu
 pub fn belief_fold(value: &Value) -> Value {
     match fold_node(value) {
         Ok(answer) => answer,
-        Err(why) => json!({ "error": why }),
+        Err(why) => json!({ "fault": why }),
     }
 }
 
@@ -557,7 +557,7 @@ pub fn belief_served(widths: &Widths, value: &Value) -> Value {
 }
 
 pub(crate) fn served_node(widths: &Widths, value: &Value) -> Result<Value, Value> {
-    let error = |e: String| json!({ "error": e });
+    let error = |e: String| json!({ "fault": e });
     let server = crate::served::Server::from_json(&value["server"]).map_err(error)?;
     let net_scores_ends = value.get("netScoresEnds").and_then(Value::as_bool).unwrap_or(false);
     let at = PatchAt::of(&value["patch"]).map_err(error)?;
@@ -630,7 +630,7 @@ pub(crate) fn served_node(widths: &Widths, value: &Value) -> Result<Value, Value
     })?;
     // `encode.settle`: an ended leaf is its result, after the pass.
     if decided.len() != values.len() {
-        return Err(json!({ "error": format!(
+        return Err(json!({ "fault": format!(
             "the server answered {} values for {} leaves", values.len(), decided.len()) }));
     }
     let mut ended = 0u64;
@@ -865,13 +865,13 @@ mod tests {
         };
         // A row that is not a number (it used to be dropped, leaving a shorter part).
         let got = belief_served(&w, &request(json!([0, "x"]), json!([1])));
-        assert!(got["error"].as_str().unwrap().contains("a part's rows holds a non-number"), "{got}");
+        assert!(got["fault"].as_str().unwrap().contains("a part's rows holds a non-number"), "{got}");
         // A slot that is not a number.
         let got = belief_served(&w, &request(json!([0]), json!(["x"])));
-        assert!(got["error"].as_str().unwrap().contains("a patch's slots holds a non-number"), "{got}");
+        assert!(got["fault"].as_str().unwrap().contains("a patch's slots holds a non-number"), "{got}");
         // A row past the fill.
         let got = belief_served(&w, &request(json!([5]), json!([1])));
-        assert!(got["error"].as_str().is_some(), "{got}");
+        assert!(got["fault"].as_str().is_some(), "{got}");
     }
 
     #[test]

@@ -66,7 +66,7 @@ ON = [os.environ.get(ENV, "0").strip() == "1"]
 #: sub-games folded in the port and given whole, and the LPs the port reports it solved (the
 #: positive control).
 COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps": 0, "stacked": 0,
-          "nodes": 0}
+          "nodes": 0, "faults": 0}
 
 
 GEN_ENV = "POKEURAOU_GEN_PORT_LP"
@@ -146,6 +146,31 @@ def set_node(on: bool) -> None:
 set_node(NODE[0])
 
 
+def default_on_for_generation() -> None:
+    """Generation's, and its board's, default: stage 1.4's whole-node road, unless
+    `POKEURAOU_GEN_PORT_NODE` is set (``0`` turns it off, ``1`` is the same as the default).
+
+    Called by the entry points of generation (`tools/selfplay.py --pool`, so also
+    `generate_queue.py`) and of the board played with its arguments (`tools/pool_match.py`, so
+    also `match_queue.py --pool`), and by nothing else: the library, the tests, human play and
+    the reading are off unless their environment names the flag (IKA-455). The answers are the
+    Python road's to the bit, so no agent is another because of it (`agent_drift.py` reads
+    `play_game`'s arguments, and this is not one).
+    """
+    if not os.environ.get(NODE_ENV, "").strip():
+        set_node(True)
+
+
+def echo() -> str:
+    """The worker's own line saying which roads ran and how often (a worker's end)."""
+    word = {True: "on", False: "off"}
+    return (
+        f"port roads: lp {word[GEN[0]]}, fold {word[FOLD[0]]}, stack {word[STACK[0]]}, "
+        f"node {word[NODE[0]]} (POKEURAOU_GEN_PORT_NODE={os.environ.get(NODE_ENV, '(unset)')}); "
+        f"faults solved in Python: {COUNTS['faults']}; {counts()}"
+    )
+
+
 def _b64(a: np.ndarray) -> str:
     return base64.b64encode(np.ascontiguousarray(a, dtype="<f8").tobytes()).decode("ascii")
 
@@ -164,7 +189,29 @@ def _ask(reg: Any, request: dict[str, Any]) -> dict[str, Any]:  # noqa: ANN401 -
     answer = port.ask(reg, lambda node: node.lp(request))
     COUNTS["crossings"] += 1
     COUNTS["lps"] += int(answer.get("lps", 0))
+    if "fault" in answer:
+        raise PortFault(str(answer["fault"]))
     return answer
+
+
+class PortFault(RuntimeError):
+    """The port could not answer a request of this module's and said so (`fault`), as one
+    does not restart the process for: the caller solves the same thing in Python (IKA-455)."""
+
+
+#: How many faults' words are printed (the first few; the count is in `COUNTS["faults"]`).
+FAULTS_SHOWN = 5
+
+
+def faulted(where: str, why: object) -> None:
+    """Count a fault and print its words if it is one of the first few; the caller then goes
+    on in Python."""
+    import sys
+
+    COUNTS["faults"] += 1
+    if COUNTS["faults"] <= FAULTS_SHOWN:
+        print(f"[portlp] {where}: the port answered a fault ({why}); solved in Python",
+              file=sys.stderr)
 
 
 def _error(answer: dict[str, Any]) -> Exception | None:
@@ -343,8 +390,8 @@ def counts() -> dict[str, int]:
     return dict(COUNTS)
 
 
-__all__ = ["COUNTS", "ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "ON", "STACK", "STACK_ENV",
-           "NODE", "NODE_ENV", "bayesian_answer", "counts", "set_fold", "set_gen", "set_node", "set_on",
-           "set_stack",
-           "solve_bayesian_many",
+__all__ = ["COUNTS", "ENV", "FOLD", "FOLD_ENV", "GEN", "GEN_ENV", "NODE", "NODE_ENV", "ON",
+           "PortFault", "STACK", "STACK_ENV", "bayesian_answer", "counts",
+           "default_on_for_generation", "echo", "faulted", "set_fold",
+           "set_gen", "set_node", "set_on", "set_stack", "solve_bayesian_many",
            "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]

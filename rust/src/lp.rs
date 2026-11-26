@@ -1013,7 +1013,7 @@ pub fn unsolved_json(why: Unsolved) -> Value {
 /// `lp`: each game (`{"rows", "cols", "data"}`, or `{"bayes": [games], "weights"}`) solved.
 pub fn lp_command(value: &Value) -> Value {
     let Some(games) = value["games"].as_array() else {
-        return json!({ "error": "`lp` without a list of games" });
+        return json!({ "fault": "`lp` without a list of games" });
     };
     let eps = value.get("eps").and_then(Value::as_f64).unwrap_or(1e-9);
     let before = LPS.load(Ordering::Relaxed);
@@ -1025,12 +1025,12 @@ pub fn lp_command(value: &Value) -> Value {
             let weights = f64s(&game["weights"]);
             match (mats, weights) {
                 (Ok(mats), Ok(weights)) => solve_bayesian(&mats, &weights, eps),
-                (Err(e), _) | (_, Err(e)) => return json!({ "error": e }),
+                (Err(e), _) | (_, Err(e)) => return json!({ "fault": e }),
             }
         } else {
             match matrix(game) {
                 Ok((data, m, n)) => solve(&data, m, n, eps),
-                Err(e) => return json!({ "error": e }),
+                Err(e) => return json!({ "fault": e }),
             }
         };
         answers.push(match solved {
@@ -1050,7 +1050,7 @@ pub fn lp_command(value: &Value) -> Value {
 /// solved; its value (`solve(payoff).value`).
 pub fn folds_command(value: &Value) -> Value {
     let Some(nodes) = value["nodes"].as_array() else {
-        return json!({ "error": "`folds` without a list of nodes" });
+        return json!({ "fault": "`folds` without a list of nodes" });
     };
     let before = LPS.load(Ordering::Relaxed);
     let mut answers = Vec::with_capacity(nodes.len());
@@ -1082,7 +1082,7 @@ pub fn folds_command(value: &Value) -> Value {
         };
         let (payoff, m, n) = match read() {
             Ok(got) => got,
-            Err(e) => return json!({ "error": e }),
+            Err(e) => return json!({ "fault": e }),
         };
         answers.push(match solve(&payoff, m, n, 1e-9) {
             Ok(s) => json!({ "value": s.value() }),

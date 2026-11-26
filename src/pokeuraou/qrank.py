@@ -895,10 +895,15 @@ def prefetch(
         # IKA-455: the games of every request in one crossing to the port, each `solve`'s
         # answer to the bit (`portlp`); `rank` takes it where it would have solved. A game the
         # port could not solve is `solve`'s error returned in its place: `rank`'s None.
-        with timing.stage("lp.q"):
-            got = portlp.solve_many(reg, [matrices[index] for index in range(len(asks))])
-        for memo, answer in zip(memos, got, strict=True):
-            memo["pre"] = None if isinstance(answer, Exception) else answer
+        try:
+            with timing.stage("lp.q"):
+                got = portlp.solve_many(reg, [matrices[index] for index in range(len(asks))])
+        except portlp.PortFault as fault:
+            # The port could not solve them: `rank` solves each in Python, as it does without it.
+            portlp.faulted("lp", fault)
+        else:
+            for memo, answer in zip(memos, got, strict=True):
+                memo["pre"] = None if isinstance(answer, Exception) else answer
     return {
         side: (own_key, foe, matrices[index].copy(), memos[index])
         for side, (own_key, foe, index) in plan.items()

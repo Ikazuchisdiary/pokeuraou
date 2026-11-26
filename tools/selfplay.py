@@ -330,11 +330,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
     # IKA-455: the worker's own echo of whether its LPs went to the port, and what went.
     from pokeuraou import portlp
 
-    print(f"  port LPs (POKEURAOU_GEN_PORT_LP): {'on' if portlp.GEN[0] else 'off'}, "
-          f"folds (POKEURAOU_GEN_PORT_FOLD): {'on' if portlp.FOLD[0] else 'off'}, "
-          f"stack (POKEURAOU_GEN_PORT_STACK): {'on' if portlp.STACK[0] else 'off'}, "
-          f"node (POKEURAOU_GEN_PORT_NODE): {'on' if portlp.NODE[0] else 'off'}, "
-          f"{portlp.counts()}", file=sys.stderr)
+    print(f"  {portlp.echo()}", file=sys.stderr)
     if ranks_out is not None:
         written = stats.get("rank_scores_bytes", 0)
         print(
@@ -552,6 +548,10 @@ def main() -> None:
     except ValueError as problem:
         ap.error(str(problem))
     if args.pool is not None:
+        # IKA-455: generation's default; POKEURAOU_GEN_PORT_NODE=0 turns it off.
+        from pokeuraou import portlp
+
+        portlp.default_on_for_generation()
         run_pool(args, ap)
         return
     if args.rank_fill != ROSTER_RANK_FILL:
