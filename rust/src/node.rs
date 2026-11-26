@@ -1249,6 +1249,10 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("replacementPhase") => {
             crate::replacephase::replacement_phase(reg, encoder, &value)
         }
+        // IKA-458 stage 3.6b: a game's turns played, move nodes and replacements, in one request.
+        Ok(value) if value["kind"].as_str() == Some("playGame") => {
+            crate::playgame::play_game(reg, encoder, &value)
+        }
         // IKA-458 stage 3.1: a turn's weights, the draw and the drawn branch in one request.
         Ok(value) if value["kind"].as_str() == Some("advanceTurn") => {
             crate::advance::advance_turn(reg, encoder, &value)

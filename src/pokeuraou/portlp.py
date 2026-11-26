@@ -322,6 +322,12 @@ def set_play(on: bool) -> None:
 
 set_play(PLAY[0])
 
+GAME_ENV = "POKEURAOU_GEN_PORT_GAME"
+#: IKA-458 stage 3.6b: with `PLAY` on, whether a game's steps are played by the port in one request
+#: (`playgame`) -- on unless this is ``0``, which leaves stage 3.6a's road (a request for each
+#: step) to measure the two against each other.
+GAME = [os.environ.get(GAME_ENV, "1").strip() != "0"]
+
 
 def default_on_for_generation() -> None:
     """Generation's, and its board's, default: stage 1.4's whole-node road, unless

@@ -156,6 +156,14 @@ pub fn forget() {
     KEPT.with(|kept| kept.borrow_mut().clear());
 }
 
+/// The positions this process kept (`keep`, odd numbers) dropped, those the caller defined
+/// (even numbers) left: a game's loop (`playgame.rs`) clears what each of its steps kept
+/// without taking from under the caller what it holds.
+pub fn forget_kept() {
+    STORE.with(|store| store.borrow_mut().retain(|id, _| id % 2 == 0));
+    KEPT.with(|kept| kept.borrow_mut().clear());
+}
+
 // -- Slot actions by number (IKA-350).
 //
 // A candidate list crossed as one JSON object per slot action -- `score`, `qfeatures`, every

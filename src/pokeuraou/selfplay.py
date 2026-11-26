@@ -1608,7 +1608,36 @@ def play_game(
     else:
         record.leads = [None, None]
 
-    for _step in range(max_turns * 2):
+    steps_left = max_turns * 2
+    if (
+        portlp.PLAY[0] and sheets is not None and hidden_game is not None
+        and portlp.HIDDEN[0] and not any(dex_bases) and one_agent and first_action is None
+        and all(f is None for f in forced_species) and all(h is None for h in holds)
+        and allies == ("off", "off") and binaries == (None, None)
+        and set(drops) == {DEFAULT_BENCH_DROP} and tuple(cells) == (0, 0)
+        and oracles == (None, None) and tuple(depths) == (1, 1) and sparse == (False, False)
+        and restricted == (False, False) and selects == (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT)
+        and policies == (None, None) and ranked == (True, True) and views_rule == ("heaviest", "heaviest")
+        and budgets[1] == budgets[0] and fills[1] == fills[0] and leaves[0] is leaves[1]
+        and is_q(fills[0]) and not rank_fill_covers(fills[0])
+    ):
+        # IKA-458 stage 3.6b: as many of the game's steps as the port plays, in one request.
+        from . import playgame
+
+        ready = playgame.prepare(
+            reg, pos, leaves, limits, fills[0], budgets[0], hidden_game.number, seen, leads
+        )
+        if ready is not None and not pos.ended:
+            played = playgame.play(
+                reg, rng, pos, record, ready, steps_left, seen, leads, hidden_game.number
+            )
+            if played is not None:
+                pos, seen = played.position, played.seen
+                steps_left -= played.steps
+                if played.stop == "unresolved":
+                    steps_left = 0
+
+    for _step in range(steps_left):
         if pos.ended:
             break
 

@@ -24,6 +24,8 @@ ika209-control = []
 ika458-selfswitch-control = []
 # IKA-458 stage 3.6a's positive control: a replacement phase plays the option after the one it drew.
 ika458-phase-control = []
+# IKA-458 stage 3.6b's positive control: a move node plays the foe's option after the one it drew.
+ika458-play-control = []
 # IKA-215's positive control: the trace broken on purpose -- no `acts` entry for the
 # residual phase, and no "fainted" line. Never for use; `diff_commands --events` has to
 # tell a build with it from one without.

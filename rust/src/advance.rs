@@ -15,6 +15,7 @@
 //! `fault`: the caller then does the turn as before, with its generator untouched.
 
 use crate::lp::numpy_sum;
+use crate::position::Position;
 use crate::reg::Reg;
 use serde_json::{json, Value};
 
@@ -26,6 +27,7 @@ const MULTIPLIER: u128 = 47026247687942121848144207491837523525;
 /// numpy's `PCG64` (`pcg64_next64`): the state steps first, and the output is the XSL-RR of
 /// the new state. `has_uint32` and `uinteger` are numpy's own buffer of a 32-bit draw
 /// (`pcg64_next32`: the low half is returned and the high half kept for the next call).
+#[derive(Clone)]
 pub(crate) struct Pcg64 {
     pub(crate) state: u128,
     pub(crate) inc: u128,
@@ -234,54 +236,91 @@ pub fn advance_turn(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) 
             Err(why) => return json!({ "fault": why }),
         },
     };
-    let mut result = match crate::node::resolve_raw(reg, value) {
+    let result = match crate::node::resolve_raw(reg, value) {
         Err(refused) => return refused,
         Ok(result) => result,
     };
+    let advanced = match advance_core(reg, encoder, result, context.as_ref(), &mut rng) {
+        Err(answer) => return answer,
+        Ok(advanced) => advanced,
+    };
+    let mut answer = json!({
+        "branches": advanced.weights,
+        "suspended": advanced.paused,
+        "exact": advanced.exact,
+        "unmodelled": advanced.unmodelled,
+        "index": advanced.index,
+        "position": Value::Null,
+    });
+    answer["rng"] = rng.to_json();
+    if let Some(landed) = &advanced.position {
+        answer["needed"] = json!(crate::resolve::commands::replacements_needed(landed));
+        answer["position"] = landed.to_json();
+    }
+    if let Some(chain) = &advanced.chain {
+        answer["chain"] = chain.to_json();
+    }
+    answer
+}
+
+/// What a turn did once its outcome was drawn (`advance_core`).
+pub(crate) struct Advanced {
+    pub(crate) weights: Vec<f64>,
+    pub(crate) paused: Vec<f64>,
+    pub(crate) exact: bool,
+    pub(crate) unmodelled: Vec<String>,
+    /// The drawn outcome (None: nothing to draw from, no draw was made).
+    pub(crate) index: Option<usize>,
+    /// The position the turn ended in (None: no outcome to go on from).
+    pub(crate) position: Option<Position>,
+    /// The self-switch nodes a drawn pause played on the way.
+    pub(crate) chain: Option<crate::selfswitch::Chain>,
+}
+
+/// `advanceTurn` after the turn is resolved: the draw among the branches and pauses with numpy's
+/// own arithmetic, the drawn branch's position, or the drawn pause carried on to the turn's end
+/// when ``context`` says where the leaves are. Err is the answer to hand back (a fault, a refusal).
+pub(crate) fn advance_core(
+    reg: &Reg,
+    encoder: &crate::encode::Encoder,
+    mut result: crate::resolve::TurnResult<'_>,
+    context: Option<&crate::selfswitch::Context>,
+    rng: &mut Pcg64,
+) -> Result<Advanced, Value> {
     let weights: Vec<f64> = result.branches.iter().map(|b| b.probability).collect();
     let paused: Vec<f64> = result.suspended.iter().map(|s| s.probability).collect();
     let branches = weights.len();
     let counts: Vec<f64> = weights.iter().chain(paused.iter()).copied().collect();
-    let mut answer = json!({
-        "branches": weights,
-        "suspended": paused,
-        "exact": result.exact,
-        "unmodelled": result.unmodelled.iter().cloned().collect::<Vec<_>>(),
-        "index": Value::Null,
-        "position": Value::Null,
-    });
+    let mut advanced = Advanced {
+        exact: result.exact,
+        unmodelled: result.unmodelled.iter().cloned().collect(),
+        weights,
+        paused,
+        index: None,
+        position: None,
+        chain: None,
+    };
     // Nothing to draw from: the caller ends the game, as it did, without a draw.
     if counts.is_empty() || numpy_sum(&counts) <= 0.0 {
-        answer["rng"] = rng.to_json();
-        return answer;
+        return Ok(advanced);
     }
-    let index = match choice(&counts, &mut rng) {
-        Ok(index) => index,
-        Err(why) => return json!({ "fault": why }),
-    };
+    let index = choice(&counts, rng).map_err(|why| json!({ "fault": why }))?;
     ADVANCED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    answer["index"] = json!(index);
-    answer["rng"] = rng.to_json();
+    advanced.index = Some(index);
     if index < branches {
-        let landed = &result.branches[index].position;
-        answer["needed"] = json!(crate::resolve::commands::replacements_needed(landed));
-        answer["position"] = landed.to_json();
+        advanced.position = Some(result.branches[index].position.clone());
     } else if let Some(context) = context {
         let first = result.suspended.swap_remove(index - branches);
-        match crate::selfswitch::run(reg, encoder, &context, first, &mut rng) {
-            Err(crate::selfswitch::Failure::Fault(why)) => return json!({ "fault": why }),
-            Err(crate::selfswitch::Failure::Answer(refusal)) => return refusal,
+        match crate::selfswitch::run(reg, encoder, context, first, rng) {
+            Err(crate::selfswitch::Failure::Fault(why)) => return Err(json!({ "fault": why })),
+            Err(crate::selfswitch::Failure::Answer(refusal)) => return Err(refusal),
             Ok(chain) => {
-                answer["rng"] = rng.to_json();
-                if let Some(landed) = &chain.position {
-                    answer["needed"] = json!(crate::resolve::commands::replacements_needed(landed));
-                    answer["position"] = landed.to_json();
-                }
-                answer["chain"] = chain.to_json();
+                advanced.position = chain.position.clone();
+                advanced.chain = Some(chain);
             }
         }
     }
-    answer
+    Ok(advanced)
 }
 
 #[cfg(test)]

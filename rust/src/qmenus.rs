@@ -459,25 +459,62 @@ pub(crate) fn root_menus_node(
     encoder: &Encoder,
     value: &Value,
 ) -> Result<(Value, [Vec<SideAct>; 2]), Value> {
-    let fault = |e: String| json!({ "fault": e });
-    let widths: Vec<usize> = value["widths"]
-        .as_array()
-        .filter(|w| w.len() == 2)
-        .and_then(|w| w.iter().map(|x| x.as_u64().map(|n| n as usize)).collect())
-        .ok_or_else(|| fault("`rootMenus` without two widths".into()))?;
-    if widths.iter().any(|w| *w < 1) {
-        return Err(fault("`rootMenus`: a width must be at least 1".into()));
-    }
-    let eps = value.get("eps").and_then(Value::as_f64).unwrap_or(1e-9);
-    let properties = value.get("properties").and_then(Value::as_bool).unwrap_or(true);
-    let rules = EncodeRules { mega_from_slots: value.get("megaFromSlots").and_then(Value::as_bool).unwrap_or(false) };
-    let server = Server::from_json(value.get("qServer").filter(|s| !s.is_null()).unwrap_or(&value["server"]))
-        .map_err(fault)?;
-    let blas = Blas::from_json(&value["blas"]).map_err(fault)?;
-    let same = value.get("same").and_then(Value::as_bool).unwrap_or(false);
+    let args = MenusArgs::from_json(value)?;
     let pos = crate::held::position(&value["position"]);
     let views: Vec<Position> = [&value["v0"], &value["v1"]].into_iter().map(crate::held::position).collect();
-    for p in std::iter::once(&pos).chain(views.iter()) {
+    let same = value.get("same").and_then(Value::as_bool).unwrap_or(false);
+    menus_core(reg, encoder, &args, &pos, [&views[0], &views[1]], same)
+}
+
+/// What `rootMenus` reads that does not change from node to node of a game: the cut widths, the
+/// Q's server, the BLAS to score with, how the arrays are laid out. Typed, so a game's loop
+/// (`playgame.rs`) builds it once and does not write a request for each node.
+pub(crate) struct MenusArgs {
+    pub(crate) widths: [usize; 2],
+    pub(crate) eps: f64,
+    pub(crate) properties: bool,
+    pub(crate) rules: EncodeRules,
+    pub(crate) server: Server,
+    pub(crate) blas: Blas,
+}
+
+impl MenusArgs {
+    pub(crate) fn from_json(value: &Value) -> Result<MenusArgs, Value> {
+        let fault = |e: String| json!({ "fault": e });
+        let widths: Vec<usize> = value["widths"]
+            .as_array()
+            .filter(|w| w.len() == 2)
+            .and_then(|w| w.iter().map(|x| x.as_u64().map(|n| n as usize)).collect())
+            .ok_or_else(|| fault("`rootMenus` without two widths".into()))?;
+        if widths.iter().any(|w| *w < 1) {
+            return Err(fault("`rootMenus`: a width must be at least 1".into()));
+        }
+        Ok(MenusArgs {
+            widths: [widths[0], widths[1]],
+            eps: value.get("eps").and_then(Value::as_f64).unwrap_or(1e-9),
+            properties: value.get("properties").and_then(Value::as_bool).unwrap_or(true),
+            rules: EncodeRules { mega_from_slots: value.get("megaFromSlots").and_then(Value::as_bool).unwrap_or(false) },
+            server: Server::from_json(value.get("qServer").filter(|s| !s.is_null()).unwrap_or(&value["server"]))
+                .map_err(fault)?,
+            blas: Blas::from_json(&value["blas"]).map_err(fault)?,
+        })
+    }
+}
+
+/// `rootMenus` over a node's position and the two views each side ranks from. `same` is whether
+/// the two sides rank from one view object (and so, with equal pools, from one request).
+pub(crate) fn menus_core(
+    reg: &Reg,
+    encoder: &Encoder,
+    args: &MenusArgs,
+    pos: &Position,
+    views: [&Position; 2],
+    same: bool,
+) -> Result<(Value, [Vec<SideAct>; 2]), Value> {
+    let fault = |e: String| json!({ "fault": e });
+    let MenusArgs { widths, eps, properties, rules, server, blas } = args;
+    let (eps, properties, rules) = (*eps, *properties, *rules);
+    for p in std::iter::once(pos).chain(views.iter().copied()) {
         if &*p.format != reg.format_id.as_str() {
             return Err(fault(format!("position is {} but the regulation is {}", p.format, reg.format_id)));
         }
@@ -603,11 +640,22 @@ fn action_feature(reg: &Reg, action: &SideAct) -> Value {
 /// `colFeat`, which come from the menus built here), with the Q's server named `qServer`. The
 /// answer is `beliefNode`'s and `rootMenus`' under `rootMenus`. A fault in either is the answer.
 pub fn move_node(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
-    let (menus_answer, kept) = match root_menus_node(reg, encoder, value) {
+    let got = match root_menus_node(reg, encoder, value) {
         Ok(got) => got,
         Err(answer) => return answer,
     };
-    let mut asked = value.clone();
+    move_node_over(reg, encoder, got, value.clone())
+}
+
+/// `moveNode`'s second half: the node over the menus `got` (`menus_core`'s answer), asked as
+/// `asked` says (`beliefNode`'s request without the actions).
+pub(crate) fn move_node_over(
+    reg: &Reg,
+    encoder: &Encoder,
+    got: (Value, [Vec<SideAct>; 2]),
+    mut asked: Value,
+) -> Value {
+    let (menus_answer, kept) = got;
     asked["ours"] = Value::Array(kept[0].iter().map(|a| Value::Array(a.iter().map(act_json).collect())).collect());
     asked["theirs"] = Value::Array(kept[1].iter().map(|a| Value::Array(a.iter().map(act_json).collect())).collect());
     asked["rows"] = json!(kept[0].len());

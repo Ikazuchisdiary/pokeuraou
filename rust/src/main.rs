@@ -51,6 +51,7 @@ mod position;
 mod prep;
 mod reg;
 mod residual;
+mod playgame;
 mod replacenode;
 mod replacephase;
 mod resolve;

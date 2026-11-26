@@ -1010,7 +1010,29 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     if fused is not None:
         # The menus' half of the answer: their counts and clocks, as `rootmenus.menus` books them.
         fused.finish(answer["rootMenus"])
-    # What `fill_encoded` booked for each fill, booked from what the port says it did.
+    book_node(answer, leaf, encoder, wall)
+    if "refused" in answer:
+        port.raise_refused([(int(i), int(j), str(why)) for i, j, why in answer["refused"]])
+    if rules.mega_from_slots and answer["mega"] is not True:
+        # A binary that predates the field encoded with the current rule (as `belief_payoffs`).
+        return _NOT_ON_THIS_BINARY
+    if "served" not in answer:
+        raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
+    book_served(answer, leaf, encoder, any(hidden.values()))
+    unmodelled = set(answer["unmodelled"])
+    ordered = [SimpleNamespace(side=job["side"]) for job in jobs]
+    if fused is not None:
+        row, col = fused.menus
+    payoffs, solved = _fold_answer(answer, ordered, len(row), len(col), asks)
+    matrices: dict[int, list[np.ndarray]] = {}
+    for job, payoff in zip(ordered, payoffs, strict=True):
+        matrices.setdefault(1 - job.side, []).append(payoff)
+    return BeliefNode(matrices, unmodelled, int(answer["shared"]), int(answer["redone"]), solved)
+
+
+def book_node(answer: dict, leaf, encoder, wall: float) -> None:  # noqa: ANN001
+    """What `fill_encoded` booked for each fill of a `beliefNode` / `moveNode` answer, booked from
+    what the port says it did (IKA-455 stage 1.4; stage 3.6b books a game's nodes with it too)."""
     for fill in answer["fills"]:
         with timing.purpose(fill["purpose"]):
             what = "rust can_mega=" + {True: "slots", False: "holder", None: "unechoed"}[fill["mega"]]
@@ -1033,13 +1055,12 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
                 timing.count("fill.cells", int(fill["cells"]))
                 timing.count("fill.leaves", int(fill["leaves"]))
     timing.add("rust.fill@matrix", wall)
-    if "refused" in answer:
-        port.raise_refused([(int(i), int(j), str(why)) for i, j, why in answer["refused"]])
-    if rules.mega_from_slots and answer["mega"] is not True:
-        # A binary that predates the field encoded with the current rule (as `belief_payoffs`).
-        return _NOT_ON_THIS_BINARY
-    if "served" not in answer:
-        raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
+
+
+def book_served(answer: dict, leaf, encoder, hidden: bool) -> None:  # noqa: ANN001
+    """The inference server's work in a `beliefNode` / `moveNode` answer, booked on the leaf."""
+    from . import portlp, rustnode
+
     served = answer["served"]
     waited = float(served.get("waitUs", 0.0)) / 1e6
     rustnode.PORT_WAITED[0] -= waited
@@ -1054,20 +1075,11 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     timing.count("serve.requests", requests)
     portlp.COUNTS["stacked"] += 1
     portlp.COUNTS["nodes"] += 1
-    if not any(hidden.values()):
+    if not hidden:
         portlp.COUNTS["exact"] += 1
     if hasattr(encoder, "note"):
         for rows in answer["patched"]:
             encoder.note("patched side=rebuilt", int(rows))
-    unmodelled = set(answer["unmodelled"])
-    ordered = [SimpleNamespace(side=job["side"]) for job in jobs]
-    if fused is not None:
-        row, col = fused.menus
-    payoffs, solved = _fold_answer(answer, ordered, len(row), len(col), asks)
-    matrices: dict[int, list[np.ndarray]] = {}
-    for job, payoff in zip(ordered, payoffs, strict=True):
-        matrices.setdefault(1 - job.side, []).append(payoff)
-    return BeliefNode(matrices, unmodelled, int(answer["shared"]), int(answer["redone"]), solved)
 
 
 @functools.cache

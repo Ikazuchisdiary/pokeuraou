@@ -93,7 +93,8 @@ WORKER_STAGES = (
     "rust.needed",      # the replacement check before every decision, the wait included
     "rust.leads",       # the leads' switch-ins (a game's start, the selection solve)
     "rust.replacements",  # the replacement phase
-    "rust.resume",      # a paused turn resumed
+    "rust.game",        # a game's turns in one crossing (IKA-458 stage 3.6b)
+    "rust.resume",     # a paused turn resumed
     "rust.alternatives",  # a pause's alternatives, encoded or not
     "rust.bind",        # the bind columns Encoder.encode_positions asks the port for (IKA-429)
     # A Q rank fill's request (IKA-339), in the order a request makes them:

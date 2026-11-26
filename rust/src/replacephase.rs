@@ -70,15 +70,31 @@ fn phase(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
     if &*pos.format != reg.format_id.as_str() {
         return Err(fault("position is for another regulation".into()));
     }
-    let needed = replacements_needed(&pos);
-    if !needed.iter().flatten().any(|o| *o) {
-        return Err(fault("no replacement is owed".into()));
-    }
-    let options = [options_of(&pos, 0, &needed[0]), options_of(&pos, 1, &needed[1])];
 
     // The completions of both benches, as `hiddenStep` gives them.
     let step = step_of(reg, hidden.game, &pos, &hidden.seen, &hidden.leads, None)
         .ok_or_else(|| fault(format!("replacementPhase: no game {} is defined", hidden.game)))?;
+    let (answer, _after) = phase_core(reg, encoder, &context, &pos, &mut rng, &step)?;
+    Ok(answer)
+}
+
+/// The phase at `pos` over `step`'s completions, the draws made from `rng`; the answer
+/// `replacementPhase` gives, without the generator's state (the caller's to add). The generator
+/// is moved on only as far as the draws that were made: a fault leaves the caller to clone it.
+pub(crate) fn phase_core(
+    reg: &Reg,
+    encoder: &Encoder,
+    context: &Context,
+    pos: &Position,
+    rng: &mut Pcg64,
+    step: &crate::hiddenbench::Step,
+) -> Result<(Value, Position), Value> {
+    let fault = |e: String| json!({ "fault": e });
+    let needed = replacements_needed(pos);
+    if !needed.iter().flatten().any(|o| *o) {
+        return Err(fault("no replacement is owed".into()));
+    }
+    let options = [options_of(pos, 0, &needed[0]), options_of(pos, 1, &needed[1])];
     let mut spreads: Vec<(Vec<Position>, Vec<f64>)> = Vec::new();
     for side in 0..2 {
         match step.sides.get(side).and_then(|s| s.as_ref()) {
@@ -143,7 +159,7 @@ fn phase(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
         if numpy_sum(&strategies[side]) <= 0.0 {
             return Err(fault("a strategy with no mass".into()));
         }
-        picked[side] = choice(&strategies[side], &mut rng).map_err(fault)?;
+        picked[side] = choice(&strategies[side], rng).map_err(fault)?;
     }
     if cfg!(feature = "ika458-phase-control") {
         for side in 0..2 {
@@ -153,10 +169,10 @@ fn phase(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
     let chosen = [options[0][picked[0]].clone(), options[1][picked[1]].clone()];
     // `RustNode._phase`: `rng.choice(len(weights), p=[w / total for w in weights])`, the total
     // Python's own `sum`.
-    let (after, notes) = replacement_phase_drawn(reg, &pos, chosen, |weights| {
+    let (after, notes) = replacement_phase_drawn(reg, pos, chosen, |weights| {
         let total = python_sum(weights.iter().copied());
         let p: Vec<f64> = weights.iter().map(|w| w / total).collect();
-        choose_p(&p, &mut rng)
+        choose_p(&p, &mut *rng)
     })
     .map_err(fault)?;
     PHASES.fetch_add(1, Ordering::Relaxed);
@@ -164,7 +180,7 @@ fn phase(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
     let strings = |side: usize| -> Result<Vec<String>, Value> {
         options[side].iter().map(|o| choice_string(o)).collect::<Result<_, _>>().map_err(fault)
     };
-    Ok(json!({
+    let answer = json!({
         "kind": "replacementPhase",
         "options": [strings(0)?, strings(1)?],
         "policy": strategies,
@@ -188,5 +204,6 @@ fn phase(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
                 "copyUs": s.copy_ns as f64 / 1e3,
             }))
             .collect::<Vec<_>>(),
-    }))
+    });
+    Ok((answer, after))
 }

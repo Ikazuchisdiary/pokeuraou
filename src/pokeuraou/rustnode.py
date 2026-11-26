@@ -1060,6 +1060,11 @@ class RustNode:
         (`replacementPhase`) in one crossing."""
         return self._exchange(request)
 
+    @timing.timed("rust.game")
+    def play_game(self, request: dict[str, Any]) -> dict[str, Any]:
+        """IKA-458 stage 3.6b: a game's turns (`playGame`) in one crossing."""
+        return self._exchange(request)
+
     def parallel(self) -> dict[str, Any]:
         """The port's cell-thread counters (IKA-32): `threads`, and how many maps and items
         ran on the pool, `offMain` of them on a thread other than the one reading requests."""
