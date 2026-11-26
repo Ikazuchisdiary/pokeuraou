@@ -32,7 +32,18 @@ from pokeuraou.narrow import narrow
 
 from ._port import Budget
 from .test_beliefnode import midgame, setup  # noqa: F401 - fixtures
+from .test_portlp import openblas_core
 from .test_portserved import Stub
+
+#: The fold's dot copies the SkylakeX `ddot`'s order: on that core it is numpy's to the bit, on
+#: another the last place may move (as `test_belief_fold_port` and `test_portlp` allow).
+EXACT = openblas_core() == "SkylakeX"
+
+
+def _equal(x, y) -> bool:  # noqa: ANN001
+    if EXACT:
+        return bool(np.array_equal(x, y))
+    return x.shape == y.shape and bool(np.allclose(x, y, rtol=0, atol=1e-12))
 
 
 @pytest.fixture(scope="module")
@@ -71,7 +82,7 @@ def _same_matrices(a, b) -> bool:  # noqa: ANN001
     shared and the first side's resolution as redone (100 and 100)."""
     same = all(
         len(a.matrices[s]) == len(b.matrices[s])
-        and all(np.array_equal(x, y) for x, y in zip(a.matrices[s], b.matrices[s], strict=True))
+        and all(_equal(x, y) for x, y in zip(a.matrices[s], b.matrices[s], strict=True))
         for s in (0, 1)
     )
     return same and a.unmodelled == b.unmodelled
@@ -87,7 +98,9 @@ def _same(definition, in_port, spreads) -> bool:  # noqa: ANN001
     assert set(in_port.solved) == {0, 1}, "the request solved no game: the check is vacuous"
     for side in (0, 1):
         weights = np.asarray([item.weight for item in spreads[1 - side]], dtype=np.float64)
-        games = [m if side == 0 else -m.T for m in definition.matrices[side]]
+        # On the core whose order the port copies: the definition's matrices; else the port's own.
+        held = definition if EXACT else in_port
+        games = [m if side == 0 else -m.T for m in held.matrices[side]]
         want = solve_bayesian(games, weights)
         got = in_port.solved[side]
         if not (got.value == want.value and np.array_equal(got.row_strategy, want.row_strategy)):
