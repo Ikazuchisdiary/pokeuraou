@@ -575,3 +575,28 @@ impl Slot {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_row_count_has_a_bucket_that_holds_it_and_is_the_smallest() {
+        for rows in 1..=MAX_ROWS {
+            let b = bucket_of(rows);
+            assert!(b < BUCKETS, "{rows}");
+            assert!(bucket_rows(b) >= rows, "{rows} in bucket {b} of {}", bucket_rows(b));
+            if b > 0 {
+                assert!(bucket_rows(b - 1) < rows, "{rows} would fit bucket {}", b - 1);
+            }
+        }
+        assert_eq!(bucket_rows(BUCKETS - 1), MAX_ROWS);
+    }
+
+    #[test]
+    fn a_rows_bytes_follow_the_encoders_arrays() {
+        let g = Geometry { m: 4, wm: 100, ws: 38, wf: 25 };
+        // species, ability, item (2 x m i32), moves (2 x m x 4 i32), mon, mask, side, field.
+        assert_eq!(g.row_bytes(), [32, 32, 32, 128, 3200, 32, 304, 100]);
+    }
+}

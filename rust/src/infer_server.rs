@@ -348,7 +348,11 @@ fn usage() -> ! {
 pub fn main(args: &[String]) {
     let mut regulation = None;
     let mut arm_specs: Vec<(String, Vec<String>)> = Vec::new();
-    let (mut host, mut port, mut slots, mut report) = ("127.0.0.1".to_string(), 0u16, 4usize, 60.0f64);
+    // POKEURAOU_RUST_SERVER_REPORT: seconds between the report lines, for a run that is shorter
+    // than a minute (a launcher does not pass --report-every).
+    let every = std::env::var("POKEURAOU_RUST_SERVER_REPORT").ok().and_then(|s| s.parse().ok());
+    let (mut host, mut port, mut slots, mut report) =
+        ("127.0.0.1".to_string(), 0u16, 4usize, every.unwrap_or(60.0f64));
     let mut q_forward = None;
     let mut dll_dir = None;
     let mut i = 0;
@@ -403,10 +407,26 @@ pub fn main(args: &[String]) {
     // Where CUDA 12's DLLs are: --dll-dir, else POKEURAOU_CUDA_DLLS, else the bin folder of an
     // installed CUDA 12 Toolkit (`CUDA_PATH_V12_*`), else whatever PATH already holds.
     let toolkit = || {
-        std::env::vars()
+        let named = std::env::vars()
             .filter(|(k, _)| k.starts_with("CUDA_PATH_V12"))
             .map(|(_, v)| format!("{v}{}bin", std::path::MAIN_SEPARATOR))
-            .next()
+            .next();
+        // A shell opened before the Toolkit was installed has no such variable: look where
+        // its installer puts it.
+        named.or_else(|| {
+            let root = std::path::Path::new(&std::env::var("ProgramFiles").ok()?)
+                .join("NVIDIA GPU Computing Toolkit")
+                .join("CUDA");
+            let mut found: Vec<_> = std::fs::read_dir(root)
+                .ok()?
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("v12"))
+                .map(|e| e.path().join("bin"))
+                .filter(|p| p.is_dir())
+                .collect();
+            found.sort();
+            found.pop().map(|p| p.to_string_lossy().into_owned())
+        })
     };
     if let Some(dir) = dll_dir.or_else(|| std::env::var("POKEURAOU_CUDA_DLLS").ok()).or_else(toolkit) {
         let path = std::env::var("PATH").unwrap_or_default();
@@ -420,7 +440,13 @@ pub fn main(args: &[String]) {
     });
     let widths = Encoder::new(&reg).widths;
     let geom = Geometry { m: widths.mons_per_side, wm: widths.mon, ws: widths.side, wf: widths.field };
-    let gpu = Gpu::new(0).unwrap_or_else(|e| {
+    // cudarc panics when a library is not found; say what to do about it instead.
+    let gpu = std::panic::catch_unwind(|| Gpu::new(0)).unwrap_or_else(|_| {
+        Err("CUDA 12's DLLs (nvrtc64_120_0, cublas64_12) were not found: pass --dll-dir, or set \
+             POKEURAOU_CUDA_DLLS, or install the CUDA 12 Toolkit"
+            .to_string())
+    });
+    let gpu = gpu.unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });

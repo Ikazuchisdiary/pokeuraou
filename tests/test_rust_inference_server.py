@@ -82,9 +82,8 @@ def _fuzz(encoded: Encoded, net, encoder, rows: int, seed: int) -> Encoded:
     arrays = {name: np.ascontiguousarray(getattr(encoded, name)[pick]) for name in ARRAYS}
     sizes = encoder.vocab.sizes
     m = arrays["species"].shape[-1]
-    arrays["species"] = rng.integers(0, sizes["species"], arrays["species"].shape).astype(arrays["species"].dtype)
-    arrays["ability"] = rng.integers(0, sizes["ability"], arrays["ability"].shape).astype(arrays["ability"].dtype)
-    arrays["item"] = rng.integers(0, sizes["item"], arrays["item"].shape).astype(arrays["item"].dtype)
+    for name in ("species", "ability", "item"):
+        arrays[name] = rng.integers(0, sizes[name], arrays[name].shape).astype(arrays[name].dtype)
     moves = rng.integers(0, sizes["move"], arrays["moves"].shape)
     moves[rng.random(moves.shape) < 0.25] = 0
     arrays["moves"] = moves.astype(arrays["moves"].dtype)
@@ -99,8 +98,9 @@ def _fuzz(encoded: Encoded, net, encoder, rows: int, seed: int) -> Encoded:
             lo = encoder.state_widths["mon"] - net._move_ids  # noqa: SLF001
         mon[..., lo : lo + net._move_ids] = ids  # noqa: SLF001
     arrays["mon"] = mon
-    arrays["side"] = arrays["side"].astype(np.float32) + 0.5 * rng.standard_normal(arrays["side"].shape).astype(np.float32)
-    arrays["field"] = arrays["field"].astype(np.float32) + 0.5 * rng.standard_normal(arrays["field"].shape).astype(np.float32)
+    for name in ("side", "field"):
+        noise = 0.5 * rng.standard_normal(arrays[name].shape).astype(np.float32)
+        arrays[name] = arrays[name].astype(np.float32) + noise
     return Encoded(**arrays, unknown_volatiles={})
 
 
@@ -192,7 +192,9 @@ def _stages_from_server(address: str, arm: str, encoded: Encoded) -> dict[str, n
         assert reply["ok"], reply
         out = {}
         for stage in reply["stages"]:
-            values = np.frombuffer(block.buf, dtype=np.float32, count=stage["count"], offset=stage["offset"]).copy()
+            values = np.frombuffer(
+                block.buf, dtype=np.float32, count=stage["count"], offset=stage["offset"]
+            ).copy()
             out[stage["name"]] = values.reshape(-1, stage["width"])
         return out
     finally:
@@ -317,10 +319,13 @@ def test_several_workers_at_once_get_what_they_get_alone(served, encoder, base_e
 
 def test_ping_describe_and_errors(served, encoder):
     server, _ = served
-    assert sorted(_ask(server.address, {"op": "ping"})["models"]) == ["base", "bind", "bind2", "pair", "state"]
+    models = _ask(server.address, {"op": "ping"})["models"]
+    assert sorted(models) == ["base", "bind", "bind2", "pair", "state"]
     arms = _ask(server.address, {"op": "describe"})["arms"]
     assert arms["pair"] == ["bind.pt", "bind2.pt"]
-    reply = _ask(server.address, {"op": "score", "model": "nope", "shm": "x", "rows": 1, "layout": [], "result_offset": 0})
+    reply = _ask(server.address, {
+        "op": "score", "model": "nope", "shm": "x", "rows": 1, "layout": [], "result_offset": 0,
+    })
     assert not reply["ok"] and "nope" in reply["error"]
     assert not _ask(server.address, {"op": "frobnicate"})["ok"]
     # A Q request with no Q server to pass it to is refused by name, not dropped.
