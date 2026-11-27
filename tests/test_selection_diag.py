@@ -52,3 +52,31 @@ def test_wilson_and_spearman() -> None:
     x = np.array([0.1, 0.2, 0.3, 0.4])
     assert sd.spearman(x, x**3) == pytest.approx(1.0)
     assert sd.spearman(x, -x) == pytest.approx(-1.0)
+
+
+def test_solve_pair_runs_on_a_served_leaf_and_a_torch_leaf_stops(tmp_path: Path) -> None:
+    # IKA-463: the solve is the port's, on the inference server's leaf. A stand-in server's leaf
+    # (`standin.RowStub`) solves a pair; a leaf held in the process stops as `UnservedLeaf`
+    # (the control that the check can fail: this is what the tool did before the fix).
+    from pokeuraou.beliefnode import UnservedLeaf
+    from pokeuraou.damage import register_mega_stones
+    from pokeuraou.pool import load_pool
+
+    from .test_poolplay import _stub, _variants, _write_pool
+
+    pool = load_pool(_write_pool(tmp_path / "p.json", _variants()))
+    register_mega_stones(pool.reg)
+    teams = list(pool.teams)
+    solver = sd._make_solver(pool, teams, _stub, "stub", tmp_path / "store", [])
+    sd._STATE["solver"] = solver
+    row = sd._solve_pair((0, 1))
+    assert 0.0 <= row["value"] <= 1.0 and row["gap"] < 1e-6
+    assert row["solves"] == 1
+    assert list((tmp_path / "store").glob("*.json"))
+
+    def torch_like(positions):  # noqa: ANN001, ANN202
+        return np.full(len(positions), 0.5)
+
+    bad = sd._make_solver(pool, teams, torch_like, "torch", tmp_path / "store2", [])
+    with pytest.raises(UnservedLeaf):
+        bad.canonical(0, 1)

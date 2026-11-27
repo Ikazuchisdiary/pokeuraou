@@ -1435,8 +1435,10 @@ def solve_move(
     ladder: dict[str, Any] | None = None,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
-    open game (`search`) when ``exact``, else its Bayesian game over the other side's
-    completions in ``spreads`` (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens
+    open game when ``exact``: at depth 1 the port's `beliefNode` on one exact completion a
+    side (`belief_solve` over `open_spreads`), and `search` only when ``cells`` > 0 deepens
+    it. Else the Bayesian game over the other side's completions in ``spreads``
+    (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens
     best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle;
     ``levels`` and ``discount`` are the depth guard and the depth discount (IKA-342);
     ``grow`` widens the root mid-read (`deepen.Grow`, IKA-354).
@@ -2264,7 +2266,9 @@ class HumanGame:
                         reg, options, {other: items}, (leaf, leaf), sides=(side,)
                     )
                 except (EquilibriumError, ValueError) as problem:
-                    raise type(problem)(
+                    # One type, the original joined by `from`: a subclass of ValueError that
+                    # takes more than one argument (`json.JSONDecodeError`) cannot be rebuilt.
+                    raise EquilibriumError(
                         f"side {side}'s replacement phase at turn {pos.turn} "
                         f"({len(mine)} x {len(options[other])}, {len(items)} completions of "
                         f"side {other}'s bench) was not solved: {problem}"

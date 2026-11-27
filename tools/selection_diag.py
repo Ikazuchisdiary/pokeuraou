@@ -11,7 +11,8 @@ Three steps, each its own subcommand. Nothing here learns a leaf.
               `outcome` are read, by a regex on the line; `--check` re-reads the first lines of
               each file with the JSON parser and stops on any difference.
 ``solve``     solves the selection game of each pair with the leaf (`poolplay.SolvedSelections`,
-              the code that generation uses, one process per worker, CPU) and writes the matrix
+              the code that generation uses, one process per worker, all on one Rust inference
+              server: `--inference ADDRESS`, or one is started; CUDA) and writes the matrix
               of values. ``--team-file`` adds builds that are not in the pool; then only their
               pairs with the pool are solved. The solves are kept in ``--store`` (one file per
               pair), so a stopped run resumes and the answers can be read again.
@@ -169,32 +170,39 @@ def _teams_for(pool: Any, team_files: Sequence[str]) -> list[Any]:
     return teams
 
 
-def _init_worker(pool_name: str, values: list[str], store: str, team_files: list[str]) -> None:
-    os.environ.setdefault("POKEURAOU_RUST_NODE", "1")
-    import torch
+def _model_name(paths: Sequence[Path]) -> str:
+    stem = re.sub(r"-s\d+$", "", paths[0].stem)
+    return stem if len(paths) == 1 else f"{stem}x{len(paths)}"
 
-    torch.set_num_threads(1)
-    from pokeuraou.damage import register_mega_stones
-    from pokeuraou.encode import Encoder, EncodingRules
-    from pokeuraou.pool import load_pool
+
+def _make_solver(pool: Any, teams: list[Any], leaf: Any, name: str, store: Path,  # noqa: ANN401
+                 team_files: Sequence[str]) -> Any:  # noqa: ANN401
+    """The selection solver of a worker, over ``leaf`` (the inference server's, IKA-463)."""
     from pokeuraou.poolplay import SolvedSelections
-    from pokeuraou.value import BatchedValue, load_ensemble
+
+    extra = "+".join(str(_team_json(p)["id"]) for p in team_files)
+    tag = f"{pool.sha256}|value:{name}" + (f"|{extra}" if extra else "")
+    return SolvedSelections(pool.reg, teams, leaf, model=f"value:{name}", store=store, tag=tag)
+
+
+def _init_worker(pool_name: str, address: str, values: list[str], store: str,
+                 team_files: list[str]) -> None:
+    """One worker process: a `RemoteValue` on the Rust inference server at ``address``.
+
+    IKA-463: the port solves the selection game on the server's leaf (CUDA); a leaf held in this
+    process (`BatchedValue`) stops as `beliefnode.UnservedLeaf`, so the nets are the server's.
+    """
+    from pokeuraou.damage import register_mega_stones
+    from pokeuraou.humanplay import served_leaf
+    from pokeuraou.pool import load_pool
 
     pool = load_pool(pool_name)
     register_mega_stones(pool.reg)
     teams = _teams_for(pool, team_files)
-    encoder = Encoder(pool.reg, rules=EncodingRules())
     paths = [repo_file(v) for v in values]
-    nets, _ = load_ensemble(paths, encoder)
-    device = torch.device("cpu")
-    value = BatchedValue([n.to(device) for n in nets], encoder, device=device)
-    stem = re.sub(r"-s\d+$", "", paths[0].stem)
-    name = stem if len(paths) == 1 else f"{stem}x{len(paths)}"
-    extra = "+".join(str(_team_json(p)["id"]) for p in team_files)
-    tag = f"{pool.sha256}|value:{name}" + (f"|{extra}" if extra else "")
-    _STATE["solver"] = SolvedSelections(
-        pool.reg, teams, value, model=f"value:{name}", store=Path(store), tag=tag
-    )
+    leaf, _encoder = served_leaf(pool.reg, address, paths)
+    name = _model_name(paths)
+    _STATE["solver"] = _make_solver(pool, teams, leaf, name, Path(store), team_files)
     _STATE["name"] = name
 
 
@@ -224,9 +232,16 @@ def cmd_solve(args: argparse.Namespace) -> None:
     store.mkdir(parents=True, exist_ok=True)
     started = time.time()
     results: list[dict[str, Any]] = []
+    # The Rust inference server (CUDA): named by --inference, or started here for this run.
+    from pokeuraou.humanplay import inference_address_or_start
+
+    address = inference_address_or_start(
+        args.inference, pool.reg, [repo_file(v) for v in args.value], None,
+        lambda text: print(text, file=sys.stderr),
+    )
     with ProcessPoolExecutor(
         max_workers=args.jobs, initializer=_init_worker,
-        initargs=(args.pool, list(args.value), str(store), list(args.team_file)),
+        initargs=(args.pool, address, list(args.value), str(store), list(args.team_file)),
     ) as ex:
         for k, row in enumerate(ex.map(_solve_pair, pairs, chunksize=4)):
             results.append(row)
@@ -486,6 +501,9 @@ def main() -> None:
     s.add_argument("--value", nargs="+", default=list(DEFAULT_VALUE))
     s.add_argument("--team-file", action="append", default=[],
                    help="a build outside the pool (pool-team JSON)")
+    s.add_argument("--inference", default=None,
+                   help="host:port of a running Rust inference server holding --value "
+                   "(default: POKEURAOU_INFERENCE, else one is started for this run; needs CUDA)")
     s.add_argument("--store", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--jobs", type=int, default=4)
