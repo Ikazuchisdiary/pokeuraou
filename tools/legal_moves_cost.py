@@ -118,8 +118,8 @@ def load_positions(games_dir: Path, wanted: int, seed: int) -> list[Position]:
 def depth2_children(reg, roots: list[Position], seed: int, wanted: int) -> list[Position]:  # noqa: ANN001
     """Positions a depth-2 refinement narrows at: a cell of the width-12 root menus played
     through the port, and its likeliest `SUB_BRANCHES` outcomes that are not over -- what
-    `search._refine_cells` hands `narrow_many` (its cells are the root's best, these are
-    drawn uniformly from the menus, so the mix of cells is not the same)."""
+    the depth-2 refine (`search._refine_cells`, until IKA-464) handed `narrow_many` (its
+    cells were the root's best, these are drawn uniformly from the menus)."""
     from pokeuraou import port
     from pokeuraou.budget import Budget
 
@@ -142,7 +142,8 @@ def depth2_children(reg, roots: list[Position], seed: int, wanted: int) -> list[
     return out[:wanted]
 
 
-#: `search.DEFAULT_SUB_BRANCHES`.
+#: The chance branches a refined cell kept (`search.DEFAULT_SUB_BRANCHES` until IKA-464;
+#: the port's deepening keeps 3 too, `portdeepen.BRANCHES`).
 SUB_BRANCHES = 3
 
 

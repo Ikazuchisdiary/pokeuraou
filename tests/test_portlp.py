@@ -6,14 +6,9 @@ What these hold:
   strategies, both sides' EVs -- on random games, degenerate ones (ties, dominated actions,
   a single row or column) and Bayesian ones; a non-finite matrix is `solve`'s ValueError,
   returned in its place. The port's own count of LPs is the positive control.
-- **the same sub-games**: `solve_subs` on nodes the port filled and encoded (the learned
-  leaf's road, here with random leaf values): folded in the port from the span block and
-  solved, each value is `solve(PendingPayoff.finish()).value` -- to the bit where numpy's dot
-  takes the order the port copies (this machine's OpenBLAS core), to the last places where it
-  does not; a node given whole is the same to the bit. The positive control: sub-games folded
-  in the port.
 
-No torch: the nodes are encoded by the port and scored with made-up values.
+The depth-2 refine's sub-games (`solve_subs`) and the one-game switch (`solve_one`,
+`solve_bayesian_one`) went with the depth-2 refine (IKA-464). No torch.
 """
 
 from __future__ import annotations
@@ -21,13 +16,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pokeuraou import equilibrium, port, portlp, rustnode, search
-from pokeuraou.budget import Budget
+from pokeuraou import equilibrium, portlp, rustnode
 from pokeuraou.damage import register_mega_stones
-from pokeuraou.narrow import narrow
 from pokeuraou.teams import load_roster
-
-from ._positions import played as _played
 
 
 @pytest.fixture(scope="module")
@@ -151,77 +142,3 @@ def test_the_ports_bayesian_equilibria_are_solve_bayesians(roster) -> None:  # n
     errors = portlp.solve_bayesian_many(roster.reg, bad)
     assert all(isinstance(e, ValueError) for e in errors[:4])
     assert _same_bayesian(errors[4], equilibrium.solve_bayesian(*good))
-    # One at a time, on and off: the same answer.
-    was = portlp.ON[0]
-    try:
-        for on in (True, False):
-            portlp.set_on(on)
-            one = portlp.solve_bayesian_one(roster.reg, *good)
-            assert _same_bayesian(one, equilibrium.solve_bayesian(*good))
-            assert _same_equilibrium(portlp.solve_one(roster.reg, good[0][0]),
-                                     equilibrium.solve(good[0][0]))
-    finally:
-        portlp.set_on(was)
-
-
-#: (game seed, turn) of `_played` positions whose width-8 nodes hold a cell of 16 leaves
-#: (the dot's blocks) and cells a replacement stopped (9 and 14 fold trees).
-FILLED = ((0, 0), (1, 2), (4, 3))
-
-
-def _filled(roster, count: int = 3):  # noqa: ANN001, ANN202
-    """Nodes the port filled and encoded, with made-up leaf values: `search._Sub`s pending."""
-    reg = roster.reg
-    budget = Budget.matrix()
-    asks = []
-    for seed, turn in FILLED[:count]:
-        pos = _played(roster, turns=6, seed=seed)[turn]
-        ours = narrow(reg, pos, 0, limit=8).actions
-        theirs = narrow(reg, pos, 1, limit=8).actions
-        asks.append((pos, list(ours), list(theirs)))
-    was = rustnode._SPAN_BLOCKS[0]
-    rustnode._SPAN_BLOCKS[0] = True
-    try:
-        nodes = port.ask(reg, lambda node: node.fill_encoded_many(asks, budget))
-    finally:
-        rustnode._SPAN_BLOCKS[0] = was
-    rng = np.random.default_rng(383)
-    subs = []
-    for (_pos, ours, theirs), node in zip(asks, nodes, strict=True):
-        assert node.span_block is not None and not node.refused
-        pending = port.PendingPayoff(node, (len(ours), len(theirs)))
-        pending.scored(rng.random(pending.rows))
-        subs.append(search._Sub(pending=pending))
-    return subs
-
-
-def test_the_ports_sub_games_are_folds_and_solves(roster) -> None:  # noqa: ANN001
-    reg = roster.reg
-    subs = _filled(roster)
-    # The roads are met: a span of 16 leaves, and fold trees.
-    assert max(len(span[2]) for s in subs for span in s.pending.filled.spans) >= 16
-    assert sum(len(s.pending.filled.folded) for s in subs) >= 20
-    want = [float(equilibrium.solve(s.pending.finish()).value) for s in subs]
-    folded = portlp.COUNTS["folded"]
-    portlp.solve_subs(reg, subs)
-    assert portlp.COUNTS["folded"] - folded == len(subs)
-    got = [s.solved for s in subs]
-    assert all(s.done for s in subs)
-    np.testing.assert_allclose(got, want, rtol=0, atol=1e-12)
-    # Whole matrices (the hp-share road): the same solve, to the last bit or two.
-    whole = [search._Sub(payoff=s.pending.finish()) for s in _filled(roster)]
-    portlp.solve_subs(reg, whole)
-    np.testing.assert_allclose([s.solved for s in whole], [
-        float(equilibrium.solve(s.payoff).value) for s in whole], rtol=0, atol=TOL)
-
-
-def test_a_sub_game_solved_already_or_elsewhere_is_left_alone(roster) -> None:  # noqa: ANN001
-    reg = roster.reg
-    subs = _filled(roster, 2)
-    subs[0].done, subs[0].solved = True, 0.25
-    alias = search._Sub(alias=subs[1])
-    shared = search._Sub(value=0.5, shared=True)
-    before = portlp.COUNTS["folded"]
-    portlp.solve_subs(reg, [subs[0], alias, shared, subs[1]])
-    assert portlp.COUNTS["folded"] - before == 1  # subs[1], once, through its alias
-    assert subs[0].solved == 0.25 and subs[1].done and not alias.done and not shared.done

@@ -248,7 +248,8 @@ def fill_position(ctx: dict[str, Any], k: int, check: bool) -> tuple[list[dict[s
     return out, notes
 
 
-#: Chance branches a cell keeps at depth 2 (`search.DEFAULT_SUB_BRANCHES`), for the
+#: Chance branches a refined cell keeps (`portdeepen.BRANCHES`; the search's depth 2 kept
+#: as many until IKA-464), for the
 #: probability left outside them.
 SPREAD_TOP = 3
 

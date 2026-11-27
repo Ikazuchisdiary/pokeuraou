@@ -33,7 +33,7 @@ from .regulation import Regulation
 #: Each side's menu in a refined cell's child: the Q's best (IKA-322 §18 measured half the
 #: NashConv of `narrow`'s 8 at the same width).
 CHILD_WIDTH = 8
-#: The branches a refined cell keeps (`search.DEFAULT_SUB_BRANCHES`).
+#: The branches a refined cell keeps (as the search's depth 2 kept, IKA-12).
 BRANCHES = 3
 #: A slice of wall time between two readings of the move's budget, in milliseconds.
 SLICE_MS = 250.0

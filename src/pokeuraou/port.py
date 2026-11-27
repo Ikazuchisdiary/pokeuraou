@@ -115,21 +115,19 @@ def turns(
     budget: Budget,
     *,
     full: bool = True,
-    bare: Sequence[bool] | None = None,
 ) -> list[PortTurn | PortRefused]:
     """`turn` of every (position, actions) in one crossing (IKA-295).
 
     Each answer is the one `turn` would have given alone; a refused one is the
     `PortRefused` that `turn` would have raised, handed back in its place so that the
-    caller raises it where it would have been met. ``bare`` (IKA-389): the turns whose
-    branches stay in the port as `rustnode.HeldPosition`s.
+    caller raises it where it would have been met.
     """
     if not asks:
         return []
 
     def call(node: RustNode) -> list[PortTurn | PortRefused]:
-        answers = node.turn_many([(pos, list(actions)) for pos, actions in asks], budget, full=full,
-                                 bare=bare)
+        answers = node.turn_many([(pos, list(actions)) for pos, actions in asks], budget,
+                                 full=full)
         return [
             PortRefused(f"the port refused a turn: {answer}") if isinstance(answer, str) else answer
             for answer in answers
@@ -691,180 +689,6 @@ def _folded(filled: Any, values: np.ndarray, shape: tuple[int, int]) -> np.ndarr
     return payoff
 
 
-class PendingPayoff:
-    """A node the port has resolved and encoded and the leaf has not scored yet (IKA-291).
-
-    `batched_payoff`'s learned road cut in two, so that many nodes' leaves can go to the
-    leaf in one call (`score_segments`) and each matrix is folded afterwards from its own
-    rows. `finish` is `_encoded`'s fold over the same values, so a node scored this way is
-    the node `batched_payoff` returns whenever the leaf gives each block the answer it
-    would have given the block alone -- which `score_segments` is built to guarantee.
-    """
-
-    def __init__(self, filled: Any, shape: tuple[int, int]) -> None:  # noqa: ANN401
-        self.filled = filled
-        self.shape = shape
-        self.unmodelled: set[str] = set(filled.unmodelled)
-        self.rows = len(filled.encoded.species)
-        self.values: np.ndarray | None = None
-
-    @property
-    def encoded(self) -> Any:  # noqa: ANN401 - encode.Encoded
-        return self.filled.encoded
-
-    def scored(self, values: np.ndarray) -> None:
-        """Keep the leaf's answer and let the encoded arrays go (a fill is node-sized)."""
-        self.values = np.asarray(values, dtype=np.float64)
-        self.filled.encoded = None
-
-    def finish(self) -> np.ndarray:
-        if self.values is None:
-            raise RuntimeError("a pending payoff was folded before its leaves were scored")
-        return _folded(self.filled, self.values, self.shape)
-
-
-def pending_payoff(
-    reg: Regulation,
-    pos: Position,
-    ours: Sequence[SideAction],
-    theirs: Sequence[SideAction],
-    evaluate: Callable[[list[Position]], np.ndarray],
-    *,
-    budget: Budget,
-) -> PendingPayoff | None:
-    """`batched_payoff` up to the leaf, or None when `evaluate` does not take that road.
-
-    The learned road only: a ported objective is scored inside the port and a hand-written
-    one here, and neither has a forward pass to share, so the caller asks
-    `batched_payoff` for those as before.
-    """
-    names = objective_names([evaluate])
-    if names is not None and set(names) <= PORTED_OBJECTIVES:
-        return None
-    plan = encoded_leaf_plan([evaluate])
-    if plan is None or plan[0][1] is None:
-        return None
-    filled = _fill_encoded(reg, pos, ours, theirs, plan, [plan[0][1]], budget, None)
-    return PendingPayoff(filled, (len(ours), len(theirs)))
-
-
-def pending_payoffs(
-    reg: Regulation,
-    asks: Sequence[tuple[Position, Sequence[SideAction], Sequence[SideAction]]],
-    evaluate: Callable[[list[Position]], np.ndarray],
-    *,
-    budget: Budget,
-    links: Sequence[dict[str, Any] | None] | None = None,
-) -> list[PendingPayoff | PortRefused] | None:
-    """`pending_payoff` of many nodes in one crossing to the port (IKA-295), or None when
-    `evaluate` does not take that road.
-
-    Each node is `_fill_encoded`'s of its own request -- the same arrays, spans, folds and
-    notes -- and a node the port refused is the `PortRefused` that `pending_payoff` would
-    have raised, in its place. `links` lets a node read its cells' turns off an earlier
-    node of the crossing (`RustNode.fill_encoded_many`); what it reads is what it would
-    have resolved.
-    """
-    names = objective_names([evaluate])
-    if names is not None and set(names) <= PORTED_OBJECTIVES:
-        return None
-    plan = encoded_leaf_plan([evaluate])
-    if plan is None or plan[0][1] is None:
-        return None
-    if not asks:
-        return []
-    from .encode import rules_of
-
-    scorer = plan[0][1]
-    rules = rules_of(scorer)
-    filled = ask(
-        reg,
-        lambda node: node.fill_encoded_many(
-            [(pos, list(ours), list(theirs)) for pos, ours, theirs in asks],
-            budget,
-            rules=rules,
-            links=links,
-        ),
-    )
-    out: list[PendingPayoff | PortRefused] = []
-    for node, (_pos, ours, theirs) in zip(filled, asks, strict=True):
-        try:
-            raise_refused(node.refused)
-        except PortRefused as refused:
-            out.append(refused)
-            continue
-        note_port_rule([scorer], node)
-        timing.count("leaves.node", len(node.encoded.species))
-        out.append(PendingPayoff(node, (len(ours), len(theirs))))
-    return out
-
-
-def score_segments(
-    evaluate: Callable[[list[Position]], np.ndarray], segments: Sequence[Any]
-) -> list[np.ndarray]:
-    """Each encoded block's values from one call into the leaf (IKA-291).
-
-    Every block is scored as `from_encoded` would score it alone -- the same rows in a
-    call of the same size -- because a leaf's answer for a row depends on how many rows
-    share its forward pass (5.96e-08 on the card, 37 different answers for the same eight
-    rows between batch sizes 8 and 988) and a changed payoff is a changed equilibrium.
-    What is shared is the call: a leaf that offers `from_encoded_segments` takes all the
-    blocks at once (one round trip to a server, one synchronisation on a card), and any
-    other leaf is called once per block, which is what `batched_payoff` did.
-    """
-    owner = getattr(evaluate, "__self__", evaluate)
-    many = getattr(owner, "from_encoded_segments", None)
-    if many is not None:
-        return [np.asarray(values, dtype=np.float64) for values in many(list(segments))]
-    one = owner.from_encoded
-    return [np.asarray(one(segment), dtype=np.float64) for segment in segments]
-
-
-def score_stacked(
-    evaluate: Callable[[list[Position]], np.ndarray], segments: Sequence[Any]
-) -> list[np.ndarray]:
-    """Every encoded block's values from *one* forward pass over all their rows (IKA-367).
-
-    Not `score_segments`: a row's value moves with the rows that share its pass (5.96e-08 on
-    the card), so this is a different leaf to the last places, and only a reading that has
-    no earlier games to keep (the depth-2 refine's ``stack``; the ladder's, until IKA-464)
-    takes it. What it buys is the
-    passes: a depth-3 stage's child games are a few dozen rows each, and one pass a block
-    paid for the call, not the rows. A leaf with no encoded road is `score_segments`'."""
-    owner = getattr(evaluate, "__self__", evaluate)
-    one = getattr(owner, "from_encoded", None)
-    blocks = list(segments)
-    if one is None or len(blocks) < 2:
-        return score_segments(evaluate, blocks)
-    from .encode import Encoded
-
-    decided = ([b.decided for b in blocks] if all(b.decided is not None for b in blocks)
-               else None)
-    unknown: dict[str, int] = {}
-    for b in blocks:
-        for key, n in b.unknown_volatiles.items():
-            unknown[key] = unknown.get(key, 0) + n
-    stacked = Encoded(
-        species=np.concatenate([b.species for b in blocks]),
-        ability=np.concatenate([b.ability for b in blocks]),
-        item=np.concatenate([b.item for b in blocks]),
-        moves=np.concatenate([b.moves for b in blocks]),
-        mon=np.concatenate([b.mon for b in blocks]),
-        mask=np.concatenate([b.mask for b in blocks]),
-        side=np.concatenate([b.side for b in blocks]),
-        field=np.concatenate([b.field for b in blocks]),
-        unknown_volatiles=unknown,
-        decided=None if decided is None else np.concatenate(decided),
-    )
-    values = np.asarray(one(stacked), dtype=np.float64)
-    out = []
-    at = 0
-    for b in blocks:
-        out.append(values[at:at + len(b)])
-        at += len(b)
-    return out
-
-
 class HeldLeaves:
     """Cells resolved by the port and scored here: `resolve.HeldLeaves` on the port's turns."""
 
@@ -994,7 +818,6 @@ def encoded_leaf_plan(
 __all__ = [
     "PORTED_OBJECTIVES",
     "HeldLeaves",
-    "PendingPayoff",
     "PortRefused",
     "alternatives_encoded",
     "apply_lead_abilities",
@@ -1003,8 +826,6 @@ __all__ = [
     "batched_payoffs",
     "branch",
     "lead_branches_many",
-    "pending_payoff",
-    "pending_payoffs",
     "replacement_branches",
     "replacements_encoded",
     "replacements_needed",
@@ -1012,7 +833,6 @@ __all__ = [
     "resume",
     "resume_alternatives",
     "resumed",
-    "score_segments",
     "turn",
     "turn_leaves",
     "turns",

@@ -5,9 +5,9 @@ used to be the large part of the JSON header. They now come in the body as a bin
 (`encoded_node::span_block` over there, `rustnode._binary_spans` here). The JSON road is kept
 on request (`jsonSpans`) for this file alone, which holds the two to the same lists: the
 same cells in the same order, the same leaf indices, and every weight the same double bit
-for bit. Both crossings take the block: one node (`fill_encoded`) and many in one line
-(`fill_encoded_many`, a depth-2 pass's sub-games), each through the shared block and down
-the pipe.
+for bit. One node's crossing (`fill_encoded`) takes the block through the shared block and
+down the pipe. (Many nodes in one line, `fill_encoded_many`, went with the depth-2 refine,
+IKA-464.)
 
 The comparison is shown able to fail (`test_the_comparison_sees_a_broken_block`): a block
 read with one field out of place is caught.
@@ -84,21 +84,6 @@ def test_a_pausing_node_keeps_its_folds_beside_the_block(bridged: None) -> None:
     assert binary.folded, "no folded cell"
     assert _exact(binary.spans) == _exact(text.spans)
     assert binary.folded == text.folded
-
-
-@pytest.mark.parametrize("blocks", [True, False], ids=["shm", "pipe"])
-def test_many_nodes_in_one_line_cut_their_blocks_apart(bridged: None, blocks: bool) -> None:  # noqa: F811
-    reg, pos, row, col = _node()
-    rustnode.reset()
-    child = rustnode.node_for(reg)
-    child._shm_off = not blocks  # noqa: SLF001
-    asks = [(pos, row, col), (pos, row[:3], col[:4]), (pos, row[2:], col)]
-    many = child.fill_encoded_many(asks, Budget.matrix())
-    for node, (p, r, c) in zip(many, asks, strict=True):
-        alone = child.fill_encoded(p, r, c, Budget.matrix(), [], None, json_spans=True)
-        assert _exact(node.spans) == _exact(alone.spans)
-        assert node.folded == alone.folded
-        assert np.array_equal(node.encoded.mon, alone.encoded.mon)
 
 
 def test_the_comparison_sees_a_broken_block(bridged: None) -> None:  # noqa: F811

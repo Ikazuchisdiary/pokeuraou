@@ -609,33 +609,13 @@ def test_a_part_left_open_by_a_raise_is_closed_at_the_decision(
     timing = load(monkeypatch, tmp_path, regions=True)
     timing.decided("between")
     part = timing.region("d2.turns")
-    part.__enter__()  # as `_refine_cells` does; its body raises before the exit
+    part.__enter__()  # as a stage whose body raises before the exit
     burn(0.02)
     timing.decided("move")
     assert timing._REGION_STACK == []
     found = timing.snapshot()["decisions"]["move"]
     assert found["counts"]["region.unclosed"] == 1
     assert found["regions"]["d2.turns"][0] == pytest.approx(0.02, abs=0.01)
-
-
-def test_a_refusal_in_a_depth2_stage_closes_its_part(monkeypatch: pytest.MonkeyPatch) -> None:
-    """IKA-32: `_refine_cells` raises a refused turn from inside its `d2.turns` part; the part
-    must close on the way out, or every part after it nests under it until the decision."""
-    from pokeuraou import port, search, timing
-
-    monkeypatch.setattr(timing, "REGIONS", True)
-    monkeypatch.setattr(timing, "_REGION_STACK", [])
-    monkeypatch.setattr(timing, "_REGION_ROWS", {})
-    monkeypatch.setattr(timing, "_REGION_OBJECTS", {})
-
-    def refused(*_args: object, **_kwargs: object):  # noqa: ANN202
-        yield port.PortRefused("refused on purpose")
-
-    monkeypatch.setattr(search, "_cell_turns", refused)
-    with pytest.raises(port.PortRefused):
-        search._refine_cells(None, [object()], None, budget=None, sub_limit=8, sub_branches=3)
-    assert timing._REGION_STACK == []
-    assert timing._REGION_ROWS["d2.turns"][2] == 1
 
 
 # --- IKA-454: the stages' CPU is a thread's cycle count on Windows ---------------------

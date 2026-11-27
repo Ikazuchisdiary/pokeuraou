@@ -111,23 +111,6 @@ def _unserved_marker(request: pytest.FixtureRequest) -> Iterator[None]:
     _REFUSE_UNSERVED[0] = False
 
 
-@pytest.fixture(autouse=True)
-def _port_roads_restored() -> Iterator[None]:
-    """`portlp`'s ladder switches (`portlp.ON`) are process-wide: restored after each test."""
-    from pokeuraou import portlp
-
-    roads = [
-        value for name, value in vars(portlp).items()
-        if name.isupper() and isinstance(value, list) and len(value) == 1
-        and isinstance(value[0], bool)
-    ]
-    was = [road[0] for road in roads], rustnode._SPAN_BLOCKS[0]  # noqa: SLF001
-    yield
-    for road, flag in zip(roads, was[0], strict=True):
-        road[0] = flag
-    rustnode._SPAN_BLOCKS[0] = was[1]  # noqa: SLF001
-
-
 @pytest.fixture(scope="session")
 def reg() -> Regulation:
     if not (regulation_dir() / f"{FORMAT_ID}.json").exists():

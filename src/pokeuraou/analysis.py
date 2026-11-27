@@ -19,7 +19,10 @@ then one step, and the read stops after that many steps -- the same position, se
 step count give the same answer, bit for bit, whatever the machine and its load or the
 number of threads), by the memory watch, or never; the
 deepening also stops on its own when nothing inside the depth guard is worth a step
-(``exhausted``).
+(``exhausted``). A stop set inside a slice is read at its end, so a read stopped by
+``max_seconds`` (or by the page, or the memory watch) may run up to one slice (250 ms) and
+one step (a refinement with its children's fills) past the moment the stop was set; IKA-464
+measured 0.10 to 0.14 s past a 4-second stop.
 
 **The depth guard.** Long reads meet `deepen.MAX_LEVELS` (IKA-307: 69-86% of the steps of
 a 44-second move were decided by it). ``levels`` raises it (a label's ``g<L>``); the lines

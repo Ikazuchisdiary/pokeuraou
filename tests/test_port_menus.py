@@ -1,24 +1,21 @@
-"""IKA-389 (`portmenus`): a depth-2 read's children's Q menus built in the port are those of
-`child_menus`' Python road to the bit -- the legal pools action for action and in order, the
-Q's arrays byte for byte, the Q's requests to the inference server one for one, the scores
-(numpy's BLAS, the mean where the game has no answer) and the menus.
+"""IKA-389: the pieces the port builds a child's Q menus from (`rust/src/qmenus.rs`, which the
+port's deepening reads its children's menus with) against Python's -- the legal pools action
+for action and in order (`side_actions`, `qhead.legal_pool`; read back by `portmenus._action`),
+the Q's arrays byte for byte (`qrank._pool_arrays`), and the candidates' scores (`solve`'s
+EVs, the mean where the game has no answer). No torch.
 
-The server is `inference.serve` with a numpy stand-in Q that records every request (each
-array's name, dtype, shape and bytes, and the batch it came in) and whose matrix moves with
-the batch's size, as a CUDA answer does (IKA-307): so the same menus need the same requests.
-Its games tie across their support up to the last bits, as a Q's do, so the order among the
-support is decided by the products' last bits. No torch.
+The comparison of whole menus with Python's (`portmenus.child_menus`) went with the depth-2
+refine (IKA-464).
 """
 
 from __future__ import annotations
 
 import base64
-import dataclasses
 
 import numpy as np
 import pytest
 
-from pokeuraou import portlp, portmenus, portserved, qhead, qrank, rustnode
+from pokeuraou import portmenus, qhead, qrank, rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
@@ -28,7 +25,6 @@ from pokeuraou.teams import load_roster
 
 from ._positions import chomp_gambit as _chomp_gambit
 from ._positions import played as _played
-from ._served import QStub, serve
 
 
 def _variant(pos: Position, edit) -> Position:  # noqa: ANN001
@@ -173,95 +169,3 @@ def test_the_ports_scores_are_numpys(roster) -> None:  # noqa: ANN001
             np.testing.assert_allclose(unpack(got["rows"]), want[0], rtol=0, atol=1e-12)
         if n > 1:
             np.testing.assert_allclose(unpack(got["cols"]), want[1], rtol=0, atol=1e-12)
-
-
-def _plain_rows(a: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """`a @ y` as the port sums it (`lp::dot`): four lanes over each row, then the tail."""
-    m, n = a.shape
-    n4 = n - n % 4
-    lanes = np.zeros((m, 4))
-    for k in range(0, n4, 4):
-        lanes += a[:, k:k + 4] * y[k:k + 4]
-    tail = np.zeros(m)
-    for k in range(n4, n):
-        tail += a[:, k] * y[k]
-    return ((lanes[:, 0] + lanes[:, 1]) + (lanes[:, 2] + lanes[:, 3])) + tail
-
-
-def _plain_cols(x: np.ndarray, a: np.ndarray) -> np.ndarray:
-    """`x @ a` as the port sums it: the rows added in order."""
-    out = np.zeros(a.shape[1])
-    for i in range(a.shape[0]):
-        out += x[i] * a[i]
-    return out
-
-
-@pytest.fixture
-def served(roster, monkeypatch):  # noqa: ANN001, ANN201
-    """A stand-in Q server, and `assemble` taking the scores the way the port does (IKA-460
-    dropped numpy's BLAS from the port; the order among tied candidates is those bits)."""
-    from pokeuraou import equilibrium
-
-    real = equilibrium.assemble
-
-    def plain(a, value_row, value_col, x, y):  # noqa: ANN001, ANN202
-        e = real(a, value_row, value_col, x, y)
-        if a.shape[0] > 1 and a.shape[1] > 1:
-            return dataclasses.replace(e, row_ev=_plain_rows(a, y), col_ev=_plain_cols(x, a))
-        return e
-
-    monkeypatch.setattr(equilibrium, "assemble", plain)
-    monkeypatch.setattr(portlp, "assemble", plain)
-    reg = roster.reg
-    encoder = Encoder(reg)
-    stub = QStub(encoder.vocab.fingerprint())
-    server, address = serve({}, q_models={"qstub": stub})
-    model = qrank.RemoteQ(address, "qstub", encoder)
-    saved = dict(qrank._INSTALLED)  # noqa: SLF001
-    qrank.install(model)
-    yield stub, model
-    qrank._INSTALLED.clear()  # noqa: SLF001
-    qrank._INSTALLED.update(saved)  # noqa: SLF001
-    model.close()
-    server.shutdown()
-    portmenus.ON[0] = False
-    portserved.ON[0] = False
-    portlp.set_on(False)
-
-
-def _both(reg, positions, width, stub):  # noqa: ANN001, ANN202
-    portmenus.ON[0] = False
-    del stub.log[:]
-    python = portmenus.child_menus(reg, positions, width)
-    python_log = list(stub.log)
-    portmenus.ON[0] = True
-    del stub.log[:]
-    before = dict(portmenus.COUNTS)
-    ported = portmenus.child_menus(reg, positions, width)
-    portmenus.ON[0] = False
-    assert stub.log == python_log
-    assert ported == python
-    return portmenus.COUNTS["asked"] - before["asked"]
-
-
-@pytest.mark.parametrize("chunk", [portmenus.Q_MENU_CHUNK, 3])
-def test_the_ports_menus_are_q_menus(roster, served, monkeypatch, chunk) -> None:  # noqa: ANN001
-    """Every child's two menus and every request the Q was sent, at the default chunk and at
-    a chunk of 3 (several requests a call). The positive control: the positions the port
-    ranked, and games whose support ties (the order among it is the products' last bits)."""
-    stub, _model = served
-    monkeypatch.setattr(portmenus, "Q_MENU_CHUNK", chunk)
-    reg = roster.reg
-    positions = _played(roster) + [v for p in _played(roster)[:2] for v in _variants(p)]
-    asked = 0
-    for width in (1, 4, 12):
-        asked += _both(reg, positions, width, stub)
-    assert asked >= 3 * (len(positions) - 3), asked
-    ties = 0
-    for pos in positions:
-        pools = (qhead.legal_pool(reg, pos, 0), qhead.legal_pool(reg, pos, 1))
-        if pools[0] and pools[1]:
-            e = solve(stub._one(qrank._pool_arrays(reg, Encoder(reg), pos, pools, True), 1))
-            support = e.row_ev[e.row_strategy > 1e-9]
-            ties += int(len(support) > 1 and np.ptp(support) < 1e-12)
-    assert ties >= 5, ties

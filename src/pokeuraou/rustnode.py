@@ -268,9 +268,6 @@ class EncodedNode:
     #: `replacementsEncoded` only, when a pair's phase drew (IKA-352): each row's
     #: (pair index, weight). None when every pair is its one row, in order.
     branches: list[tuple[int, float]] | None = None
-    #: IKA-381 (`portlp`, when on): the body's span block as the port wrote it, and its span
-    #: and leaf counts, for the port to fold the matrix from (`folds`). None when off.
-    span_block: tuple[bytes, int, int] | None = None
     #: IKA-455 stage 1.3: the number the port holds this fill's arrays under, when asked.
     ticket: int | None = None
 
@@ -319,12 +316,7 @@ class EncodedNode:
             if "spanCount" in header
             else [(int(i), int(j), list(indices), list(w)) for i, j, indices, w in header["spans"]]
         )
-        span_block = None
-        if _SPAN_BLOCKS[0] and "spanCount" in header:
-            count, total, at = (int(header[k]) for k in ("spanCount", "spanLeaves", "spanAt"))
-            span_block = (bytes(body[at:at + 12 * total + 12 * count]), count, total)
         return EncodedNode(
-            span_block=span_block,
             encoded=Encoded(
                 species=arrays["species"],
                 ability=arrays["ability"],
@@ -363,37 +355,6 @@ class EncodedNode:
                 else None
             ),
         )
-
-
-#: IKA-381: whether `EncodedNode.unpack` keeps each node's span block (`portlp` turns it on).
-_SPAN_BLOCKS = [False]
-
-
-def _fill_requests(
-    asks: Sequence[tuple[Position, list[SideAction], list[SideAction]]],
-    budget: Budget,
-    rules: Any,  # noqa: ANN401 - EncodingRules or None
-    links: Sequence[dict[str, Any] | None] | None,
-) -> list[dict[str, Any]]:
-    """Each node's request of a `fills` crossing (`RustNode.fill_encoded_many`)."""
-    wants_old = bool(rules is not None and rules.mega_from_slots)
-    requests = []
-    for pos, ours, theirs in asks:
-        request = {
-            "position": _position(pos),
-            "ours": _candidates(ours),
-            "theirs": _candidates(theirs),
-            "budget": dump_budget(budget),
-            "objectives": [],
-            "encode": True,
-        }
-        if wants_old:
-            request["encoding"] = rules.to_request()
-        link = links[len(requests)] if links is not None else None
-        if link:
-            request.update(link)
-        requests.append(request)
-    return requests
 
 
 def _binary_spans(
@@ -569,8 +530,7 @@ def binary_scope(binary: Path | str | None):  # noqa: ANN201
     roads answer from the module's process as ever, byte for byte. The other build's
     process is started on first use and kept (`reset` closes it). With positions held by
     number (`hold_positions`), each process is told the positions a request names the first
-    time it sees them (`_defined`), and a branch another process kept is written out for it
-    (`HeldPosition`, IKA-460).
+    time it sees them (`_defined`).
     """
     if binary is None:
         yield
@@ -1242,18 +1202,12 @@ class RustNode:
     @timing.timed("rust.turn")
     def turn_many(
         self, asks: Sequence[tuple[Position, list[SideAction]]], budget: Budget, *, full: bool,
-        bare: Sequence[bool] | None = None,
     ) -> list[PortTurn | str]:
         """`turn` for many (position, actions) in one crossing (IKA-295). A refused turn is
-        its refusal's text in place of the answer, where `turn` would have returned None.
-
-        ``bare[n]`` (IKA-389, with positions held): turn n's branches come back as their
-        numbers in the port and whether they ended (`HeldPosition`), not written out."""
+        its refusal's text in place of the answer, where `turn` would have returned None."""
         # IKA-302: with positions held, the port keeps every branch it writes under a
         # number, and a sub-game's `score` and `fills` name it instead of sending it back.
         refs = {"refs": True} if _HOLD[0] and full else {}
-        if DIGESTS[0] and full:
-            refs["digest"] = True
         answers = self._many(
             [
                 {
@@ -1265,9 +1219,8 @@ class RustNode:
                     "select": None,
                     "events": False,
                     **refs,
-                    **({"bare": True} if refs and bare is not None and bare[n] else {}),
                 }
-                for n, (pos, actions) in enumerate(asks)
+                for pos, actions in asks
             ]
         )
         out: list[PortTurn | str] = []
@@ -1280,145 +1233,10 @@ class RustNode:
                 for outcome, raw in zip(turn.outcomes, answer["branches"], strict=True):
                     key = raw.get("held")
                     if key is not None:
-                        held = outcome.position
-                        if held.__class__ is HeldPosition:
-                            held.node = self
-                            held.stored = _Stored(int(key), held)
-                            BARE["branches"] += 1
-                        else:
-                            _store(held, int(key))
+                        _store(outcome.position, int(key))
                         self._known.add(int(key))
             out.append(turn)
         return out
-
-    @timing.timed("rust.fill")
-    def fill_encoded_many(
-        self,
-        asks: Sequence[tuple[Position, list[SideAction], list[SideAction]]],
-        budget: Budget,
-        *,
-        rules: Any = None,  # noqa: ANN401 - EncodingRules
-        links: Sequence[dict[str, Any] | None] | None = None,
-    ) -> list[EncodedNode]:
-        """`fill_encoded` of many whole nodes in one crossing (IKA-295).
-
-        Each node is the port's `fill_encoded` of its own request, and its arrays are the
-        bytes its own crossing would have carried: the body is the nodes' bodies one after
-        another, cut here at each node's `bytes`. The counts and clocks `fill_encoded` keeps
-        are kept per node, so a table reads the same; the crossing's own are once.
-
-        `links[n]`, when given, is `{"keep": True}` for a node a later one reads its turns
-        off, or `{"like": {"node": m, "side": s, "slots": [...]}}` for a node that may read
-        its cells' turns off node m of this crossing (the port checks that the two
-        positions differ only in side s's hidden slots, and each turn that no branch
-        touched them).
-        """
-        if not asks:
-            return []
-        started = timing.clock()
-        wants_old = bool(rules is not None and rules.mega_from_slots)
-        requests = _fill_requests(asks, budget, rules, links)
-        extra = {}
-        if not self._shm_off:
-            extra["shm"] = (
-                {"name": self._shm.name, "bytes": self._shm.size}
-                if self._shm is not None
-                else {"name": None, "bytes": 0}
-            )
-        header = self._exchange_list("fills", requests, extra)
-        count = int(header["bytes"])
-        road, body = self._body(header, count)
-        heads = header["nodes"]
-        if len(heads) != len(asks):
-            raise RuntimeError(f"`fills` answered {len(heads)} of {len(asks)} nodes")
-        nodes: list[EncodedNode] = []
-        # Each node's arrays are views of its stretch of the one body, as a node's own
-        # crossing gives views of its own; the body goes when the last of them does.
-        whole = memoryview(body)
-        at = 0
-        for head in heads:
-            size = int(head["bytes"])
-            node = EncodedNode.unpack(head, whole[at : at + size])
-            at += size
-            if wants_old and node.mega_from_slots is not True:
-                raise RuntimeError(
-                    "the Rust node was asked for the revision-1 can_mega rule and did not say "
-                    f"it applied it (echo {node.mega_from_slots!r}); the binary predates "
-                    "IKA-141 -- rebuild it"
-                )
-            timing.add("rust.child.resolve", node.resolve_us / 1e6)
-            timing.add("rust.child.encode", node.encode_us / 1e6)
-            timing.add("rust.child.bind", node.bind_us / 1e6)
-            timing.count("leaves.offered", int(head.get("offered", 0)))
-            timing.count("leaves.stored", int(head["leaves"]))
-            if "readOff" in head:
-                # Cells whose turn the port read off an earlier node; null, a node it could
-                # not read anything off (the positions were not two completions of one).
-                if head["readOff"] is None:
-                    timing.count("fill.like.refused")
-                else:
-                    timing.count("fill.like")
-                    timing.count("fill.cells.read_off", int(head["readOff"]))
-            if timing.ON:
-                used = timing.current_purpose()
-                timing.add(
-                    f"rust.child@{used}",
-                    (node.resolve_us + node.encode_us + node.header_us) / 1e6,
-                )
-                timing.count("fills")
-                timing.count("fill.cells", len(node.exact) * len(node.exact[0]) if node.exact else 0)
-                timing.count("fill.leaves", int(head["leaves"]))
-            nodes.append(node)
-        if at != count:
-            raise RuntimeError(f"`fills` sent {count} bytes for nodes of {at}")
-        del body, whole
-        parse_us = float(header.get("parseUs", 0.0))
-        header_us = float(header.get("headerUs", 0.0))
-        timing.add("rust.child.parse", parse_us / 1e6)
-        timing.add("rust.child.header", header_us / 1e6)
-        timing.count("body.bytes", count)
-        timing.count("body.shm" if road == "shm" else "body.pipe")
-        if timing.ON:
-            used = timing.current_purpose()
-            timing.add(f"rust.fill@{used}", timing.clock() - started)
-            timing.add(f"rust.child@{used}", (parse_us + header_us) / 1e6)
-        return nodes
-
-    @timing.timed("rust.fill")
-    def fills_served(
-        self,
-        asks: Sequence[tuple[Position, list[SideAction], list[SideAction]]],
-        chunks: Sequence[int],
-        budget: Budget,
-        *,
-        server: dict[str, Any],
-        gather: int,
-        rules: Any = None,  # noqa: ANN401 - EncodingRules
-        links: Sequence[dict[str, Any] | None] | None = None,
-    ) -> dict[str, Any]:
-        """IKA-386 (`portserved`): `fill_encoded_many` of each crossing ``chunks`` cuts
-        ``asks`` into, the leaves scored by the inference server ``server`` names (the port
-        asks it, as `RemoteValue.from_encoded` would) and each node folded and solved there,
-        all in one crossing. The answer's `nodes` carry each node's notes, counts and value;
-        nothing of its leaves comes back."""
-        requests = _fill_requests(asks, budget, rules, links)
-        extra = {
-            "chunks": [int(n) for n in chunks],
-            "shapes": [[len(ours), len(theirs)] for _pos, ours, theirs in asks],
-            "server": server,
-            "gather": int(gather),
-            "netScoresEnds": bool(rules is not None and rules.net_scores_ends),
-        }
-        return self._exchange_list("fillsServed", requests, extra)
-
-    @timing.timed("rust.qmenus")
-    def q_menus(self, positions: Sequence[Position], extra: dict[str, Any]) -> dict[str, Any]:
-        """IKA-389 (`portmenus`): `portmenus.child_menus` of ``positions`` in one crossing -- the
-        pools, the Q's requests to the inference server ``extra`` names, the games and the
-        menus, built in the port. Each position goes as a held one where it is held."""
-        return self._exchange_list(
-            "qMenus", [{"position": _position(pos)} for pos in positions], extra
-        )
 
     def port_lists(self, kind: str, positions: Sequence[Position], extra: dict[str, Any] | None = None,
                    each: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1737,7 +1555,6 @@ class RustNode:
                 "full": full,
                 "select": select,
                 "events": events,
-                **({"digest": True} if DIGESTS[0] and full else {}),
             }
         )
         return None if response is None else PortTurn.read(response)
@@ -2097,10 +1914,6 @@ def _note_repeat(request: dict[str, Any]) -> None:
 # edits one in place and asks again is exactly what the switch keeps this away from.
 
 _HOLD = [False]
-#: IKA-378: a full turn's branches come with the port's digest of each position
-#: (`PortBranch.digest`), by which a depth-2 call shares a child's sub-game across worker
-#: processes (`subshare`; the ladder's, until IKA-464). Off: the requests and answers are the bytes they were.
-DIGESTS = [False]
 #: id -> (the object, its entry). The object is held so its id cannot be reused.
 _HELD: dict[int, tuple[Position, _Stored]] = {}
 #: A request's bytes -> the answer, for the kinds answered from the position alone.
@@ -2161,54 +1974,6 @@ class _Stored:
         return self._json
 
 
-#: IKA-389: `bare` turns' branches kept as numbers, the ones written out after all
-#: (`HeldPosition.whole`), and the crossings that did it (the positive control).
-BARE = {"branches": 0, "materialized": 0, "crossings": 0}
-
-
-class HeldPosition:
-    """A turn's branch the port holds and did not write out (IKA-389, `bare`): its number
-    and whether it has ended. Requests name it by its number (`_position`); anything else
-    read of it asks the port for the position once (`whole`) and reads that."""
-
-    __slots__ = ("_whole", "ended", "key", "node", "stored")
-
-    def __init__(self, key: int, ended: bool) -> None:
-        self.key = key
-        self.ended = ended
-        self.node: RustNode | None = None
-        self.stored: _Stored | None = None
-        self._whole: Position | None = None
-
-    def whole(self) -> Position:
-        if self._whole is None:
-            materialize([self])
-        assert self._whole is not None
-        return self._whole
-
-    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
-        return getattr(self.whole(), name)
-
-
-def materialize(positions: Sequence[Any]) -> list[Any]:  # noqa: ANN401
-    """Each `HeldPosition` of ``positions`` written out by its port (one crossing a port),
-    everything else as it is: the positions to read."""
-    wanted: dict[int, list[HeldPosition]] = {}
-    for pos in positions:
-        if pos.__class__ is HeldPosition and pos._whole is None:  # noqa: SLF001
-            wanted.setdefault(id(pos.node), []).append(pos)
-    for group in wanted.values():
-        node = group[0].node
-        if node is None:
-            raise RuntimeError("a held branch with no port to ask")
-        got = node._exchange({"kind": "positions", "ids": [p.key for p in group]})["positions"]  # noqa: SLF001
-        for pos, raw in zip(group, got, strict=True):
-            pos._whole = Position.from_json(raw)  # noqa: SLF001
-        BARE["materialized"] += len(group)
-        BARE["crossings"] += 1
-    return [p.whole() if p.__class__ is HeldPosition else p for p in positions]
-
-
 def _define(stored: _Stored, known: set[int], lines: list[bytes]) -> None:
     """The `hold` line for `stored` (and first its base's, if the port lacks it)."""
     known.add(stored.key)
@@ -2257,9 +2022,6 @@ def _forget() -> None:
 
 def _position(pos: Position) -> dict[str, Any] | _Stored:
     """`pos.to_json()`, or with `hold_positions` its number in the port (IKA-302)."""
-    if pos.__class__ is HeldPosition:
-        # IKA-389: a branch the port kept and never wrote out: its number, always.
-        return pos.stored
     if not _HOLD[0]:
         return pos.to_json()
     found = _HELD.get(id(pos))
@@ -2521,9 +2283,6 @@ class PortBranch:
     #: The draws this branch took, when events were asked for (IKA-345, `EventLog::chance`):
     #: ``<kind> <user> <move> <target> [<arg>...]``; a merged branch keeps what all share.
     chance: list[str] = field(default_factory=list)
-    #: IKA-378: the port's digest of `position` (two 64-bit words) when asked for
-    #: (`DIGESTS`), or a digest made from one (`search._cell_turns`); None: not known.
-    digest: tuple[int, int] | None = None
 
 
 @dataclass
@@ -2563,12 +2322,10 @@ class PortTurn:
             outcomes = [
                 PortBranch(
                     float(b["probability"]),
-                    Position.from_json(b["position"]) if "position" in b
-                    else HeldPosition(int(b["held"]), bool(b["ended"])),
+                    Position.from_json(b["position"]),
                     list(b.get("events") or []),
                     _acts(b),
                     list(b.get("chance") or []),
-                    tuple(b["digest"]) if "digest" in b else None,
                 )
                 for b in branches
             ]

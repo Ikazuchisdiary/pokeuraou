@@ -7,12 +7,11 @@ leaf's roads did not. Every road is checked here on the named shape -- a cell of
 end (Garchomp at 1 HP against Kingambit at 1 HP) that the turn decides, scored by a learned
 leaf -- and on the cell that does not end, which must keep the net's own number:
 
-- positions to `BatchedValue.__call__` (`port._scored_here`, `_subgame_value`, the root);
+- positions to `BatchedValue.__call__` (`port._scored_here`, the root);
 - the port's encoded leaves to `BatchedValue.from_encoded` (`port._encoded`);
 - the same two through the inference server (`RemoteValue`);
-- the pieces the hidden-bench node stacks its batch from (`beliefnode._stacked`, `_subset`);
-- the search at depth 2 with one Sucker Punch left, which is exactly 1/2 once the ends are
-  1/0 whatever the net says (every leaf of the second turn is decided).
+- the pieces the hidden-bench node stacks its batch from (`beliefnode._stacked`, `_subset`).
+(The depth-2 cell with one Sucker Punch left went with the depth-2 refine, IKA-464.)
 
 An untrained net (seed 7) stands in for a trained one: what is tested is that its number
 never reaches a decided leaf, and an untrained net's number is nowhere near 0 or 1.
@@ -234,40 +233,3 @@ def test_the_old_rule_leaves_the_nets_number_and_counts_the_same(game) -> None:
             assert old_payoff[i, j] == new_payoff[i, j]
         else:
             assert new_payoff[i, j] == want and abs(old_payoff[i, j] - want) > 0.05
-
-
-@pytest.mark.parametrize("served", [False, True])
-def test_the_depth_two_cell_hidden_depth_two_reads_is_its_result(served: bool) -> None:
-    """`search._refined_value` (IKA-111's `_restricted_belief` called it per cell and per bench
-    determinization until IKA-463 removed it): with one Sucker Punch left, Swords Dance into
-    Sucker Punch leaves a turn in which every cell ends -- Earthquake wins whatever Kingambit
-    does -- so the cell is exactly 1."""
-    from pokeuraou.inference import RemoteValue
-    from pokeuraou.search import _refined_value
-
-    from ._served import model_of, serve
-
-    reg, pos = _chomp_gambit(1)
-    encoder = Encoder(reg)
-    torch.manual_seed(7)
-    local = BatchedValue(build(encoder, ValueConfig()).eval(), encoder, device=torch.device("cpu"))
-    row = narrow(reg, pos, 0, limit=48).actions
-    col = narrow(reg, pos, 1, limit=48).actions
-    sd = next(a for a in row if "swords" in a.describe(reg).lower())
-    sp = next(a for a in col if "sucker" in a.describe(reg).lower())
-
-    def refined(leaf):  # noqa: ANN001, ANN202
-        return _refined_value(reg, pos, sd, sp, leaf, budget=Budget.matrix(), sub_limit=48,
-                              sub_branches=8)
-
-    if not served:
-        value, _notes, solved = refined(local)
-    else:
-        server, address = serve({"value": model_of(local.from_encoded)})
-        try:
-            with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
-                value, _notes, solved = refined(remote)
-        finally:
-            server.shutdown()
-    assert solved >= 1
-    assert value == 1.0
