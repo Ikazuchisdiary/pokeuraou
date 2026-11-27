@@ -10,21 +10,17 @@ write them into a detail line nobody reads. Here one crossing does all of it (`q
 `rust/src/qmenus.rs`): the port lists the pools (`rust/src/legal.rs`), lays the same arrays
 into the Q's own block (`RemoteQ._block`, idle while the port answers) and sends the server
 the same requests, solves the games (`lp.rs`, scipy's HiGHS), scores the candidates with
-numpy's own BLAS (`blas`: at an equilibrium the support's values tie up to their last bits,
-so the order among them is those bits) and hands back the menus alone.
+plain row and column products (IKA-460; they were numpy's BLAS) and hands back the menus alone.
 
     POKEURAOU_LADDER_PORT_MENUS=1     # on (default off; implies `portserved` and `portlp`)
 
-Only where the Q is an inference server's (`qrank.RemoteQ`), its encoder `encode.Encoder`,
-and numpy's BLAS is an OpenBLAS the port can load; anything else takes the old road. The
-menus are `_q_menus`' to the bit (records/IKA-389.md), so a read is the same read.
+Only where the Q is an inference server's (`qrank.RemoteQ`), its encoder `encode.Encoder`;
+anything else takes the old road. The menus are `_q_menus`' except that the order among tied
+candidates can differ (the last bits of the scores; records/IKA-389.md, IKA-460).
 """
 
 from __future__ import annotations
 
-import ctypes
-import functools
-import glob
 import os
 from collections.abc import Sequence
 from typing import Any
@@ -72,38 +68,6 @@ def set_on(on: bool) -> None:
 
 
 set_on(ON[0] or BARE_ON[0])
-
-#: The gemv and thread-count symbols of numpy's OpenBLAS, by its build's prefix.
-_SYMBOLS = (
-    ("scipy_cblas_dgemv64_", "scipy_openblas_set_num_threads64_"),
-    ("cblas_dgemv64_", "openblas_set_num_threads64_"),
-)
-
-
-@functools.cache
-def blas() -> dict[str, str] | None:
-    """numpy's own OpenBLAS -- the library file numpy loaded and its 64-bit-integer
-    `cblas_dgemv` -- for the port to score with (`rust/src/blas.rs`), or None where there is
-    none it can load, and the old road is taken."""
-    import numpy as np
-
-    root = os.path.dirname(np.__file__)
-    found = sorted(
-        path
-        for pattern in ("../numpy.libs/*openblas*", ".libs/*openblas*", "../numpy.libs/*.so*")
-        for path in glob.glob(os.path.join(root, pattern))
-        if "openblas" in os.path.basename(path).lower()
-    )
-    for path in found:
-        try:
-            lib = ctypes.CDLL(path)
-        except OSError:
-            continue
-        for gemv, threads in _SYMBOLS:
-            if hasattr(lib, gemv):
-                return {"path": os.path.realpath(path), "gemv": gemv, "threads": threads}
-    return None
-
 
 _SLOTS: dict[tuple, SlotAction] = {}
 _ACTIONS: dict[tuple, SideAction] = {}
@@ -155,9 +119,6 @@ def q_menus(
     model = qrank._INSTALLED.get("")  # noqa: SLF001 - absent: the old road stops as it would
     if type(model) is not qrank.RemoteQ or type(model.encoder) is not Encoder:
         return None
-    library = blas()
-    if library is None:
-        return None
     encoder = model.encoder
     extra = {
         "width": int(width),
@@ -170,7 +131,6 @@ def q_menus(
             "shm": model._block.name,  # noqa: SLF001 - the Q's own block, idle while the port asks
             "bytes": int(model.buffer_bytes),
         },
-        "blas": library,
     }
     answer = port.ask(reg, lambda node: node.q_menus(list(positions), extra))
     served = answer.get("served") or {}
@@ -220,4 +180,4 @@ def tally() -> tuple[int, int, int, int]:
             rustnode.BARE["materialized"])
 
 
-__all__ = ["COUNTS", "ENV", "ON", "blas", "counts", "q_menus", "set_on"]
+__all__ = ["COUNTS", "ENV", "ON", "counts", "q_menus", "set_on"]

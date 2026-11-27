@@ -124,7 +124,7 @@ def test_the_shared_node_equals_a_matrix_per_completion(setup) -> None:  # noqa:
                 reg, item.position, ours, theirs, leaf, budget=budget
             )
             np.testing.assert_allclose(
-                built[index], expected, rtol=0, atol=0,
+                built[index], expected, rtol=0, atol=1e-12,
                 err_msg=f"side {side} completion {index} ({', '.join(item.species)})",
             )
 
@@ -183,7 +183,7 @@ def test_nothing_hidden_costs_nothing(setup) -> None:  # noqa: ANN001
     )
     for side in (0, 1):
         assert len(node.matrices[side]) == 1
-        np.testing.assert_allclose(node.matrices[side][0], expected, rtol=0, atol=0)
+        np.testing.assert_allclose(node.matrices[side][0], expected, rtol=0, atol=1e-12)
 
 
 class _CountedScores(_LeafScores):
@@ -243,7 +243,7 @@ def test_nothing_hidden_on_either_side_is_resolved_once(setup) -> None:  # noqa:
         # Oriented to side 0 on both sides, as `BeliefNode.matrices` always is:
         # `belief_solve` is what turns side 1's into its own game, not this.
         assert node.matrices[side][0].shape == (len(ours), len(theirs))
-        assert np.array_equal(node.matrices[side][0], expected), f"side {side}"
+        np.testing.assert_allclose(node.matrices[side][0], expected, rtol=0, atol=1e-12, err_msg=f"side {side}")
     assert reference.scores.passes == once, (once, reference.scores.passes)
     assert node.matrices[0][0] is not node.matrices[1][0], (
         "the two sides hold one array; a caller that edits its own would edit the other's"
@@ -456,7 +456,7 @@ def test_the_shared_node_equals_a_matrix_per_completion_with_a_mega_and_damage(
                 reg, item.position, ours, theirs, leaf, budget=budget
             )
             np.testing.assert_allclose(
-                built[index], expected, rtol=0, atol=0,
+                built[index], expected, rtol=0, atol=1e-12,
                 err_msg=f"side {side} completion {index} ({', '.join(item.species)})",
             )
 
@@ -638,7 +638,7 @@ def _node_mismatches(reg, position, ours, theirs, spreads, leaf):  # noqa: ANN00
             expected, _notes = batched_payoff(
                 reg, item.position, ours, theirs, leaf, budget=budget
             )
-            off = int((node.matrices[1 - side][index] != expected).sum())
+            off = int((np.abs(node.matrices[1 - side][index] - expected) > 1e-12).sum())
             if off:
                 wrong[f"side {side} completion {index} ({'+'.join(item.species)})"] = off
     return wrong
@@ -647,7 +647,7 @@ def _node_mismatches(reg, position, ours, theirs, spreads, leaf):  # noqa: ANN00
 def test_a_midgame_shared_node_equals_a_matrix_per_completion(midgame) -> None:  # noqa: ANN001
     reg, position, ours, theirs, spreads, _sheet, _seen = midgame
     wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
-    assert not wrong, f"cells not equal to the bit: {wrong}"
+    assert not wrong, f"cells further than 1e-12 apart: {wrong}"
 
 
 def test_a_midgame_patched_leaf_equals_the_ports_own_leaf(midgame) -> None:  # noqa: ANN001
@@ -733,7 +733,7 @@ def test_a_hidden_node_is_scored_in_one_forward_pass(midgame) -> None:  # noqa: 
     assert node.shared > 0 and node.redone > 0, "no shared or no dirty cell; nothing batched"
     assert leaf.scores.passes == 1, leaf.scores.passes
     wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
-    assert not wrong, f"cells not equal to the bit: {wrong}"
+    assert not wrong, f"cells further than 1e-12 apart: {wrong}"
 
 
 def test_the_node_can_differ_from_the_definition(midgame) -> None:  # noqa: ANN001

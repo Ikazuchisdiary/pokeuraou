@@ -23,7 +23,7 @@
 
 use crate::advance::{choose_p, Pcg64};
 use crate::hiddenbench::{insert_game, make_pokemon, sheet_set, Game, Prior, SheetSet};
-use crate::lp::{f64s, f64s_text, numpy_sum, python_sum};
+use crate::lp::{f64s, f64s_text, sum_f64, sum_of};
 use crate::position::{Field, Position, Side};
 use crate::reg::{to_id, Reg};
 use serde_json::{json, Value};
@@ -88,7 +88,7 @@ pub fn define_pool(value: &Value) {
     POOLS.with(|pools| pools.borrow_mut().insert(id, Pool { teams, pairs, index_of }));
     ENTRIES.with(|entries| entries.borrow_mut().retain(|key, _| key.0 != id));}
 
-/// `selection_book.explore_mixture`, with numpy's sums (`numpy_sum`) and `exp`.
+/// `selection_book.explore_mixture`, with numpy's sums (`sum_f64`) and `exp`.
 fn explore_mixture(equilibrium: &[f64], ev_loss: &[f64], epsilon: f64, temperature: f64) -> Result<Vec<f64>, String> {
     if equilibrium.len() != ev_loss.len() {
         return Err(format!("{} strategy against {} losses", equilibrium.len(), ev_loss.len()));
@@ -100,7 +100,7 @@ fn explore_mixture(equilibrium: &[f64], ev_loss: &[f64], epsilon: f64, temperatu
         return Err(format!("temperature must be > 0, got {temperature}"));
     }
     let n = equilibrium.len();
-    let total = numpy_sum(equilibrium);
+    let total = sum_f64(equilibrium);
     let base: Vec<f64> = if total > 0.0 {
         equilibrium.iter().map(|v| v / total).collect()
     } else {
@@ -118,7 +118,7 @@ fn explore_mixture(equilibrium: &[f64], ev_loss: &[f64], epsilon: f64, temperatu
             *s -= top;
         }
         let mut shaped: Vec<f64> = scores.iter().map(|s| s.exp()).collect();
-        let sum = numpy_sum(&shaped);
+        let sum = sum_f64(&shaped);
         for v in &mut shaped {
             *v /= sum;
         }
@@ -126,7 +126,7 @@ fn explore_mixture(equilibrium: &[f64], ev_loss: &[f64], epsilon: f64, temperatu
     };
     let mut mixed: Vec<f64> =
         base.iter().zip(&shaped).map(|(b, s)| (1.0 - epsilon) * b + epsilon * s).collect();
-    let sum = numpy_sum(&mixed);
+    let sum = sum_f64(&mixed);
     for v in &mut mixed {
         *v /= sum;
     }
@@ -368,7 +368,7 @@ pub fn prep_game(reg: &Reg, value: &Value) -> Value {
         };
         let led = crate::resolve::commands::lead_phase(reg, start, |weights| {
             // `rng.choice(len(weights), p=[w / total for w in weights])`.
-            let total = python_sum(weights.iter().copied());
+            let total = sum_of(weights.iter().copied());
             let p: Vec<f64> = weights.iter().map(|w| w / total).collect();
             choose_p(&p, &mut rng)
         });

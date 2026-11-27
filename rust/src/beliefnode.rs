@@ -9,7 +9,7 @@
 //!
 //! `beliefFold` does it from what the port itself wrote: the span blocks of the fills (the
 //! bytes `fills` sent), the values, and for each completion where its blocks sit. The
-//! arithmetic is `port._folded`'s: numpy's dot in the order `lp::numpy_dot` copies, a replaced
+//! arithmetic is `port._folded`'s: numpy's dot in the order `lp::dot` copies, a replaced
 //! cell's tree by `lp::fold_value`. The matrices come back whole (`beliefnode.BeliefNode`
 //! keeps them), and the games Python names are solved with `lp::solve_bayesian` in the same
 //! crossing: side 1's game is the transpose of the negation, as `search.belief_solve` builds it.
@@ -32,7 +32,7 @@
 //! cells that do not reach the side's own bench); one with `packed` carries its own spans.
 
 use crate::lp::{
-    b64_decode, f64s, f64s_text, fold_tree_from_value, fold_value, folded_cells, numpy_dot, solve_bayesian,
+    b64_decode, f64s, f64s_text, fold_tree_from_value, fold_value, folded_cells, dot, solve_bayesian,
     unsolved_json, FoldTree,
     GAMES, LPS,
 };
@@ -95,7 +95,7 @@ impl Spans {
         for &leaf in &self.indices[start..end] {
             xs.push(*values.get(leaf).ok_or("a span's leaf past its block of values")?);
         }
-        Ok(numpy_dot(&xs, &self.weights[start..end]))
+        Ok(dot(&xs, &self.weights[start..end]))
     }
 }
 

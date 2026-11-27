@@ -6,15 +6,14 @@
 //! defaults -- presolve on, the dual simplex. The HiGHS is the one scipy 1.18.1 builds
 //! (`vendor/HiGHS`, 1.12.0, `build.rs`). Success is linprog's: HiGHS optimal, then linprog's
 //! residual check (`_check_result`, 1e-9). The strategies are cleaned as `_clean` cleans
-//! them, with numpy's pairwise sum, so a solve here is the Python solve to the bit wherever
-//! HiGHS, built by another compiler, takes the same pivots (counted in records/IKA-381.md).
+//! them with a plain sum (IKA-460 dropped numpy's pairwise sum and OpenBLAS's dot order).
 //!
 //! Two commands use it, both off unless a caller asks (`portlp.py`):
 //! * `lp` -- a list of games (a matrix, or a Bayesian game's matrices and weights), each
 //!   answered with both LPs' values and the cleaned strategies.
 //! * `folds` -- sub-games whose leaves a caller has scored: each matrix folded from its
 //!   node's spans (the bytes `fills` sent) and the leaf values, the way `port._folded` folds
-//!   it (numpy's dot, in the order this machine's OpenBLAS takes it), then solved; the value.
+//!   it (a weighted sum of its leaves), then solved; the value.
 
 use serde_json::{json, Value};
 use std::os::raw::{c_char, c_int, c_void};
@@ -321,42 +320,15 @@ fn maximin(payoff: &[f64], m: usize, n: usize) -> Result<(f64, Vec<f64>), String
     Ok((x[m], x[..m].to_vec()))
 }
 
-/// numpy's sum of a float64 vector (`pairwise_sum`, the reduction `ndarray.sum` takes).
-pub fn numpy_sum(a: &[f64]) -> f64 {
-    let n = a.len();
-    if n < 8 {
-        let mut res = 0.0;
-        for v in a {
-            res += v;
-        }
-        res
-    } else if n <= 128 {
-        let mut r = [0.0f64; 8];
-        r.copy_from_slice(&a[..8]);
-        let mut i = 8;
-        while i < n - (n % 8) {
-            for j in 0..8 {
-                r[j] += a[i + j];
-            }
-            i += 8;
-        }
-        let mut res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
-        while i < n {
-            res += a[i];
-            i += 1;
-        }
-        res
-    } else {
-        let mut n2 = n / 2;
-        n2 -= n2 % 8;
-        numpy_sum(&a[..n2]) + numpy_sum(&a[n2..])
-    }
+/// The sum of a vector, in order (0.0 when empty).
+pub fn sum_f64(a: &[f64]) -> f64 {
+    a.iter().fold(0.0, |s, v| s + v)
 }
 
 /// `equilibrium._clean`: small negatives and dust to zero, renormalised; uniform if none.
 pub fn clean(p: &[f64], eps: f64) -> Vec<f64> {
     let mut q: Vec<f64> = p.iter().map(|&v| if v < eps { 0.0 } else { v }).collect();
-    let total = numpy_sum(&q);
+    let total = sum_f64(&q);
     if total <= 0.0 {
         return vec![1.0 / q.len() as f64; q.len()];
     }
@@ -441,7 +413,7 @@ pub fn solve_bayesian(
     if weights.iter().cloned().fold(f64::INFINITY, f64::min) < 0.0 {
         return Err(Unsolved::Invalid("class weights must be non-negative".into()));
     }
-    let total_w = numpy_sum(weights);
+    let total_w = sum_f64(weights);
     let w: Vec<f64> = weights.iter().map(|v| v / total_w).collect();
     let k = mats.len();
     let columns: Vec<usize> = mats.iter().map(|(_, _, cols)| *cols).collect();
@@ -471,7 +443,7 @@ pub fn solve_bayesian(
         }
         let x = solve_lp(&c, &a, total, &vec![0.0; total], &[1.0], m)
             .map_err(|why| Unsolved::Failed(format!("Bayesian row LP failed: {why}")))?;
-        (numpy_sum(&x[m..]), x[..m].to_vec())
+        (sum_f64(&x[m..]), x[..m].to_vec())
     };
     // `_bayesian_minimax`: y per class (concatenated), then u.
     let col = {
@@ -512,78 +484,21 @@ pub fn solve_bayesian(
 }
 
 // ---------------------------------------------------------------------------
-// The fold: `port._folded`'s `values[indices] @ weights`, as numpy computes it here
+// The fold: a cell is the weighted sum of its leaves' values
 // ---------------------------------------------------------------------------
 
-/// numpy's 1-D float64 dot on this machine: OpenBLAS's SkylakeX `ddot` (numpy's
-/// `scipy-openblas` picks that core on the Zen 5 it runs on). Blocks of 32 in four 8-wide
-/// FMA accumulators, folded to four 4-wide ones, then blocks of 16 into those, their sum
-/// ((a0 + a1) + a2) + a3, its halves, its pair; then the tail by FMA onto that. Checked
-/// against numpy on random vectors of every length to 1,000 (`records/IKA-381.md`). Another
-/// core (another machine) sums in another order, and the fold's values move in the last
-/// place there -- the LP is the same either way.
-pub fn numpy_dot(x: &[f64], y: &[f64]) -> f64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::arch::is_x86_feature_detected!("fma") {
-            // SAFETY: the CPU has FMA.
-            return unsafe { dot_fma(x, y) };
-        }
-    }
-    dot_generic(x, y)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "fma")]
-unsafe fn dot_fma(x: &[f64], y: &[f64]) -> f64 {
-    dot_generic(x, y)
-}
-
-#[inline(always)]
-fn dot_generic(x: &[f64], y: &[f64]) -> f64 {
-    let n = x.len();
-    let n1 = n & !15;
-    let mut dot = 0.0;
-    if n1 > 0 {
-        let mut z = [[0.0f64; 8]; 4];
-        let mut i = 0;
-        let n32 = n1 & !31;
-        while i < n32 {
-            for (r, acc) in z.iter_mut().enumerate() {
-                for (lane, a) in acc.iter_mut().enumerate() {
-                    let k = i + 8 * r + lane;
-                    *a = x[k].mul_add(y[k], *a);
-                }
-            }
-            i += 32;
-        }
-        let mut acc = [[0.0f64; 4]; 4];
-        for r in 0..4 {
-            for k in 0..4 {
-                acc[r][k] = z[r][k] + z[r][k + 4];
-            }
-        }
-        while i < n1 {
-            for (r, row) in acc.iter_mut().enumerate() {
-                for (lane, a) in row.iter_mut().enumerate() {
-                    let k = i + 4 * r + lane;
-                    *a = x[k].mul_add(y[k], *a);
-                }
-            }
-            i += 16;
-        }
-        let mut s = [0.0f64; 4];
+/// The dot product of two vectors of one length, in four lanes.
+pub fn dot(x: &[f64], y: &[f64]) -> f64 {
+    let mut lanes = [0.0f64; 4];
+    let (xs, ys) = (x.chunks_exact(4), y.chunks_exact(4));
+    let (tx, ty) = (xs.remainder(), ys.remainder());
+    for (a, b) in xs.zip(ys) {
         for k in 0..4 {
-            s[k] = ((acc[0][k] + acc[1][k]) + acc[2][k]) + acc[3][k];
+            lanes[k] += a[k] * b[k];
         }
-        let h0 = s[0] + s[2];
-        let h1 = s[1] + s[3];
-        dot = h0 + h1;
     }
-    for i in n1..n {
-        dot = y[i].mul_add(x[i], dot);
-    }
-    dot
+    let tail: f64 = tx.iter().zip(ty).fold(0.0, |s, (a, b)| s + a * b);
+    (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]) + tail
 }
 
 /// A sub-game's matrix from its node's spans (`encoded_node::write_body`'s span block:
@@ -626,7 +541,7 @@ pub fn fold(
                 xs.push(*values.get(leaf).ok_or("a span's leaf past the values")?);
                 ws.push(f64_at(weights_at + 8 * t));
             }
-            payoff[i * n + j] = numpy_dot(&xs, &ws);
+            payoff[i * n + j] = dot(&xs, &ws);
         }
         start = end;
     }
@@ -866,27 +781,9 @@ pub fn fold_and_solve(
     Ok(solve(&payoff, m, n, 1e-9))
 }
 
-/// Python's `sum` of floats (3.12: Neumaier's compensated sum, from the int 0 it starts at).
-pub fn python_sum(items: impl IntoIterator<Item = f64>) -> f64 {
-    let mut items = items.into_iter();
-    let Some(first) = items.next() else {
-        return 0.0;
-    };
-    let mut f = 0.0 + first;
-    let mut c = 0.0;
-    for x in items {
-        let t = f + x;
-        if f.abs() >= x.abs() {
-            c += (f - t) + x;
-        } else {
-            c += (x - t) + f;
-        }
-        f = t;
-    }
-    if c != 0.0 && c.is_finite() {
-        f += c;
-    }
-    f
+/// The sum of some floats, in order (0.0 when there are none).
+pub fn sum_of(items: impl IntoIterator<Item = f64>) -> f64 {
+    items.into_iter().fold(0.0, |s, v| s + v)
 }
 
 /// `fold.fold_value`: a tree collapsed against one value per leaf.
@@ -907,7 +804,7 @@ pub fn fold_value(tree: &FoldTree, values: &[f64]) -> Result<f64, String> {
             best.unwrap_or(0.0)
         }
         FoldTree::Avg(parts) => {
-            let total = python_sum(parts.iter().map(|(w, _)| *w));
+            let total = sum_of(parts.iter().map(|(w, _)| *w));
             if total <= 0.0 {
                 0.0
             } else {
@@ -915,7 +812,7 @@ pub fn fold_value(tree: &FoldTree, values: &[f64]) -> Result<f64, String> {
                 for (w, part) in parts {
                     products.push(w * fold_value(part, values)?);
                 }
-                python_sum(products) / total
+                sum_of(products) / total
             }
         }
     })
@@ -1137,23 +1034,21 @@ mod tests {
     }
 
     #[test]
-    fn python_sum_compensates_and_the_tree_folds_as_fold_py() {
-        // 1e16 + 1 + 1 - 1e16: the running sum loses both ones; Python's keeps them.
-        assert_eq!(python_sum([1e16, 1.0, 1.0, -1e16]), 2.0);
-        assert_eq!(python_sum([]), 0.0);
+    fn the_tree_folds_as_fold_py() {
+        assert_eq!(sum_of([]), 0.0);
         let tree = FoldTree::Avg(vec![
             (0.25, FoldTree::Leaf(0)),
             (0.75, FoldTree::Best(1, vec![FoldTree::Leaf(1), FoldTree::Leaf(2)])),
         ]);
         let v = fold_value(&tree, &[0.2, 0.9, 0.4]).unwrap();
-        assert_eq!(v, python_sum([0.25 * 0.2, 0.75 * 0.4]) / 1.0);
+        assert_eq!(v, sum_of([0.25 * 0.2, 0.75 * 0.4]) / 1.0);
         assert_eq!(fold_value(&FoldTree::Best(0, vec![]), &[]).unwrap(), 0.0);
         // As `json.dumps` writes `EncodedNode.folded`: the weights read back to the bit.
         let text = r#"[[1, 0, {"avg": [[0.1, {"leaf": 0}], [2.5e-05, {"best": 1, "options": [{"leaf": 1}, {"leaf": 2}]}]]}]]"#;
         let cells = folded_cells(text).unwrap();
         assert_eq!((cells[0].0, cells[0].1), (1, 0));
         let v = fold_value(&cells[0].2, &[0.2, 0.9, 0.4]).unwrap();
-        assert_eq!(v, python_sum([0.1 * 0.2, 2.5e-05 * 0.4]) / python_sum([0.1, 2.5e-05]));
+        assert_eq!(v, sum_of([0.1 * 0.2, 2.5e-05 * 0.4]) / sum_of([0.1, 2.5e-05]));
         // IKA-386: the same tree as the port built it, not read back from text.
         let built: Value = serde_json::from_str(text).unwrap();
         let from_value = fold_tree_from_value(&built[0][2]).unwrap();
@@ -1171,17 +1066,16 @@ mod tests {
     }
 
     #[test]
-    fn numpy_sum_is_pairwise() {
-        // Eight accumulators from eight on: numpy's answers (2.5.3), not the running sum's 0.
-        let mut a = vec![1e16];
-        a.extend([1.0; 7]);
-        a.push(-1e16);
-        assert_eq!(numpy_sum(&a), 6.0);
-        assert_eq!(a.iter().fold(0.0, |s, v| s + v), 0.0);
-        let mut b = vec![1e16];
-        b.extend([1.0; 20]);
-        b.push(-1e16);
-        assert_eq!(numpy_sum(&b), 16.0);
+    fn sum_and_dot_of_small_vectors() {
+        assert_eq!(sum_f64(&[]), 0.0);
+        assert_eq!(sum_f64(&[0.5, 0.25, 0.125]), 0.875);
+        // Every length around the four lanes: the dot is the exact sum of the products here.
+        for n in 0..40 {
+            let x: Vec<f64> = (0..n).map(|k| k as f64 * 0.5).collect();
+            let y: Vec<f64> = (0..n).map(|k| (k % 5) as f64).collect();
+            let want: f64 = x.iter().zip(&y).map(|(a, b)| a * b).sum();
+            assert_eq!(dot(&x, &y), want, "length {n}");
+        }
     }
 
     #[test]

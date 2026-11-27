@@ -102,7 +102,7 @@ def prepare(  # noqa: PLR0913 - the loop's settings
     setup.leaf, setup.encoder, setup.rules = leaf, encoder, rules
     mon_k = {name: k for k, name in enumerate(encoder.mon_names)}
     side_k = {name: k for k, name in enumerate(encoder.side_names)}
-    node = {key: planned.request[key] for key in ("widths", "properties", "megaFromSlots", "qServer", "blas")}
+    node = {key: planned.request[key] for key in ("widths", "properties", "megaFromSlots", "qServer")}
     node["budget"] = rustnode.dump_budget(budget)
     node["server"] = {
         "address": leaf.address,

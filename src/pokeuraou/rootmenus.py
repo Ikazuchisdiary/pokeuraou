@@ -36,7 +36,7 @@ class Plan:
     """The menus' request and what is done with its answer, for `menus` and for `moveNode`."""
 
     def __init__(  # noqa: PLR0913 - the node's pieces
-        self, rank_fill: str, model: Any, library: dict[str, str],  # noqa: ANN401
+        self, rank_fill: str, model: Any,  # noqa: ANN401
         pos: Position, views: Sequence[Position], limits: Sequence[int], *, server_key: str,
     ) -> None:
         self.rank_fill = rank_fill
@@ -56,7 +56,6 @@ class Plan:
                 "shm": model._block.name,  # noqa: SLF001 - the Q's own block, idle while the port asks
                 "bytes": int(model.buffer_bytes),
             },
-            "blas": library,
         }
         self.menus: tuple[list[SideAction], list[SideAction]] = ([], [])
 
@@ -122,10 +121,7 @@ def plan(  # noqa: PLR0913 - the node's pieces
     model = qrank.installed(qrank.q_name(rank_fill))
     if type(model) is not qrank.RemoteQ or type(model.encoder) is not Encoder:
         return None
-    library = portmenus.blas()
-    if library is None:
-        return None
-    return Plan(rank_fill, model, library, pos, views, limits, server_key=server_key)
+    return Plan(rank_fill, model, pos, views, limits, server_key=server_key)
 
 
 def menus(  # noqa: PLR0913 - the node's pieces

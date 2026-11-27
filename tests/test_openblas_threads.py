@@ -4,7 +4,7 @@ OpenBLAS commits a buffer for every thread it may run when the library loads -- 
 copy and scipy's, about 0.5 GB each on a 16-thread machine -- so a worker that runs on one
 core held a gigabyte it never touched (1.08 GB of a 1.2 GB generation worker). Each script
 below sets `OPENBLAS_NUM_THREADS` before numpy loads, and the processes it starts inherit
-it. The thread count is asked of the library numpy loaded (`portmenus.blas`), in a fresh
+it. The thread count is asked of the library numpy loaded (found by file name in the test), in a fresh
 interpreter that has only imported the script.
 """
 
@@ -35,14 +35,22 @@ if sys.argv[1] != "-":
     spec = importlib.util.spec_from_file_location("script_under_test", sys.argv[1])
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+import glob, os
 import numpy
-from pokeuraou.portmenus import blas
-found = blas()
-if found is None:
-    print("none")
-    raise SystemExit(0)
-lib = ctypes.CDLL(found["path"])
-print(getattr(lib, found["threads"].replace("set_num_threads", "get_num_threads"))())
+root = os.path.dirname(numpy.__file__)
+for pattern in ("../numpy.libs/*openblas*", ".libs/*openblas*", "../numpy.libs/*.so*"):
+    for path in sorted(glob.glob(os.path.join(root, pattern))):
+        if "openblas" not in os.path.basename(path).lower():
+            continue
+        try:
+            lib = ctypes.CDLL(path)
+        except OSError:
+            continue
+        for prefix in ("scipy_openblas_get_num_threads64_", "openblas_get_num_threads64_"):
+            if hasattr(lib, prefix):
+                print(getattr(lib, prefix)())
+                raise SystemExit(0)
+print("none")
 """
 
 

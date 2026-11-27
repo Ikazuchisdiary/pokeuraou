@@ -22,7 +22,6 @@ mod battler;
 mod beliefnode;
 mod beliefplan;
 mod bind;
-mod blas;
 #[cfg(feature = "count-allocations")]
 mod counting_alloc;
 mod damage;

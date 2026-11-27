@@ -27,7 +27,7 @@ use crate::advance::{choice, choose_p, Pcg64};
 use crate::beliefnode::solve_asks;
 use crate::encode::Encoder;
 use crate::hiddenbench::step_of;
-use crate::lp::{numpy_sum, python_sum, LPS};
+use crate::lp::{sum_f64, sum_of, LPS};
 use crate::position::Position;
 use crate::reg::Reg;
 use crate::resolve::commands::{replacement_phase_drawn, replacements_needed};
@@ -156,7 +156,7 @@ pub(crate) fn phase_core(
     // `_sample_index` of each side's strategy, side 0's first.
     let mut picked = [0usize; 2];
     for side in 0..2 {
-        if numpy_sum(&strategies[side]) <= 0.0 {
+        if sum_f64(&strategies[side]) <= 0.0 {
             return Err(fault("a strategy with no mass".into()));
         }
         picked[side] = choice(&strategies[side], rng).map_err(fault)?;
@@ -170,7 +170,7 @@ pub(crate) fn phase_core(
     // `RustNode._phase`: `rng.choice(len(weights), p=[w / total for w in weights])`, the total
     // Python's own `sum`.
     let (after, notes) = replacement_phase_drawn(reg, pos, chosen, |weights| {
-        let total = python_sum(weights.iter().copied());
+        let total = sum_of(weights.iter().copied());
         let p: Vec<f64> = weights.iter().map(|w| w / total).collect();
         choose_p(&p, &mut *rng)
     })

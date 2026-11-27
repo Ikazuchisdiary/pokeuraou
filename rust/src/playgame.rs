@@ -15,7 +15,7 @@
 //! ```text
 //! { "kind": "playGame", "position": P, "rng": {state, inc, hasUint32, uinteger},
 //!   "context": { servers, leaf, hidden: { game, seen, leads } },   // as `advanceTurn`'s `selfSwitch`
-//!   "node": { widths, properties, megaFromSlots, qServer, blas,    // `rootMenus`'
+//!   "node": { widths, properties, megaFromSlots, qServer,  // `rootMenus`'
 //!             budget, server, netScoresEnds, patch, encoding? },   // `beliefNode`'s
 //!   "exactBudget": B, "steps": n }
 //! ```
@@ -31,7 +31,7 @@ use crate::advance::{advance_core, choice, Pcg64};
 use crate::encode::Encoder;
 use crate::hiddenbench::{step_of, Item};
 use crate::legal;
-use crate::lp::{b64_encode, f64s, numpy_sum};
+use crate::lp::{b64_encode, f64s, sum_f64};
 use crate::position::Position;
 use crate::qmenus::{menus_core, move_node_over, MenusArgs};
 use crate::reg::Reg;
@@ -359,7 +359,7 @@ fn one_step(
 
     // `_sample_index` of side 0's strategy, then side 1's; a draw numpy would not make is Python's.
     let mut trial = rng.clone();
-    if numpy_sum(&own_strategy) <= 0.0 || numpy_sum(&foe_strategy) <= 0.0 {
+    if sum_f64(&own_strategy) <= 0.0 || sum_f64(&foe_strategy) <= 0.0 {
         return Err(Handoff::of("a strategy with no mass"));
     }
     let own_at = choice(&own_strategy, &mut trial).map_err(Handoff::of)?;

@@ -13,6 +13,7 @@ support is decided by the products' last bits. No torch.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 
 import numpy as np
@@ -186,14 +187,13 @@ def test_the_ports_q_arrays_are_pythons(roster) -> None:  # noqa: ANN001
 
 
 def test_the_ports_scores_are_numpys(roster) -> None:  # noqa: ANN001
-    """The candidates' scores: `solve`'s `row_ev` and minus its `col_ev` (numpy's BLAS), and
-    the means against every reply where the game has no answer -- to the bit."""
-    library = portmenus.blas()
-    assert library is not None, "numpy's BLAS is not an OpenBLAS the port can load here"
+    """The candidates' scores: `solve`'s `row_ev` and minus its `col_ev`, and the means
+    against every reply where the game has no answer. The port's sums are plain (IKA-460),
+    so they agree to rounding, not to the bit."""
     rng = np.random.default_rng(7)
     games = [rng.random((int(rng.integers(2, 90)), int(rng.integers(2, 90)))) for _ in range(150)]
     games += [np.round(g, 1) for g in games[:40]] + [rng.random((30, 1)), rng.random((1, 30))]
-    request = {"kind": "qScores", "blas": library, "games": [
+    request = {"kind": "qScores", "games": [
         {"rows": g.shape[0], "cols": g.shape[1],
          "data": base64.b64encode(g.astype("<f8").tobytes()).decode()} for g in games]}
     node = rustnode.require_node(roster.reg)
@@ -205,8 +205,8 @@ def test_the_ports_scores_are_numpys(roster) -> None:  # noqa: ANN001
 
     for g, got, mean in zip(games, solved, means, strict=True):
         m, n = g.shape
-        np.testing.assert_array_equal(unpack(mean["rows"]), g.mean(axis=1))
-        np.testing.assert_array_equal(unpack(mean["cols"]), -g.mean(axis=0))
+        np.testing.assert_allclose(unpack(mean["rows"]), g.mean(axis=1), rtol=0, atol=1e-12)
+        np.testing.assert_allclose(unpack(mean["cols"]), -g.mean(axis=0), rtol=0, atol=1e-12)
         try:
             e = solve(g)
             want = (np.asarray(e.row_ev), -np.asarray(e.col_ev))
@@ -214,13 +214,48 @@ def test_the_ports_scores_are_numpys(roster) -> None:  # noqa: ANN001
             want = (g.mean(axis=1), -g.mean(axis=0))
         # One score orders nothing, and numpy takes `dot` rather than `gemv` there.
         if m > 1:
-            np.testing.assert_array_equal(unpack(got["rows"]), want[0])
+            np.testing.assert_allclose(unpack(got["rows"]), want[0], rtol=0, atol=1e-12)
         if n > 1:
-            np.testing.assert_array_equal(unpack(got["cols"]), want[1])
+            np.testing.assert_allclose(unpack(got["cols"]), want[1], rtol=0, atol=1e-12)
+
+
+def _plain_rows(a: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """`a @ y` as the port sums it (`lp::dot`): four lanes over each row, then the tail."""
+    m, n = a.shape
+    n4 = n - n % 4
+    lanes = np.zeros((m, 4))
+    for k in range(0, n4, 4):
+        lanes += a[:, k:k + 4] * y[k:k + 4]
+    tail = np.zeros(m)
+    for k in range(n4, n):
+        tail += a[:, k] * y[k]
+    return ((lanes[:, 0] + lanes[:, 1]) + (lanes[:, 2] + lanes[:, 3])) + tail
+
+
+def _plain_cols(x: np.ndarray, a: np.ndarray) -> np.ndarray:
+    """`x @ a` as the port sums it: the rows added in order."""
+    out = np.zeros(a.shape[1])
+    for i in range(a.shape[0]):
+        out += x[i] * a[i]
+    return out
 
 
 @pytest.fixture
-def served(roster):  # noqa: ANN001, ANN201
+def served(roster, monkeypatch):  # noqa: ANN001, ANN201
+    """A stand-in Q server, and `assemble` taking the scores the way the port does (IKA-460
+    dropped numpy's BLAS from the port; the order among tied candidates is those bits)."""
+    from pokeuraou import equilibrium
+
+    real = equilibrium.assemble
+
+    def plain(a, value_row, value_col, x, y):  # noqa: ANN001, ANN202
+        e = real(a, value_row, value_col, x, y)
+        if a.shape[0] > 1 and a.shape[1] > 1:
+            return dataclasses.replace(e, row_ev=_plain_rows(a, y), col_ev=_plain_cols(x, a))
+        return e
+
+    monkeypatch.setattr(equilibrium, "assemble", plain)
+    monkeypatch.setattr(portlp, "assemble", plain)
     reg = roster.reg
     encoder = Encoder(reg)
     stub = QStub(encoder.vocab.fingerprint())

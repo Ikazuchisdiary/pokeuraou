@@ -18,7 +18,7 @@
 //! the caller then builds the completions as before. A sheet that cannot explain the board
 //! is an `error` per side, as `completions`' `ValueError` was.
 
-use crate::lp::python_sum;
+use crate::lp::sum_of;
 use crate::position::{Pokemon, Position, STAT_IDS};
 use crate::reg::{to_id, Reg};
 use serde_json::{json, Value};
@@ -189,7 +189,7 @@ fn bench_weights(
             None => out.push((key, *probability)),
         }
     }
-    let total = python_sum(out.iter().map(|(_, v)| *v));
+    let total = sum_of(out.iter().map(|(_, v)| *v));
     if total > 0.0 {
         for (_, v) in &mut out {
             *v /= total;
@@ -318,7 +318,7 @@ fn side_completions(
             at[j] = at[j - 1] + 1;
         }
     }
-    let total = python_sum(made.iter().map(|(_, w)| *w));
+    let total = sum_of(made.iter().map(|(_, w)| *w));
     let count = made.len();
     let mut out = Vec::with_capacity(count);
     for (picked, weight) in made {

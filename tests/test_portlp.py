@@ -30,31 +30,6 @@ from pokeuraou.teams import load_roster
 from .test_ladder import _played
 
 
-def openblas_core() -> str | None:
-    """The core numpy's OpenBLAS runs on this machine ("SkylakeX" on the 9800X3D), or None.
-
-    `lp.rs::numpy_dot` copies the SkylakeX `ddot`'s order, so where numpy takes that core the
-    port's fold is numpy's to the bit and the tests hold it to that; elsewhere the last place
-    may move."""
-    import ctypes
-    import glob
-    import os
-
-    root = os.path.dirname(np.__file__)
-    for lib in glob.glob(os.path.join(root, "..", "numpy.libs", "*openblas*")):
-        try:
-            loaded = ctypes.CDLL(lib)
-        except OSError:
-            continue
-        for name in ("scipy_openblas_get_corename64_", "scipy_openblas_get_corename",
-                     "openblas_get_corename64_", "openblas_get_corename"):
-            fn = getattr(loaded, name, None)
-            if fn is not None:
-                fn.restype = ctypes.c_char_p
-                return fn().decode()
-    return None
-
-
 @pytest.fixture(scope="module")
 def roster():  # noqa: ANN201
     loaded = load_roster("rizabanadohido")
@@ -75,9 +50,19 @@ def _games(rng: np.random.Generator) -> list[np.ndarray]:
     return games
 
 
+#: The port normalises the strategies with a plain sum (IKA-460), numpy with a pairwise one:
+#: the same LP answer, to the last bit or two.
+TOL = 1e-12
+
+
+def _close(a, b) -> bool:  # noqa: ANN001
+    a, b = (np.zeros(0) if v is None else np.asarray(v, dtype=np.float64) for v in (a, b))
+    return a.shape == b.shape and bool(np.all(np.abs(a - b) <= TOL))
+
+
 def _same_equilibrium(a: equilibrium.Equilibrium, b: equilibrium.Equilibrium) -> bool:
-    return (a.value == b.value and a.duality_gap == b.duality_gap
-            and all(np.asarray(getattr(a, f)).tobytes() == np.asarray(getattr(b, f)).tobytes()
+    return (abs(a.value - b.value) <= TOL and abs(a.duality_gap - b.duality_gap) <= TOL
+            and all(_close(getattr(a, f), getattr(b, f))
                     for f in ("row_strategy", "col_strategy", "row_ev", "col_ev",
                               "row_ev_loss", "col_ev_loss")))
 
@@ -111,26 +96,23 @@ def test_the_ports_bayesian_games_are_solves(roster) -> None:  # noqa: ANN001
         want = equilibrium.solve_bayesian(mats, w)
         game = {"bayes": [portlp._game(a) for a in mats], "weights": portlp._b64(w)}
         one = node.lp({"kind": "lp", "games": [game]})["answers"][0]
-        assert 0.5 * (one["valueRow"] + one["valueCol"]) == want.value
+        assert abs(0.5 * (one["valueRow"] + one["valueCol"]) - want.value) <= TOL
         x = np.frombuffer(base64.b64decode(one["x"]), dtype="<f8")
-        assert x.tobytes() == np.asarray(want.row_strategy).tobytes()
+        assert _close(x, want.row_strategy)
         for y, theirs in zip(one["ys"], want.col_strategies, strict=True):
-            assert np.frombuffer(base64.b64decode(y), dtype="<f8").tobytes() == theirs.tobytes()
+            assert _close(np.frombuffer(base64.b64decode(y), dtype="<f8"), theirs)
         json.dumps(one)  # the answer is plain JSON
 
 
 def _same_bayesian(a: equilibrium.BayesianEquilibrium,
                    b: equilibrium.BayesianEquilibrium) -> bool:
-    def raw(v) -> bytes:  # noqa: ANN001
-        return b"" if v is None else np.asarray(v).tobytes()
-
-    return (a.value == b.value and a.duality_gap == b.duality_gap
-            and all(raw(getattr(a, f)) == raw(getattr(b, f))
+    return (abs(a.value - b.value) <= TOL and abs(a.duality_gap - b.duality_gap) <= TOL
+            and all(_close(getattr(a, f), getattr(b, f))
                     for f in ("row_strategy", "col_marginal", "row_ev", "row_ev_loss", "weights"))
             and len(a.col_strategies) == len(b.col_strategies)
-            and all(raw(x) == raw(y) for x, y in zip(a.col_strategies, b.col_strategies,
-                                                     strict=True))
-            and all(raw(x) == raw(y) for x, y in zip(a.col_ev_loss, b.col_ev_loss, strict=True)))
+            and all(_close(x, y) for x, y in zip(a.col_strategies, b.col_strategies,
+                                                 strict=True))
+            and all(_close(x, y) for x, y in zip(a.col_ev_loss, b.col_ev_loss, strict=True)))
 
 
 def test_the_ports_bayesian_equilibria_are_solve_bayesians(roster) -> None:  # noqa: ANN001
@@ -226,13 +208,11 @@ def test_the_ports_sub_games_are_folds_and_solves(roster) -> None:  # noqa: ANN0
     got = [s.solved for s in subs]
     assert all(s.done for s in subs)
     np.testing.assert_allclose(got, want, rtol=0, atol=1e-12)
-    if openblas_core() == "SkylakeX":
-        assert got == want
-    # Whole matrices (the hp-share road): the same to the bit, wherever it runs.
+    # Whole matrices (the hp-share road): the same solve, to the last bit or two.
     whole = [search._Sub(payoff=s.pending.finish()) for s in _filled(roster)]
     portlp.solve_subs(reg, whole)
-    assert [s.solved for s in whole] == [
-        float(equilibrium.solve(s.payoff).value) for s in whole]
+    np.testing.assert_allclose([s.solved for s in whole], [
+        float(equilibrium.solve(s.payoff).value) for s in whole], rtol=0, atol=TOL)
 
 
 def _kids(rng: np.random.Generator, count: int) -> list:
@@ -287,10 +267,13 @@ def test_the_kids_passes_solved_together_are_solved_alone(roster) -> None:  # no
                         assert portlp.COUNTS["bayes"] - before[0] == len(live)
                         assert portlp.COUNTS["crossings"] - before[1] == 1
                         before = (portlp.COUNTS["bayes"], portlp.COUNTS["crossings"])
-                got[on] = [(k.rows, k.cols, k.active, None if k.answer is None else (
-                    k.answer[0].tobytes(), [y.tobytes() for y in k.answer[1]], k.answer[2]))
-                    for k in kids]
-            assert got[True] == got[False]
+                got[on] = [(k.rows, k.cols, k.active, k.answer) for k in kids]
+            for off, now in zip(got[False], got[True], strict=True):
+                assert off[:3] == now[:3]
+                assert (off[3] is None) == (now[3] is None)
+                if off[3] is not None:
+                    assert _close(off[3][0], now[3][0]) and off[3][2] == now[3][2]
+                    assert all(_close(a, b) for a, b in zip(off[3][1], now[3][1], strict=True))
             # The children differ (a child's answer given to another would show).
             assert len({str(a) for a in got[True]}) == len(got[True])
     finally:
@@ -320,12 +303,14 @@ def test_the_kids_matrices_solved_together_are_solved_alone(roster, monkeypatch)
             assert ladder._kids_fill(roster.reg, kids, None, Budget.matrix(), notes) is None
             if on:
                 assert portlp.COUNTS["games"] - games == len(kids)
-            got[on] = ([(k.prices.tobytes(), k.x.tobytes(), k.y.tobytes(), sorted(k.notes),
-                         k.work) for k in kids], sorted(notes))
+            got[on] = ([(k.prices, k.x, k.y, sorted(k.notes), k.work) for k in kids], sorted(notes))
     finally:
         portlp.set_on(was)
-    assert got[True] == got[False]
-    assert len({a[1] + a[2] for a in got[True][0]}) == len(pendings)
+    for off, on in zip(got[False][0], got[True][0], strict=True):
+        assert _close(off[0], on[0]) and _close(off[1], on[1]) and _close(off[2], on[2])
+        assert off[3:] == on[3:]
+    assert got[False][1] == got[True][1]
+    assert len({a[1].tobytes() + a[2].tobytes() for a in got[True][0]}) == len(pendings)
 
 
 def test_a_sub_game_solved_already_or_elsewhere_is_left_alone(roster) -> None:  # noqa: ANN001

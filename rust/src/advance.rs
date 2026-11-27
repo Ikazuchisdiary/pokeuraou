@@ -14,7 +14,7 @@
 //! A draw numpy would refuse (a negative or NaN weight, weights that do not sum to one) is a
 //! `fault`: the caller then does the turn as before, with its generator untouched.
 
-use crate::lp::numpy_sum;
+use crate::lp::sum_f64;
 use crate::position::Position;
 use crate::reg::Reg;
 use serde_json::{json, Value};
@@ -194,7 +194,7 @@ fn seed_sequence_state(entropy: &[u64]) -> [u64; 4] {
 /// numpy's `Generator.choice(len(counts), p=counts / counts.sum())`: the index, or why numpy
 /// would have raised. The caller has checked that the total is positive.
 pub(crate) fn choice(counts: &[f64], rng: &mut Pcg64) -> Result<usize, String> {
-    let total = numpy_sum(counts);
+    let total = sum_f64(counts);
     let p: Vec<f64> = counts.iter().map(|c| c / total).collect();
     choose_p(&p, rng)
 }
@@ -301,7 +301,7 @@ pub(crate) fn advance_core(
         chain: None,
     };
     // Nothing to draw from: the caller ends the game, as it did, without a draw.
-    if counts.is_empty() || numpy_sum(&counts) <= 0.0 {
+    if counts.is_empty() || sum_f64(&counts) <= 0.0 {
         return Ok(advanced);
     }
     let index = choice(&counts, rng).map_err(|why| json!({ "fault": why }))?;

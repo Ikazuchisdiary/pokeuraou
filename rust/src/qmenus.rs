@@ -8,13 +8,11 @@
 //! side's `width` best by `narrow` (no cover): highest score first, ties by the choice text.
 //! Here the port does all of it and hands back the menus alone.
 //!
-//! Every piece is the Python's to the bit: the pools action for action (`legal.rs`), the
-//! arrays byte for byte into the same block in `RemoteQ._lay`'s layout, the same requests
-//! (so the server answers the same matrices), the LP `lp.rs` already solves as scipy does,
-//! and the scores by numpy's own BLAS (`blas.rs`), since the menus' order among the
-//! equilibrium's support is decided by the last bits of those products.
+//! The pools are the Python's action for action (`legal.rs`), the arrays are laid byte for
+//! byte into the same block in `RemoteQ._lay`'s layout, the same requests go to the server,
+//! and the LP is `lp.rs`'s. The scores are plain row and column products (IKA-460: they were
+//! numpy's own BLAS, to give the same order among the equilibrium's tied support).
 
-use crate::blas::Blas;
 use crate::encode::{EncodeRules, Encoder};
 use crate::legal::{self, SideAct};
 use crate::position::Position;
@@ -167,17 +165,13 @@ fn ask_chunk(server: &Server, chunk: &[Arrays], stats: &mut Stats, op: Op) -> Re
     })
 }
 
-/// numpy's `q.mean(axis=1)`: each row's pairwise sum over its length.
+/// Each row's mean.
 fn row_means(q: &[f64], m: usize, n: usize) -> Vec<f64> {
-    (0..m).map(|i| crate::lp::numpy_sum(&q[i * n..(i + 1) * n]) / n as f64).collect()
+    (0..m).map(|i| crate::lp::sum_f64(&q[i * n..(i + 1) * n]) / n as f64).collect()
 }
 
-/// numpy's `q.mean(axis=0)`: the rows added in order, over their count.
+/// Each column's mean.
 fn col_means(q: &[f64], m: usize, n: usize) -> Vec<f64> {
-    if n == 1 {
-        // One column is contiguous, and numpy sums it pairwise.
-        return vec![crate::lp::numpy_sum(q) / m as f64];
-    }
     let mut out = q[..n].to_vec();
     for i in 1..m {
         for j in 0..n {
@@ -190,11 +184,17 @@ fn col_means(q: &[f64], m: usize, n: usize) -> Vec<f64> {
 /// Both sides' scores on one matrix (`_q_menus`: the row values against the column mix,
 /// minus the column values against the row mix; the means where the game has no answer),
 /// and whether the game was solved.
-fn scores(blas: &Blas, q: &[f64], m: usize, n: usize, eps: f64) -> ([Vec<f64>; 2], bool) {
+fn scores(q: &[f64], m: usize, n: usize, eps: f64) -> ([Vec<f64>; 2], bool) {
     match crate::lp::solve(q, m, n, eps) {
         Ok(solved) => {
-            let row = blas.a_y(q, m, n, &solved.ys[0]);
-            let col: Vec<f64> = blas.x_a(&solved.x, q, m, n).into_iter().map(|v| -v).collect();
+            let y = &solved.ys[0];
+            let row: Vec<f64> = (0..m).map(|i| crate::lp::dot(&q[i * n..(i + 1) * n], y)).collect();
+            let mut col = vec![0.0f64; n];
+            for (i, xi) in solved.x.iter().enumerate() {
+                for (c, v) in col.iter_mut().zip(&q[i * n..(i + 1) * n]) {
+                    *c -= xi * v;
+                }
+            }
             ([row, col], true)
         }
         Err(_) => {
@@ -235,10 +235,6 @@ pub fn q_menus(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
     let server = match Server::from_json(&value["server"]) {
         Err(e) => return json!({ "error": e }),
         Ok(server) => server,
-    };
-    let blas = match Blas::from_json(&value["blas"]) {
-        Err(e) => return json!({ "error": e }),
-        Ok(blas) => blas,
     };
     let started = std::time::Instant::now();
     let positions: Vec<Position> = list.iter().map(|one| crate::held::position(&one["position"])).collect();
@@ -282,7 +278,7 @@ pub fn q_menus(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
         };
         for (&k, q) in group.iter().zip(&matrices) {
             let (m, n) = (pools[k][0].len(), pools[k][1].len());
-            let (both, solved) = scores(&blas, q, m, n, eps);
+            let (both, solved) = scores(q, m, n, eps);
             unsolved += u64::from(!solved);
             let mut menu = Vec::with_capacity(2);
             for side in 0..2 {
@@ -369,12 +365,8 @@ pub fn arrays_command(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
 }
 
 /// `qScores`: `scores` and `top` of given matrices and pools' choice order, for the check
-/// that the ranking is `_q_menus`' (numpy's BLAS, the mean fallback, the tie order).
+/// that the ranking is `_q_menus`' (the mean fallback, the tie order).
 pub fn scores_command(value: &Value) -> Value {
-    let blas = match Blas::from_json(&value["blas"]) {
-        Err(e) => return json!({ "error": e }),
-        Ok(blas) => blas,
-    };
     let eps = value.get("eps").and_then(Value::as_f64).unwrap_or(1e-9);
     let force_mean = value.get("mean").and_then(Value::as_bool).unwrap_or(false);
     let Some(games) = value["games"].as_array() else {
@@ -396,7 +388,7 @@ pub fn scores_command(value: &Value) -> Value {
             let col: Vec<f64> = col_means(&q, m, n).into_iter().map(|v| -v).collect();
             ([row_means(&q, m, n), col], false)
         } else {
-            scores(&blas, &q, m, n, eps)
+            scores(&q, m, n, eps)
         };
         let bits = |v: &[f64]| crate::lp::b64_encode(&v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
         out.push(json!({ "rows": bits(&both[0]), "cols": bits(&both[1]), "solved": solved }));
@@ -439,7 +431,7 @@ fn uncovered(pool: &[SideAct], kept: &[usize], limit: usize) -> usize {
 ///
 /// ```text
 /// { "kind": "rootMenus", "position": P, "v0": P, "v1": P, "same": bool, "widths": [w0, w1],
-///   "properties": bool, "megaFromSlots": bool, "server": S, "blas": B }
+///   "properties": bool, "megaFromSlots": bool, "server": S }
 /// ```
 ///
 /// `same` is whether the two sides rank from one view object (and so, with equal pools, from one
@@ -475,7 +467,6 @@ pub(crate) struct MenusArgs {
     pub(crate) properties: bool,
     pub(crate) rules: EncodeRules,
     pub(crate) server: Server,
-    pub(crate) blas: Blas,
 }
 
 impl MenusArgs {
@@ -496,7 +487,6 @@ impl MenusArgs {
             rules: EncodeRules { mega_from_slots: value.get("megaFromSlots").and_then(Value::as_bool).unwrap_or(false) },
             server: Server::from_json(value.get("qServer").filter(|s| !s.is_null()).unwrap_or(&value["server"]))
                 .map_err(fault)?,
-            blas: Blas::from_json(&value["blas"]).map_err(fault)?,
         })
     }
 }
@@ -512,7 +502,7 @@ pub(crate) fn menus_core(
     same: bool,
 ) -> Result<(Value, [Vec<SideAct>; 2]), Value> {
     let fault = |e: String| json!({ "fault": e });
-    let MenusArgs { widths, eps, properties, rules, server, blas } = args;
+    let MenusArgs { widths, eps, properties, rules, server } = args;
     let (eps, properties, rules) = (*eps, *properties, *rules);
     for p in std::iter::once(pos).chain(views.iter().copied()) {
         if &*p.format != reg.format_id.as_str() {
@@ -564,7 +554,7 @@ pub(crate) fn menus_core(
         let r = request_of[s];
         let (m, n) = (pools[r][0].len(), pools[r][1].len());
         if solved_once[r].is_none() {
-            let got = scores(&blas, &matrices[r], m, n, eps);
+            let got = scores(&matrices[r], m, n, eps);
             unsolved += u64::from(!got.1);
             solved_once[r] = Some(got);
         }
