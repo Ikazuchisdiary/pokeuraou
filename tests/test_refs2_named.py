@@ -2,16 +2,11 @@
 M-C generation does.
 
 The user's decision of 9/28: the library's unnamed fill of a leaf-ranked menu is q-nocover,
-which needs the process's Q and stops without one (IKA-338's rule, now in `play_game`,
-`_menus` and `PoolArm`); a person's game with no Q it can read falls
-back to refs2 with a note; the refs fills stay, played when named. What these tests hold:
+which needs the process's Q and stops without one (IKA-338's rule, now in `_menus` and
+`PoolArm`); a person's game with no Q it can read falls back to refs2 with a note; the refs
+fills stay, played when named. What these tests hold:
 
-- **unnamed is q-nocover or a stop**: a leaf-ranked `play_game` /
-  `PoolArm` with no fill ranks by the installed Q (the record's ``rankFill``), and with no Q
-  it stops at the first menu -- never refs2;
-- **a side that reads no fill keeps its bytes**: damage-ranked, the record carries no
-  ``rankFill``, as before;
-- **a call that leaves the fill off drifts**: `agent_drift` holds it to account;
+- **unnamed is q-nocover**: a leaf-ranked `PoolArm` with no fill resolves it at construction;
 - **a person's menus**: a Q of another vocabulary than the leaf's falls back to refs2 with a
   note when the fill was not named, and stops when it was.
 
@@ -20,22 +15,18 @@ Nothing here needs torch, CUDA or data/: the Q is a stand-in.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-from pokeuraou import qrank, selfplay
+from pokeuraou import qrank
 from pokeuraou.damage import register_mega_stones
-from pokeuraou.encode import Encoder
 from pokeuraou.pool import load_pool
 from pokeuraou.poolplay import PoolArm
 from pokeuraou.search import DEFAULT_RANK_FILL, SHIPPED_RANK_FILL
 
 from ._harness import load_tool
 from .test_poolplay import _served_stub, _variants, _write_pool
-from .test_q_rank import _StubQ
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,57 +44,12 @@ def no_q(monkeypatch):  # noqa: ANN001, ANN201
     monkeypatch.setattr(qrank, "_INSTALLED", {})
 
 
-@pytest.fixture()
-def stub_q(pool, monkeypatch):  # noqa: ANN001, ANN201
-    monkeypatch.setattr(qrank, "_INSTALLED", {})
-    model = _StubQ(Encoder(pool.reg))
-    qrank.install(model)
-    return model
-
-
-def _game(pool, **kwargs):  # noqa: ANN001, ANN003, ANN202
-    team = list(pool.teams[0].sets)
-    return selfplay.play_game(
-        pool.reg, np.random.default_rng(3), team[:4], team[:4], "t",
-        search_limit=3, max_turns=2, evaluate=_served_stub, sheets=(team, team), **kwargs,
-    )
-
-
 def test_the_constants() -> None:
     assert DEFAULT_RANK_FILL == "refs2"
     assert SHIPPED_RANK_FILL == "q-nocover"
 
 
 # ------------------------------------------------------------------ the library
-
-
-def test_an_unnamed_leaf_ranked_game_stops_without_a_q(pool, no_q) -> None:  # noqa: ANN001
-    with pytest.raises(RuntimeError, match="needs a Q"):
-        _game(pool, rank_by_leaf=True)
-
-
-def test_an_unnamed_leaf_ranked_game_plays_q_nocover_by_the_q(pool, stub_q) -> None:  # noqa: ANN001
-    before = dict(qrank.QRANKED.get("q-nocover", {"rankings": 0}))
-    record = _game(pool, rank_by_leaf=True)
-    assert record.rank_fill == ["q-nocover", "q-nocover"]
-    payload = record.to_json(objective="hp-share", search_limit=3)
-    assert payload["rankFill"] == ["q-nocover", "q-nocover"]
-    assert qrank.QRANKED["q-nocover"]["rankings"] > before.get("rankings", 0)
-    assert stub_q.calls > 0
-
-
-def test_refs2_named_needs_no_q_and_a_damage_side_keeps_its_bytes(pool, no_q) -> None:  # noqa: ANN001
-    named = _game(pool, rank_by_leaf=True, rank_fill="refs2")
-    assert named.rank_fill == ["refs2", "refs2"]
-    assert "rankFill" not in named.to_json(objective="hp-share", search_limit=3)
-    # Damage-ranked, unnamed: the fill is never read, no Q is asked for, and the record is
-    # the one it was (no rankFill).
-    damage = _game(pool, rank_by_leaf=False)
-    assert damage.rank_fill == ["refs2", "refs2"]
-    assert "rankFill" not in damage.to_json(objective="hp-share", search_limit=3)
-    # Per side: one leaf-ranked side named, the other damage-ranked and unnamed.
-    mixed = _game(pool, rank_by_leaf=(True, False), rank_fill=("refs1", None))
-    assert mixed.rank_fill == ["refs1", "refs2"]
 
 
 def test_a_pool_arm_resolves_its_fill_at_construction() -> None:
@@ -114,28 +60,7 @@ def test_a_pool_arm_resolves_its_fill_at_construction() -> None:
     assert (leafy.rank_fill, damage.rank_fill, named.rank_fill) == ("q-nocover", "refs2", "refs2")
 
 
-class _Parser:
-    """`ArgumentParser.error`'s behaviour: the message on stderr, exit 2."""
-
-    def error(self, message: str) -> None:
-        print(message, file=sys.stderr)
-        raise SystemExit(2)
-
-
 # ------------------------------------------------------------------ the fill is held
-
-
-def test_agent_drift_holds_a_tool_that_leaves_the_fill_off(tmp_path) -> None:  # noqa: ANN001
-    drift = load_tool("agent_drift")
-    assert "rank_fill" in drift.shipping_args()
-    # Positive control: a call that leaves it off is missing it.
-    tool = tmp_path / "roster_tool.py"
-    tool.write_bytes(
-        b"play_game(reg, rng, a, b, 'x', evaluate=e, rank_by_leaf=True, sheets=s,\n"
-        b"          search_limit=12, bench_prior=p)\n"
-    )
-    passed = set().union(*(kw for _line, kw in drift.calls(tool)))
-    assert drift.shipping_args() - passed == {"rank_fill"}
 
 
 # ------------------------------------------------------------------ a person's menus

@@ -25,33 +25,32 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pokeuraou.damage import register_mega_stones
-from pokeuraou.regulation import load_regulation
-from pokeuraou.selfplay import play_game
-from pokeuraou.teams import load_roster
 from tests._harness import load_tool
+
+from ._worker_games import worker_games
 
 # `tools/encode_dataset.py` imports `pokeuraou.value`, which imports torch at module scope.
 pytest.importorskip("torch", reason="the dataset needs the optional learn group")
 encode_dataset = load_tool("encode_dataset")
 
 
-def _game(seed: int, max_turns: int, hidden: bool) -> dict:
-    reg = load_regulation("gen9championsvgc2026regmb")
-    register_mega_stones(reg)
-    sheet = list(load_roster("rizabanadohido").sets)[:6]
-    record = play_game(
-        reg, np.random.default_rng(seed), sheet[:4], [sheet[i] for i in (1, 0, 4, 5)], "test",
-        search_limit=2, max_turns=max_turns,
-        sheets=(sheet, sheet),
-    )
-    return json.loads(json.dumps(record.to_json(objective="hp-share", search_limit=2)))
-
-
 @pytest.fixture(scope="module")
-def games() -> list[dict]:
-    """A finished hidden-bench game, one stopped by the cap, and a second finished one."""
-    return [_game(5, 40, True), _game(8, 3, True), _game(11, 6, True)]
+def games(tmp_path_factory) -> list[dict]:  # noqa: ANN001
+    return _games(tmp_path_factory.mktemp("encode"))
+
+
+def _games(tmp: Path) -> list[dict]:
+    """A finished hidden-bench game, one stopped by the cap, and a second finished one.
+
+    IKA-463: the Rust generation worker's games (`play_game`'s until then). The worker writes
+    finished games only, so the capped one is its second game with the outcome taken off, as a
+    run the cap stopped would have written it before the loop discarded it."""
+    _pool, played = worker_games(tmp, 3)
+    a, b, c = (copy.deepcopy(game) for game in played)
+    b["outcome"] = None
+    b["targetIsRealOutcome"] = False
+    b["endReason"] = "turn-cap"
+    return [a, b, c]
 
 
 def _line(record: dict) -> bytes:

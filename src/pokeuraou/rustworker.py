@@ -96,11 +96,45 @@ def agent_node(model: Any, limit: int, leaf: Any) -> dict[str, Any]:  # noqa: AN
     Generation (`build_config`) and the board (`board_config`) build their agents here and
     nowhere else; `tools/agent_drift.py --check` holds them to it."""
     from .encode import rules_of
-    from .playgame import static_node
     from .rootmenus import static_request
 
     return static_node(static_request(model, (limit, limit), "qServer"), leaf, leaf.encoder,
                        rules_of(leaf), Budget.matrix())
+
+
+def static_node(menus: dict[str, Any], leaf: Any, encoder: Any, rules: Any, budget: Any) -> dict[str, Any]:  # noqa: ANN401
+    """`playGame`'s ``node``: the menus' static request (`rootmenus.static_request`), the matrix
+    budget, the leaf's server and the encoder's columns the node patches. The same for every
+    position of a game. (IKA-463 moved it here from `playgame.py`, which went with `play_game`.)"""
+    from .encode import HP_SCALE
+    from .rustnode import dump_budget
+
+    mon_k = {name: k for k, name in enumerate(encoder.mon_names)}
+    side_k = {name: k for k, name in enumerate(encoder.side_names)}
+    node = dict(menus)
+    node["budget"] = dump_budget(budget)
+    node["server"] = {
+        "address": leaf.address,
+        "model": leaf.model,
+        "shm": leaf._block.name,  # noqa: SLF001 - the leaf's own block, idle while the port asks
+        "bytes": int(leaf._block.size),  # noqa: SLF001
+        "batch": int(leaf.batch_size),
+    }
+    node["netScoresEnds"] = bool(leaf.encoder.rules.net_scores_ends)
+    node["patch"] = {
+        "can_mega": mon_k["can_mega"],
+        "maxhp_scaled": mon_k["maxhp_scaled"],
+        "hp_fraction": mon_k["hp_fraction"],
+        "fainted": mon_k["fainted"],
+        "mega_used": side_k["mega_used"],
+        "mega_available": side_k["mega_available"],
+        "alive_fraction": side_k["alive_fraction"],
+        "team_hp_fraction": side_k["team_hp_fraction"],
+        "hp_scale": float(HP_SCALE),
+    }
+    if rules.mega_from_slots:
+        node["encoding"] = rules.to_request()
+    return node
 
 
 def exact_budget() -> dict[str, Any]:

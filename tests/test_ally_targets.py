@@ -129,15 +129,6 @@ def test_a_fainted_ally_is_not_a_target(reg, oracle: Oracle) -> None:  # noqa: A
     assert _ally_choices(reg, pos, "all") == set()
 
 
-def test_an_unknown_mode_stops(reg) -> None:  # noqa: ANN001
-    with pytest.raises(ValueError, match="ally target mode"):
-        actions.set_ally_targets("some")
-    with pytest.raises(ValueError, match="ally_targets"):
-        from pokeuraou.selfplay import play_game
-
-        play_game(reg, None, [], [], "x", sheets=([], []), ally_targets="some")  # type: ignore[arg-type]
-
-
 @pytest.mark.oracle
 def test_showdown_takes_every_ally_target_the_menu_lists(reg, oracle: Oracle) -> None:  # noqa: ANN001
     """Every choice `all` lists, Showdown accepts; and the ally targets `off` leaves out are

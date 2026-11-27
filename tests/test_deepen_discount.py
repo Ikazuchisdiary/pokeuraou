@@ -20,12 +20,10 @@ import numpy as np
 import pytest
 
 from pokeuraou import deepen as deepen_mod
-from pokeuraou import selfplay
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.equilibrium import solve
 from pokeuraou.narrow import narrow
 from pokeuraou.port import batched_payoff
-from pokeuraou.regulation import load_regulation
 from pokeuraou.search import DEFAULT_SUB_BRANCHES, DEFAULT_SUB_LIMIT
 from pokeuraou.teams import load_roster
 
@@ -138,38 +136,6 @@ def _inherited(node, discount):  # noqa: ANN001, ANN202
         if child is node:
             return float(up) * weight * discount
     raise AssertionError("a child not among its parent's branches")
-
-
-@pytest.fixture(scope="module")
-def setup():  # noqa: ANN201
-    reg = load_regulation("gen9championsvgc2026regmb")
-    register_mega_stones(reg)
-    sheet = list(load_roster("rizabanadohido").sets)[:6]
-    return reg, sheet
-
-
-def _hidden_game(setup, label):  # noqa: ANN001, ANN202
-    reg, sheet = setup
-    return selfplay.play_game(
-        reg, np.random.default_rng(33), sheet[:4], sheet[2:6], "test",
-        search_limit=3, max_turns=12, sheets=(sheet, sheet), deepen=label,
-    )
-
-
-def _payload(record) -> dict:  # noqa: ANN001
-    out = record.to_json(objective="hp-share", search_limit=3)
-    out.pop("searchSeconds", None)
-    out.pop("engine", None)
-    return out
-
-
-def test_in_a_game_the_discount_changes_the_moves_and_repeats(setup) -> None:  # noqa: ANN001
-    plain = _payload(_hidden_game(setup, "m200hg16"))
-    first = _payload(_hidden_game(setup, "m200hg16d30"))
-    second = _payload(_hidden_game(setup, "m200hg16d30"))
-    assert first == second
-    assert first["deepen"] == ["m200hg16d30", "m200hg16d30"]
-    assert first["decisions"] != plain["decisions"]
 
 
 def test_a_deepening_is_charged_its_levels_and_its_root(roster) -> None:  # noqa: ANN001

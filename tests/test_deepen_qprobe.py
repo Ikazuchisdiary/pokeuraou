@@ -15,9 +15,9 @@ What these tests hold:
 - **the null control**: a short list as long as the outside is the unnarrowed oracle --
   the same actions join in the same order, the same cells are probed;
 - **the Q is asked once per node** (one per completion on a Bayesian root) and counted,
-  never charged to a budget of cells; `Cost` prices it and the probed cells apart;
-- **in a game** ``q<k>`` with a k past every outside list plays the ``all`` game byte for
-  byte but for the label and the counts, and a real ``q3`` game is reproducible.
+  never charged to a budget of cells; `Cost` prices it and the probed cells apart.
+
+The game-level tests (``q<k>`` in a `play_game` game) went with `play_game` (IKA-463).
 """
 
 from __future__ import annotations
@@ -28,9 +28,8 @@ import pytest
 from pokeuraou import deepen as deepen_mod
 from pokeuraou import port, qrank
 from pokeuraou.equilibrium import solve, solve_bayesian
-from pokeuraou.position import Position
 
-from .test_deepen import _Act, _hidden_game, _payload, setup  # noqa: F401
+from .test_deepen import _Act
 
 
 def test_the_q_label_parses() -> None:
@@ -353,61 +352,3 @@ class _HashQ:
         ).digest()
         rng = np.random.default_rng(int.from_bytes(seed[:8], "little"))
         return rng.random((len(pools[0]), len(pools[1])))
-
-
-def _strip_q(payload: dict) -> dict:
-    """The payload without the Q's counts (a copy: the record shares its dicts)."""
-    import copy
-
-    payload = copy.deepcopy(payload)
-    for d in payload["decisions"]:
-        for side in d.get("deepened") or []:
-            if side:
-                side.pop("q", None)
-                side.pop("qfull", None)
-    return payload
-
-
-def test_in_a_game_a_list_past_the_outside_plays_the_all_game(setup, monkeypatch) -> None:  # noqa: ANN001, F811
-    model = _HashQ()
-    monkeypatch.setattr(qrank, "_INSTALLED", {"": model})
-    plain = _payload(_hidden_game(setup, "m60sallh"))
-    wide = _payload(_hidden_game(setup, "m60sq9999h"))
-    assert model.calls > 0
-    asked = [side["q"] for d in wide["decisions"] for side in (d.get("deepened") or [])
-             if side and "q" in side]
-    assert asked and sum(asked) > 0
-    assert all(side.get("qfull") == 0 for d in wide["decisions"]
-               for side in (d.get("deepened") or []) if side and "qfull" in side)
-    assert wide["deepen"] == ["m60sq9999h"] * 2
-    wide["deepen"] = plain["deepen"]
-    assert _strip_q(wide) == plain
-
-
-def test_in_a_game_q3_narrows_and_is_reproducible(setup, monkeypatch) -> None:  # noqa: ANN001, F811
-    monkeypatch.setattr(qrank, "_INSTALLED", {"": _HashQ()})
-    game = _hidden_game(setup, "m60sq1h")
-    again = _hidden_game(setup, "m60sq1h")
-    assert _payload(game) == _payload(again)
-    plain = _hidden_game(setup, "m60sallh")
-    # The short list changed what was probed, so the game moved (the positive control
-    # that the label reached the oracle).
-    assert _strip_q(_payload(game))["decisions"] != _payload(plain)["decisions"]
-    hidden = short = 0
-    for d in game.decisions:
-        if d.deepened is None:
-            continue
-        pos = Position.from_json(d.position)
-        shown = all(len(d.shown[i]) == len(pos.sides[i].pokemon) for i in (0, 1))
-        for side in (0, 1):
-            report = d.deepened[side]
-            if report is None:
-                continue
-            classes = report.get("classes", 0)
-            # One Q per completion on a Bayesian root, one for an open root.
-            assert report["q"] == (classes if classes else 1)
-            hidden += bool(classes)
-            assert not shown or not classes
-            # More widenings than full probes: some came off the short list alone.
-            short += report["widened"] > report["qfull"]
-    assert hidden > 0 and short > 0

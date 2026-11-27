@@ -11,10 +11,9 @@ from (`deepen.deepen_belief`). What these tests hold:
   column) is refined -- the depth-1 answer's highest weighted ``bern/gap`` -- and its value
   is `_refined_value` in that completion's position, in either side's orientation;
 - **the tree is what it says**: refined root cells hold their branches' values, the rest
-  their depth-1 values, and the root's answer is the Bayesian game's at those prices;
-- **in a game** it fires at the nodes with a bench hidden, the recorded menus are the
-  grown ones, and the nodes with none hidden are deepened as without the ``h``;
-- **it follows its arm** into either seat of a hidden-bench match.
+  their depth-1 values, and the root's answer is the Bayesian game's at those prices.
+
+The game-level tests (``h`` in a `play_game` game) went with `play_game` (IKA-463).
 """
 
 from __future__ import annotations
@@ -23,13 +22,11 @@ import numpy as np
 import pytest
 
 from pokeuraou import deepen as deepen_mod
-from pokeuraou import selfplay
 from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.equilibrium import solve, solve_bayesian
 from pokeuraou.hidden import completions
 from pokeuraou.narrow import narrow
-from pokeuraou.position import Position
 from pokeuraou.search import (
     DEFAULT_SUB_BRANCHES,
     DEFAULT_SUB_LIMIT,
@@ -38,7 +35,7 @@ from pokeuraou.search import (
 )
 from pokeuraou.teams import load_roster
 
-from .test_deepen import _Act, _grown_by_oracle, _hidden_game, _payload, pool, setup  # noqa: F401
+from .test_deepen import _Act, _grown_by_oracle, pool  # noqa: F401
 from .test_hidden_depth2 import LEAF, _played
 
 
@@ -385,83 +382,3 @@ def test_the_bayesian_oracle_widens_with_outside_actions(roster, swap, monkeypat
             assert report.oracle and report.probed > 0 and report.swap == swap
             widened += report.widened
     assert widened > 0
-
-
-@pytest.mark.parametrize("label", ["m60h", "m60s6h", "b60sallh"])
-def test_in_a_game_it_fires_where_a_bench_is_hidden(setup, label) -> None:  # noqa: ANN001, F811
-    game = _hidden_game(setup, label)
-    assert game.deepen == [label, label]
-    hidden = both = 0
-    for d in game.decisions:
-        if d.kind != "move":
-            assert d.deepened is None
-            continue
-        assert d.deepened is not None
-        pos = Position.from_json(d.position)
-        shown = all(len(d.shown[i]) == len(pos.sides[i].pokemon) for i in (0, 1))
-        if shown:
-            # Nothing hidden: the open game's deepening, one tree for both sides.
-            assert "classes" not in d.deepened[0] and d.deepened[1] == d.deepened[0]
-            both += 1
-        else:
-            for side in (0, 1):
-                report = d.deepened[side]
-                assert report["classes"] >= 1
-                if label.startswith("b"):
-                    assert report["expanded"] == 0 and report["depth"] == 1
-                else:
-                    assert report["cells"] > 0
-                assert ("swapped" in report) == ("s" in label[1:])
-            hidden += 1
-        assert len(d.own_policy) == len(d.own_actions) and len(d.foe_policy) == len(d.foe_actions)
-        assert d.own_chosen in d.own_actions and d.foe_chosen in d.foe_actions
-    assert hidden > 0
-    if "s" in label[1:]:
-        # A swap changed some recorded menu away from the width-3 menu it started from.
-        reg = setup[0]
-        moved = 0
-        for d in game.decisions:
-            if d.kind == "move" and d.deepened and d.deepened[0].get("widened") and (
-                "classes" in d.deepened[0]
-            ):
-                pos = Position.from_json(d.position)
-                start = [a.to_choice() for a in narrow(reg, pos, 0, limit=3).actions]
-                moved += d.own_actions != start
-        assert moved > 0
-    again = _hidden_game(setup, label)
-    assert _payload(again) == _payload(game)
-
-
-@pytest.mark.parametrize("label", ["m60", "m60s6", "b60sall"])
-def test_where_nothing_is_hidden_h_plays_the_same_game(setup, label) -> None:  # noqa: ANN001, F811
-    """From a position where each side has shown all four (every bench member one HP
-    down, so the position itself says it has been out), every node is one with no bench
-    hidden: the label with h plays IKA-293's game, byte for byte but for the label."""
-    reg, sheet = setup
-    start = selfplay.position_from_sets(
-        reg, sheet[:4], sheet[2:6], rng=np.random.default_rng(294)
-    )
-    for side in start.sides:
-        for mon in side.pokemon:
-            if mon.active_index is None:
-                mon.hp = mon.maxhp - 1
-
-    def game(which):  # noqa: ANN001, ANN202
-        return selfplay.play_game(
-            reg, np.random.default_rng(294), sheet[:4], sheet[2:6], "test",
-            search_limit=3, max_turns=25, sheets=(sheet, sheet), deepen=which, start=start,
-        )
-
-    plain, hidden = _payload(game(label)), _payload(game(label + "h"))
-    assert plain["deepen"] == [label, label] and hidden["deepen"] == [label + "h"] * 2
-    hidden["deepen"] = plain["deepen"]
-    assert hidden == plain
-    fired = [d for d in plain["decisions"] if d.get("deepened")]
-    assert fired and all("classes" not in d["deepened"][0] for d in fired)
-
-
-def test_without_h_a_hidden_node_stays_at_depth_one(setup) -> None:  # noqa: ANN001, F811
-    game = _hidden_game(setup, "m60s6")
-    for d in game.decisions:
-        if d.deepened is not None:
-            assert "classes" not in d.deepened[0]

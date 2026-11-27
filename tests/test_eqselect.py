@@ -23,7 +23,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pokeuraou import selfplay
 from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
@@ -179,21 +178,6 @@ def setup():  # noqa: ANN201
     return reg, sheet, position_from_sets(reg, sheet[:4], sheet[:4])
 
 
-def _game(setup, **kwargs):  # noqa: ANN001, ANN003, ANN202
-    reg, sheet, _position = setup
-    return selfplay.play_game(
-        reg, np.random.default_rng(196), sheet[:4], sheet[:4], "test",
-        search_limit=3, max_turns=3, sheets=(sheet, sheet), **kwargs,
-    )
-
-
-def _payload(record) -> dict:  # noqa: ANN001
-    payload = record.to_json(objective="hp-share", search_limit=3)
-    payload.pop("searchSeconds", None)
-    payload.pop("engine", None)
-    return payload
-
-
 def test_the_move_node_plays_the_selected_point(setup) -> None:  # noqa: ANN001
     """`belief_solve`'s strategy per side is the label's point of that side's own Bayesian
     game, and its value is the LP's."""
@@ -217,16 +201,3 @@ def test_the_move_node_plays_the_selected_point(setup) -> None:  # noqa: ANN001
     with pytest.raises(ValueError, match="IKA-196"):
         belief_solve(reg, position, ours, theirs, spreads, {0: leaf, 1: leaf},
                      select=("unif", "lp"), depth=(2, 1), **kwargs)
-
-
-def test_lp_named_is_the_default_game(setup) -> None:  # noqa: ANN001
-    assert _payload(_game(setup)) == _payload(_game(setup, eq_select="lp"))
-    # The comparison's own control: another label plays another game.
-    assert _payload(_game(setup)) != _payload(_game(setup, eq_select="qre0.2"))
-
-
-def test_a_label_that_cannot_be_honoured_stops(setup) -> None:  # noqa: ANN001
-    with pytest.raises(ValueError, match="IKA-196"):
-        _game(setup, eq_select=("unif", "lp"), deepen=("m8", "none"))
-    with pytest.raises(ValueError, match="equilibrium selection"):
-        _game(setup, eq_select="nash")

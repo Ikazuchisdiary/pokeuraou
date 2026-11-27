@@ -8,9 +8,9 @@ not move a single decision where the agent ships. These pin what the new reading
   open one generalised, not a different search that happens to share a name;
 - with a real belief it refines cells per completion and moves the answer (the positive
   control: zero refined cells at depth 1, and on master, where the call could not be made);
-- depth 1 is the old answer to the bit, and a game at depth 1 records nothing new;
-- `play_game` takes depth 2 under `sheets` only in the restricted reading, and the arm's
-  setting reaches its own side in both seats of a pool match.
+- depth 1 is the old answer to the bit.
+
+The game-level tests (`play_game` at depth 2 under `sheets`) went with `play_game` (IKA-463).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from pokeuraou.narrow import narrow
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.position import Position
 from pokeuraou.search import belief_solve, search
-from pokeuraou.selfplay import play_game, position_from_sets
+from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
 from ._port import resolve_turn
@@ -195,35 +195,3 @@ def test_depth_1_is_the_old_answer_to_the_bit(roster) -> None:  # noqa: ANN001
         assert after[side].value == before[side].value
         assert after[side].unmodelled == before[side].unmodelled
         assert after[side].refined == 0
-
-
-def _game(roster, **kwargs):  # noqa: ANN001, ANN003, ANN202
-    reg = roster.reg
-    sheet = list(roster.sets)[:6]
-    return play_game(
-        reg, np.random.default_rng(11), sheet[:4], sheet[2:6], "probe",
-        search_limit=4, max_turns=3, sheets=(sheet, sheet), **kwargs,
-    )
-
-
-def test_a_hidden_game_plays_depth_2_and_records_it(roster) -> None:  # noqa: ANN001
-    shallow = _game(roster)
-    deep = _game(roster, depth=(2, 1), solve_restricted=(True, False))
-    assert deep.information == "hidden-bench"
-    assert deep.depth == [2, 1] and deep.solve_restricted == [True, False]
-    notes = [n for n in deep.unmodelled if "hidden-bench strategy read" in n]
-    assert notes, "a depth-2 hidden game refined nothing"
-    assert not any("hidden-bench strategy read" in n for n in shallow.unmodelled)
-    as_json = deep.to_json(objective="hp-share", search_limit=4)
-    assert as_json["depth"] == [2, 1] and as_json["solveRestricted"] == [True, False]
-    plain = shallow.to_json(objective="hp-share", search_limit=4)
-    assert "depth" not in plain and "solveRestricted" not in plain
-
-
-def test_hidden_depth_2_needs_the_restricted_reading(roster) -> None:  # noqa: ANN001
-    with pytest.raises(ValueError, match="hidden bench"):
-        _game(roster, depth=(2, 2))
-    with pytest.raises(ValueError, match="hidden bench"):
-        _game(roster, depth=(2, 1), solve_restricted=(True, True))
-    with pytest.raises(ValueError, match="hidden bench"):
-        _game(roster, depth=3, solve_restricted=True)

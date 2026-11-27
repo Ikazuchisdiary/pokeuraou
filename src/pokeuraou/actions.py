@@ -312,23 +312,6 @@ _TERRAIN_PULSE = {"electricterrain": "Electric", "grassyterrain": "Grass",
                   "mistyterrain": "Fairy", "psychicterrain": "Psychic"}
 
 
-def team_ally_benefits(reg: Regulation, sets) -> list[tuple[int, int, str]]:  # noqa: ANN001
-    """(user, ally, move) of a team sheet where `ally_benefits` holds, read off the sets'
-    abilities and items (`benefit` before a battle: which teams the mode can change)."""
-    out: list[tuple[int, int, str]] = []
-    for u, user in enumerate(sets):
-        for a, ally in enumerate(sets):
-            if a == u:
-                continue
-            for move_id in user.moves:
-                move = reg.moves.get(move_id)
-                if move is not None and move.target == "normal" and ally_benefits(
-                    reg, move, user, ally
-                ):
-                    out.append((u, a, move_id))
-    return out
-
-
 def names_ally(reg: Regulation, action: SideAction) -> bool:
     """Whether a slot of ``action`` aims a `normal` move at its ally (IKA-181)."""
     for slot in action.slots:

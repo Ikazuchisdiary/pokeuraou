@@ -21,45 +21,37 @@ The positions recorded carry both spreads. Hidden information is handled *outsid
 value function: at analysis time the belief layer already averages the matrix over spread
 particles, so the function only has to answer "who wins from here", and asking it to also
 represent our uncertainty would duplicate machinery that exists and is tested.
+
+IKA-463 removed this module's game loop (`play_game`): generation's and the board's games are
+the Rust workers' (`rust/src/worker.rs`, `boardworker.rs`). What is left is the record
+(`GameRecord`, `Decision`), the turn-1 position, and the nodes a person's game asks
+(`humanplay`): the menus, the belief, the self-switch and the replacement.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
-from time import perf_counter
 from typing import Any, Protocol
 
 import numpy as np
 
 from . import port, qrank, rank_scores, rustnode, timing
 from .actions import (
-    ALLY_TARGET_MODES,
-    MoveAction,
     SideAction,
-    baton_slots,
-    names_ally,
-    side_actions,
     switch_actions_after_faint,
-    uses_baton,
 )
-from .actions import ally_targets as ally_scope
-from .actions import hold_baton as baton_scope
 from .budget import Budget
-from .deepen import DEFAULT_DEEPEN, deepen_spec
-from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select
-from .equilibrium import EquilibriumError
+from .eqselect import DEFAULT_EQ_SELECT
 from .fold import TurnLeaves
 from .hidden import (
     DEFAULT_BENCH_DROP,
     completions,
     drop_light,
     identity,
-    parse_bench_drop,
     seen_identities,
     seen_slots,
     shown_species,
@@ -79,13 +71,11 @@ from .qrank import is_q
 from .regulation import STAT_IDS, Regulation, repo_root
 from .rustnode import PortPause, PortTurn, ResumedTurn
 from .search import (
-    belief_solve,
     believed_ranking,
     leaf_ranking,
     parse_rank_fill,
     rank_fill_covers,
     resolve_rank_fill,
-    search,
 )
 from .selection_book import (
     BenchPrior,
@@ -716,70 +706,9 @@ def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
     return int(rng.choice(len(weights), p=weights / total))
 
 
-def _forced_mega_choice(
-    pos: Position,
-    side: int,
-    species: str,
-    menu: Sequence[SideAction],
-    strategy: np.ndarray,
-    rng: np.random.Generator,
-) -> tuple[int | None, dict[str, Any]] | None:
-    """The move that Mega Evolves ``species`` at this node (``force_mega``, IKA-419f).
-
-    None while the species is not standing on the field (the forcing waits for its first
-    turn there). Otherwise ``(index, note)``: ``index`` is a menu row drawn from the side's
-    equilibrium conditioned on the rows that declare the Mega on that Pokemon (rule
-    ``mixture``), or the first such row in the menu's order when they all carry probability
-    0 (rule ``menu-order``), or None when the menu has no such row (rule ``unavailable``:
-    the Mega is used, or the slot cannot, and the search's own draw stands).
-    """
-    own = pos.sides[side]
-    slots = {
-        slot for slot, party in enumerate(own.active)
-        if party is not None and not own.pokemon[party].fainted
-        and own.pokemon[party].species == species
-    }
-    if not slots:
-        return None
-    wanted = [
-        i for i, action in enumerate(menu)
-        if any(
-            isinstance(a, MoveAction) and a.mega and a.slot in slots for a in action.slots
-        )
-    ]
-    if not wanted:
-        return None, {"rule": "unavailable", "mass": 0.0}
-    weights = np.asarray(strategy, dtype=np.float64)[wanted]
-    total = float(weights.sum())
-    mass = total / max(float(np.asarray(strategy, dtype=np.float64).sum()), 1e-300)
-    if total > 1e-12:
-        pick = wanted[int(rng.choice(len(wanted), p=weights / total))]
-        return pick, {"rule": "mixture", "mass": mass}
-    return wanted[0], {"rule": "menu-order", "mass": mass}
-
-
 #: Which completion of the opponent's unseen slots a leaf or policy ranking reads
 #: (`_menus.views`). "heaviest" ships; "first" is the rule before IKA-143.
 RANK_VIEWS = ("heaviest", "first")
-
-
-def _belief_deepen(
-    cells: int, how: dict[str, bool], outside: tuple | None, restricted: bool = False
-) -> dict[str, Any]:
-    """`belief_solve`'s ``deepen`` entry for one side (IKA-294): its cells, reading,
-    swap, Q-narrowed probe (IKA-322) and oracle candidates (side 0's, side 1's), as
-    `search` takes them."""
-    return {
-        "cells": cells,
-        "reading": "breadth" if how["breadth_only"] else "restricted" if restricted else "mixed",
-        "swap": how["swap"],
-        "q_probe": how["q_probe"],
-        "levels": how["levels"],
-        "child_q": how["child_q"],
-        "discount": how["discount"],
-        "outside": outside,
-        **({"sub_limit": how["sub_limit"]} if "sub_limit" in how else {}),
-    }
 
 
 @cache
@@ -812,52 +741,6 @@ def ranking_view(
     if used is not None:
         used[side] = (index, tuple(items[index].species))
     return items[index].position
-
-
-def _decide(  # noqa: PLR0913 - the node's pieces
-    reg: Regulation,
-    pos: Position,
-    limits: tuple[int, int],
-    own_leaf: LeafEvaluator,
-    foe_leaf: LeafEvaluator,
-    budget: Budget,
-    rank_by_leaf: bool,
-    policy: Any,  # noqa: ANN401
-    spreads: dict[int, list] | None,
-    same_menu: bool,
-    cells: tuple[int, int],
-    depths: Sequence[int],
-    selects: tuple[str, str],
-    widened: bool,
-    rank_view: str,
-    used: dict[int, tuple[int, tuple[str, ...]]],
-    rank_fill: str | None,
-) -> tuple[list[SideAction], list[SideAction], Any] | None:
-    """IKA-457 stage 2.4: a hidden-bench move node's menus (`_menus`, a `q-nocover` fill) and the
-    node over them (`belief_solve`'s `belief_payoffs`) in one request to the port, as
-    (ours, theirs, the node) -- or None where the two are built apart, as before. The node is
-    for `belief_solve(..., prebuilt=...)`, and stands for the one both sides share: the two
-    sides search with one leaf over one menu pair, undeepened, at depth 1."""
-    if (
-        spreads is None or not same_menu or widened
-        or tuple(cells) != (0, 0) or own_leaf is not foe_leaf
-        or tuple(depths) != (1, 1) or tuple(selects) != (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT)
-        or policy is not None or not rank_by_leaf
-    ):
-        return None
-    fill = resolve_rank_fill(rank_fill, True)
-    if not is_q(fill) or rank_fill_covers(fill):
-        return None
-    from . import beliefnode, rootmenus
-
-    views = [ranking_view(pos, spreads, side, rank_view, used) for side in (0, 1)]
-    planned = rootmenus.plan(reg, pos, views, limits, fill, server_key="qServer")
-    if planned is None:
-        return None
-    node = beliefnode.fused_node(reg, pos, planned, budget, spreads, own_leaf, (0, 1))
-    if node is None:
-        return None
-    return planned.menus[0], planned.menus[1], node
 
 
 def _menus(
@@ -1031,17 +914,6 @@ def _menus(
     return own, foe
 
 
-@contextmanager
-def _agent_scope(
-    binary: Path | None, allies: str, hold: tuple[str | None, int] = (None, 0)
-) -> Iterator[None]:
-    """One agent's work at a move node: read through its port executable (IKA-413) with its
-    ally targets listed (IKA-181) and, when ``hold`` names a species, its Baton Pass held
-    back until that species' Special Attack and Special Defense are both +1 (IKA-419g)."""
-    with rustnode.binary_scope(binary), ally_scope(allies), baton_scope(*hold):
-        yield
-
-
 def _one_view(views: list[tuple[Position, float]]) -> Position:
     """The one position of `_menus.views` (a Q ranks from one view, as the leaf does)."""
     (at, _weight), = views
@@ -1093,21 +965,6 @@ def _believed(
     return out
 
 
-def _rank_views(
-    own_views: dict[int, tuple[int, tuple[str, ...]]],
-    foe_views: dict[int, tuple[int, tuple[str, ...]]] | None,
-) -> list[list[Any] | None] | None:
-    """`Decision.rank_views` from each agent's own construction of its own menu.
-
-    Side 0's menu is always side 0's construction; side 1's is its own when it built one
-    and otherwise the shared one.
-    """
-    got = [own_views.get(0), (foe_views if foe_views is not None else own_views).get(1)]
-    if got == [None, None]:
-        return None
-    return [None if g is None else [g[0], list(g[1])] for g in got]
-
-
 def _bench_weights(
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None,
     side: int,
@@ -1141,995 +998,6 @@ def _bench_weights(
             record.unmodelled.append(note)
         return None
     return weights
-
-
-def play_game(
-    reg: Regulation,
-    rng: np.random.Generator,
-    own: list[SampledSet],
-    foe: list[SampledSet],
-    foe_archetype: str,
-    *,
-    objective: Objective = HP_SHARE,
-    search_limit: int | tuple[int, int] = SEARCH_LIMIT,
-    max_turns: int = MAX_TURNS,
-    evaluate: LeafEvaluator | None | tuple[LeafEvaluator | None, LeafEvaluator | None] = None,
-    selection: tuple[list[str], list[str], tuple[int, ...], tuple[int, ...]] | None = None,
-    depth: int | tuple[int, int] = 1,
-    rank_by_leaf: bool | tuple[bool, bool] = False,
-    policy: Any | tuple[Any, Any] = None,
-    solve_sparsely: bool | tuple[bool, bool] = False,
-    solve_restricted: bool | tuple[bool, bool] = False,
-    start: Position | None = None,
-    first_action: str | None = None,
-    sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]],
-    bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
-    one_agent: bool = True,
-    rank_view: str | tuple[str, str] = "heaviest",
-    rank_fill: str | None | tuple[str | None, str | None] = None,
-    bench_drop: str | tuple[str, str] = DEFAULT_BENCH_DROP,
-    deepen: str | tuple[str, str] = DEFAULT_DEEPEN,
-    knockouts: bool | tuple[bool, bool] = False,
-    rust_binary: Path | str | None | tuple[Path | str | None, Path | str | None] = None,
-    ally_targets: str | tuple[str, str] = "off",
-    eq_select: str | tuple[str, str] = DEFAULT_EQ_SELECT,
-    force_mega: str | None | tuple[str | None, str | None] = None,
-    hold_baton: str | None | tuple[str | None, str | None] = None,
-    hidden_game: Any = None,  # noqa: ANN401 - a `hiddenstep.Game` the port already holds
-) -> GameRecord:
-    """Plays one game to a result, sampling both sides from the turn's equilibrium.
-
-    ``hidden_game`` (IKA-458 stage 3.5) is this game's sheets and priors as the port made them
-    when it prepared the game (`prepGame`), for `hiddenStep` to read there; None has this call
-    define them to the port from ``sheets`` and ``bench_prior``.
-
-    ``search_limit`` may be a pair, giving each side its own number of candidates. Equal
-    values are the training setting; an unequal pair is a diagnostic -- if one side wins
-    less when searched just as widely, the imbalance was in the search and not the teams.
-
-    ``depth`` takes a pair for the same reason, and it is how depth-2 is measured against
-    depth-1: one side looks a ply further and the win rate says what that bought. Depth 1
-    on both sides is the search this project has always had.
-
-    ``start`` resumes from a position instead of building one from the two teams, which is
-    how a phase that self-play rarely reaches gets sampled. Games average 9.4 turns and
-    only 5.4% of them reach turn 15, so a value function sees the endgame -- where a stall
-    plan finally pays -- in one position in twenty. Resuming from recorded turn-12
-    positions and playing them out produces real outcomes in that phase without waiting
-    for self-play to arrive there on its own. The label stays sound because the game is
-    still played to a win or a loss; what changes is which positions get labelled.
-
-    ``sheets`` are the two sides' *sixes*. Given them, neither search is shown the other
-    side's unplayed bench: each solves over every four the opponent's sheet still allows,
-    as the Bayesian game it is. Omitted, the search sees the opponent's whole four, which
-    is what every game recorded before this did -- and what 47.4% of decisions had no
-    right to. The two are different agents and `provenance` says which.
-
-    The bench is always hidden (IKA-460 removed the open game, and with it
-    ``open_information``).
-
-    ``one_agent`` says whether the two sides are one agent playing itself, which is what
-    self-play is and what a match is not. It changes no decision; it changes only how
-    `search_seconds` charges work that served both sides at once. One agent solving one
-    matrix gets both of its moves out of it, so each move carries half. Two agents that
-    happen to hold the same leaf each get one move out of it, and each would have paid
-    all of it in a game it played alone -- so each is charged all of it, and the field
-    keeps meaning "what this agent spends on a move" whether or not the caller was able
-    to share the object. A match that shares its arms and leaves this True reports half
-    the per-move cost of the configuration it is pricing.
-
-    ``solve_restricted`` takes a pair and is a property of depth 2 alone: it says whether
-    the refined cells are read as the restricted game they form, or left in the full
-    matrix the way the search that IKA-12 played out did. At depth 1 it changes nothing,
-    which is what makes it safe to carry on an arm that is not deep. Under ``sheets`` it is
-    the only depth-2 reading there is: `belief_solve` refines per completion of the
-    opponent's bench and reads the restricted Bayesian game (IKA-111), so depth 2 there
-    takes ``solve_restricted=True`` and the mixed reading stops (and depth 1 there takes it
-    False: a flag that would change nothing is refused, not recorded). Only move nodes go deeper;
-    the replacement nodes stay at depth 1, as in the open game.
-
-    ``solve_sparsely`` takes a pair too, and it is the one whose two values are supposed
-    to be *equally correct*: both settle on an equilibrium of the same game, verified to
-    an exploitability of 7.7e-08. What differs is which vertex of a degenerate optimum
-    they land on, and a maximin strategy only guarantees the value -- against an opponent
-    who is not playing the equilibrium, two equilibria can take different amounts. That is
-    what a mismatched pair measures.
-
-    ``rank_view`` takes a pair too: which completion of the opponent's unseen slots each
-    agent's leaf or policy ranking reads under a hidden bench (`RANK_VIEWS`, IKA-143).
-    "heaviest" ships; "first" is the enumeration-order rule every game before it played.
-    It changes nothing with the damage ranking.
-
-    ``rank_fill`` takes a pair too: how each agent's leaf ranking fills its cells --
-    ``refs<N>`` replies at the matrix budget, ``-fast`` for `Budget.fast` (IKA-268). It
-    changes nothing with the damage or policy ranking. Unnamed (None, per side), a
-    leaf-ranked side plays `search.SHIPPED_RANK_FILL` by the process's Q and stops
-    without one (IKA-341); a side that reads no fill keeps `search.DEFAULT_RANK_FILL`,
-    so its record carries no ``rankFill``. M-B's roster path names
-    `search.ROSTER_RANK_FILL`.
-
-    ``bench_drop`` takes a pair too: which completions of the opponent's unseen slots
-    each agent's belief leaves out at a move node (`hidden.parse_bench_drop`, IKA-283).
-    "none" ships.
-
-    ``knockouts`` (a pair too) puts the knock-out branch in that side's matrix budget
-    (`Budget.enumerate_knockouts`, IKA-359): off ships. Two sides that differ build and
-    solve their own menus, as for any other setting that differs.
-
-    ``rust_binary`` (a pair too, IKA-413) has that side's move-node search -- its menus and
-    its solves -- read through that port executable instead of the process's own; the game
-    itself, the replacements and the mid-turn choices keep the process's. None is no change
-    at all. For measuring a port change against the port before it.
-
-    ``eq_select`` (a pair too, IKA-196) is which point of its optimal set each side plays,
-    at its move and replacement nodes (`eqselect.parse_eq_select`): ``lp``, the LP's
-    vertex, ships and changes nothing. Another label goes with depth 1, no deepening and
-    the full-matrix solve on that side; it replaces the strategy a side samples from and
-    never a value.
-
-    ``ally_targets`` (a pair too, IKA-181) is which ally targets of `normal` moves that
-    side's move-node menus list (`actions.ALLY_TARGET_MODES`): the side's menus and solves
-    run under it (`actions.ally_targets`), both sides' pools in them, as for the other
-    per-side settings. "off" ships.
-
-    ``force_mega`` (a pair too, IKA-419f) names the species a side Mega Evolves at the first
-    move node where it stands on the field with the Mega still unused: the side's move is
-    drawn from its own equilibrium restricted to the actions that Mega Evolve it (the
-    mixture conditioned on them; when they all carry probability 0, the first of them in
-    the menu's order). Everything else is the search's own; the other side is not told.
-    None ships.
-
-    ``hold_baton`` (a pair too, IKA-419g) names the species whose Baton Pass a side leaves out
-    of its candidates (`actions.hold_baton`) while that species' Special Attack and Special
-    Defense are not both at +1 or more. The side's own menus are built without those actions,
-    so its search never prices them; the other side's model of it is not told. None ships.
-
-    ``deepen`` takes a pair too: how each agent deepens its move decisions best first
-    after the depth-1 solve (`deepen.parse_deepen`, IKA-33): ``none`` ships and is the
-    search unchanged, ``m<N>`` / ``r<N>`` spend N cells and read the root whole /
-    restricted. Under a hidden bench it applies only where neither
-    side's bench is hidden -- the node is then the open game's node, and it is solved as
-    one (`search`) instead of as a one-completion Bayesian game; a node with a bench
-    still hidden stays at depth 1 (`belief_solve` has no depth, IKA-111). It goes with
-    depth 1 and the full-matrix solve only. ``m<N>o<W>`` / ``m<N>oall`` also widen the
-    root by its double oracle (IKA-293) over the rest of the agent's own width-W menu
-    (or every legal action), at the same nodes; the recorded menus are then the grown
-    ones the strategies index. A label ending in ``h`` (IKA-294) deepens and widens the
-    nodes with a bench still hidden too: each side that carries it spends its budget on
-    its own Bayesian game (`deepen.deepen_belief`, inside `belief_solve`), and the nodes
-    with no bench hidden are deepened as without the ``h``.
-    """
-    # Closes the stretch since the last game's last record (IKA-98); the first one ends startup.
-    timing.decided("between")
-    from . import hiddenstep
-
-    limits = (search_limit, search_limit) if isinstance(search_limit, int) else search_limit
-    depths = (depth, depth) if isinstance(depth, int) else depth
-    ranked = (
-        (rank_by_leaf, rank_by_leaf)
-        if isinstance(rank_by_leaf, bool)
-        else rank_by_leaf
-    )
-    sparse = (
-        (solve_sparsely, solve_sparsely)
-        if isinstance(solve_sparsely, bool)
-        else solve_sparsely
-    )
-    restricted = (
-        (solve_restricted, solve_restricted)
-        if isinstance(solve_restricted, bool)
-        else solve_restricted
-    )
-    policies = policy if isinstance(policy, tuple) else (policy, policy)
-    leaves = evaluate if isinstance(evaluate, tuple) else (evaluate, evaluate)
-    views_rule = (rank_view, rank_view) if isinstance(rank_view, str) else tuple(rank_view)
-    for rule in views_rule:
-        if rule not in RANK_VIEWS:
-            raise ValueError(f"rank_view {rule!r} is not one of {RANK_VIEWS}")
-    given = (
-        (rank_fill, rank_fill) if rank_fill is None or isinstance(rank_fill, str)
-        else tuple(rank_fill)
-    )
-    # IKA-341: an unnamed side resolves as generation's tools do, per side.
-    fills = tuple(
-        resolve_rank_fill(given[side], bool(ranked[side]) and policies[side] is None)
-        for side in (0, 1)
-    )
-    for fill in fills:
-        parse_rank_fill(fill)
-    drops = (bench_drop, bench_drop) if isinstance(bench_drop, str) else tuple(bench_drop)
-    for drop in drops:
-        parse_bench_drop(drop)
-    deepens = (deepen, deepen) if isinstance(deepen, str) else tuple(deepen)
-    specs = [deepen_spec(label) for label in deepens]
-    kos = (knockouts, knockouts) if isinstance(knockouts, bool) else tuple(knockouts)
-    binaries = tuple(
-        None if b is None else Path(b)
-        for b in (
-            (rust_binary, rust_binary)
-            if rust_binary is None or isinstance(rust_binary, (str, Path))
-            else rust_binary
-        )
-    )
-    forced_species = (
-        (force_mega, force_mega) if force_mega is None or isinstance(force_mega, str)
-        else tuple(force_mega)
-    )
-    holds = (
-        (hold_baton, hold_baton) if hold_baton is None or isinstance(hold_baton, str)
-        else tuple(hold_baton)
-    )
-    allies = (ally_targets, ally_targets) if isinstance(ally_targets, str) else tuple(ally_targets)
-    for mode in allies:
-        if mode not in ALLY_TARGET_MODES:
-            raise ValueError(f"ally_targets {mode!r} is not one of {ALLY_TARGET_MODES}")
-
-    def scope(side: int) -> Any:  # noqa: ANN401
-        """Side `side`'s agent: its port executable, its ally targets and its Baton hold."""
-        return _agent_scope(binaries[side], allies[side], (holds[side], side))
-
-    cells = (specs[0].cells, specs[1].cells)
-    deep_restricted =(specs[0].reading == "restricted", specs[1].reading == "restricted")
-    # The root's double oracle's width per side (IKA-293), or None; whether it swaps,
-    # and whether it runs alone, without deepening.
-    oracles = (specs[0].oracle, specs[1].oracle)
-    how = [
-        {
-            "swap": spec.swap, "breadth_only": spec.reading == "breadth",
-            # The oracle's probe narrowed by a Q (IKA-322's q<k>), or None.
-            "q_probe": spec.q_probe,
-            # The depth guard (g<L>) and the children's menus by a Q (c<k>), IKA-307.
-            "levels": spec.levels, "child_q": spec.child_q,
-            # The depth discount (d<P>), IKA-342.
-            "discount": spec.discount,
-            # The children's width by damage (w<k>), IKA-362; the search's own otherwise.
-            **({"sub_limit": spec.sub_limit} if spec.sub_limit is not None else {}),
-        }
-        for spec in specs
-    ]
-    selects = (eq_select, eq_select) if isinstance(eq_select, str) else tuple(eq_select)
-    for side in (0, 1):
-        parse_eq_select(selects[side])
-        if selects[side] != DEFAULT_EQ_SELECT and (
-            cells[side] or depths[side] != 1 or sparse[side] or restricted[side]
-        ):
-            raise ValueError(
-                f"eq_select {selects[side]!r} on side {side} goes with depth 1, no deepening "
-                "and the full-matrix solve (IKA-196)"
-            )
-    for side in (0, 1):
-        if cells[side] and (depths[side] != 1 or sparse[side] or restricted[side]):
-            raise ValueError(
-                f"deepen {deepens} on side {side} goes with depth 1 and the full-matrix "
-                f"solve, not depth {depths[side]} / solve_sparsely {sparse[side]} / "
-                f"solve_restricted {restricted[side]} (the label carries its own reading)"
-            )
-    if (
-        sparse != (False, False)
-        # Depth 2 in the restricted reading, and the flag nowhere else: at depth 1 it
-        # would do nothing, and a flag that does nothing is refused here, not recorded.
-        or any(d not in (1, 2) or bool(r) != (d == 2) for d, r in zip(depths, restricted, strict=True))
-    ):
-        # `belief_solve` took none of these, so under a hidden bench they were accepted,
-        # recorded per side in the provenance, and then dropped. An argument that is
-        # silently ignored is how every measurement defect found today was built: the
-        # caller reads the flag it passed, the record repeats it, and nothing played it.
-        # Since IKA-111 it takes depth 2 in the restricted reading, and only that.
-        raise ValueError(
-            f"depth {depths}, solve_sparsely {sparse} and solve_restricted "
-            f"{restricted} cannot be honoured with a hidden bench -- belief_solve takes "
-            "depth 1 without solve_restricted, or depth 2 with it (IKA-111), and no "
-            "sparse solve. "
-            "Pass one of those."
-        )
-    record = GameRecord(
-        own_team=[_set_json(reg, s) for s in own],
-        foe_team=[_set_json(reg, s) for s in foe],
-        foe_archetype=foe_archetype,
-    )
-    if selection is not None:
-        own_six, foe_six, own_pick, foe_pick = selection
-        record.own_six = list(own_six)
-        record.foe_six = list(foe_six)
-        record.own_pick = list(own_pick)
-        record.foe_pick = list(foe_pick)
-    record.information = "hidden-bench"
-    record.ranking = (
-        "policy" if policies[0] is not None else "leaf" if ranked[0] else "damage"
-    )
-    record.rank_view = list(views_rule)
-    record.rank_fill = list(fills)
-    record.bench_drop = list(drops)
-    record.deepen = list(deepens)
-    record.knockouts = [bool(k) for k in kos]
-    record.rust_binary = [None if b is None else _fingerprint(b) for b in binaries]
-    record.ally_targets = list(allies)
-    record.force_mega = list(forced_species)
-    record.hold_baton = list(holds)
-    record.baton_hold = [
-        None if holds[side] is None
-        else {"held": 0, "held_legal": 0, "open": 0, "open_menu": 0, "leaks": 0}
-        for side in (0, 1)
-    ]
-    record.depth = [int(d) for d in depths]
-    record.solve_restricted = [bool(r) for r in restricted]
-    record.eq_select = list(selects)
-    pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
-    # Each side's matrix budget; `budget` is side 0's, and side 1's is the same object
-    # unless its knock-out setting differs (IKA-359).
-    budget = Budget.matrix()
-    budgets = (
-        replace(budget, enumerate_knockouts=True) if kos[0] else budget,
-        replace(budget, enumerate_knockouts=True) if kos[1] else budget,
-    )
-    budget = budgets[0]
-    # Who each side has shown, accumulated across turns. A Pokemon that came in and went
-    # back out is still known, and the position alone stops saying so -- so this is
-    # carried rather than recomputed from the board each time.
-    #
-    # Carried as identities, and turned into this position's slots at every decision.
-    # It used to carry the slots themselves, and `_do_switch` renumbers those: a lead that
-    # went back to the bench unharmed took the index of whoever came in, which nobody had
-    # marked, and the next decision's belief offered worlds without it -- 15.8% of the
-    # move decisions and 23.6% of the replacements in the shipping pool (IKA-117).
-    seen: list[frozenset[str]] = [frozenset(), frozenset()]
-    # IKA-458 stage 3.4: this game's sheets and priors, numbered for the port (stage 3.5: the
-    # port may have made them itself, and the caller says so).
-    # Which two each side led with, read off the turn-1 position and carried as names for
-    # the same reason `seen` is (IKA-118). The bench belief conditions on it: a selection
-    # is ordered, and one that brought a lead but planned it for the back is not what this
-    # side played. A game resumed from a later `start` has no turn 1 to read, and stays
-    # None -- conditioned on `seen` alone, as before.
-    leads: list[frozenset[str] | None] = [None, None]
-    if pos.turn == 1:
-        leads = [
-            frozenset(
-                shown_species(
-                    pos,
-                    i,
-                    frozenset(
-                        mon.slot
-                        for mon in pos.sides[i].pokemon
-                        if mon.active_index is not None
-                    ),
-                )
-            )
-            for i in (0, 1)
-        ]
-        # The same pair as identities, for the record only (IKA-127).
-        record.leads = [
-            [
-                identity(mon)
-                for mon in sorted(
-                    (m for m in pos.sides[i].pokemon if m.active_index is not None),
-                    key=lambda m: m.active_index,
-                )
-            ]
-            for i in (0, 1)
-        ]
-    else:
-        record.leads = [None, None]
-
-    steps_left = max_turns * 2
-    # IKA-458 stage 3.6d: a game nobody prepared in the port (a board's) is defined to it here,
-    # as the loop below would at its first step. `one_agent` only prices a side's search when no
-    # hidden bench is solved for both, and a hidden bench is the only game this road plays.
-    if hidden_game is None:
-        hidden_game = hiddenstep.Game.of(sheets, bench_prior if bench_prior is not None else (None, None))
-    if (
-        hidden_game is not None
-        and first_action is None
-        and all(f is None for f in forced_species) and all(h is None for h in holds)
-        and allies == ("off", "off") and binaries == (None, None)
-        and set(drops) == {DEFAULT_BENCH_DROP} and tuple(cells) == (0, 0)
-        and oracles == (None, None) and tuple(depths) == (1, 1) and sparse == (False, False)
-        and restricted == (False, False) and selects == (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT)
-        and policies == (None, None) and ranked == (True, True) and views_rule == ("heaviest", "heaviest")
-        and budgets[1] == budgets[0] and fills[1] == fills[0] and leaves[0] is leaves[1]
-        and is_q(fills[0]) and not rank_fill_covers(fills[0])
-    ):
-        # IKA-458 stage 3.6b: as many of the game's steps as the port plays, in one request.
-        from . import playgame
-
-        ready = playgame.prepare(
-            reg, pos, leaves, limits, fills[0], budgets[0], hidden_game.number, seen, leads
-        )
-        if ready is not None and not pos.ended:
-            played = playgame.play(
-                reg, rng, pos, record, ready, steps_left, seen, leads, hidden_game
-            )
-            if played is not None:
-                pos, seen = played.position, played.seen
-                steps_left -= played.steps
-                if played.stop == "unresolved":
-                    steps_left = 0
-
-    for _step in range(steps_left):
-        if pos.ended:
-            break
-
-        # IKA-458 stage 3.4: the seen identities and slots and each side's completions from
-        # the port, where it holds positions and nothing makes the belief another's.
-        if hidden_game is None:
-            hidden_game = hiddenstep.Game.of(
-                sheets, bench_prior if bench_prior is not None else (None, None)
-            )
-        stepped = hiddenstep.step(reg, pos, hidden_game, seen, leads)
-        if stepped is not None:
-            seen, shown, recorded_shown = stepped.seen, stepped.shown, stepped.recorded
-            for note in stepped.notes:
-                if note not in record.unmodelled:
-                    record.unmodelled.append(note)
-        else:
-            seen = [seen_identities(pos, i, seen[i]) for i in (0, 1)]
-            shown = [seen_slots(pos, i, seen[i]) for i in (0, 1)]
-            recorded_shown = _shown_record(pos, seen)
-        owed = port.replacements_needed(reg, pos)
-        if any(owed[0]) or any(owed[1]):
-            pos = _do_replacement_node(
-                reg, rng, pos, owed, record, leaves,
-                sheets=sheets, shown=shown, bench_prior=bench_prior, leads=leads,
-                recorded_shown=recorded_shown, selects=selects,
-                stepped=stepped,
-                hidden_number=hidden_game.number if stepped is not None and hidden_game is not None else None,
-            )
-            continue
-
-        own_leaf = leaves[0] if leaves[0] is not None else objective.batch
-        foe_leaf = leaves[1] if leaves[1] is not None else objective.batch
-        # Built before the menus, because the menus are ranked from it: a leaf or a policy
-        # ordering candidates from the true position would pick *which actions get a
-        # number* using a bench nobody has seen, however carefully the matrix over them is
-        # then solved.
-        spreads = None
-        if stepped is not None:
-            if stepped.error is not None:
-                record.unmodelled.append(f"hidden bench: {stepped.error}")
-                break
-            spreads = _believed(stepped.spreads, drops)
-        else:
-            try:
-                spreads = {
-                    side: completions(
-                        reg, pos, side, sheets[side], seen=shown[side],
-                        weights=_bench_weights(
-                            bench_prior, side, pos, shown[side], record, leads[side]
-                        ),
-                    )
-                    for side in (0, 1)
-                }
-            except ValueError as problem:
-                record.unmodelled.append(f"hidden bench: {problem}")
-                break
-            spreads = _believed(spreads, drops)
-        # Whether the two agents build the SAME menu, which is the only case where one
-        # construction may serve both.
-        #
-        # This read `ranked[1] == ranked[0] and policies[1] is policies[0]` and left the
-        # leaf out. Two arms both passing --rank-leaf with DIFFERENT models rank by
-        # different numbers, so they do not have one menu -- and the comment three lines
-        # below says exactly that ("a ranking that differs is a different menu") while the
-        # condition could not see it. Every model-against-model match run with
-        # `--rank-leaf --baseline-rank-leaf` had the column player choosing from a menu
-        # the row player's value function picked; about 25,000 recorded games.
-        #
-        # The leaf only reaches the menu through `leaf_ranking`, so it matters when no
-        # policy is given and the ranking is by leaf -- and not otherwise.
-        same_menu = (
-            ranked[1] == ranked[0]
-            and budgets[1] == budgets[0]
-            # Two ports are two answers: each side builds its own menu and solve (IKA-413).
-            and binaries[1] == binaries[0]
-            # Ally targets listed otherwise are other pools, so other menus (IKA-181).
-            and allies[1] == allies[0]
-            # A Baton Pass held back is another pool too (IKA-419g).
-            and holds[1] == holds[0]
-            and policies[1] is policies[0]
-            and views_rule[1] == views_rule[0]
-            # A leaf ranking filled another way orders another menu (IKA-268).
-            and (fills[1] == fills[0] or policies[0] is not None or not ranked[0])
-            and (
-                policies[0] is not None
-                or not ranked[0]
-                or leaves[1] is leaves[0]
-            )
-        )
-
-        # Which sides widen the root by the double oracle here (IKA-293): where they
-        # deepen at all -- every move node of the open game, and the nodes with no bench
-        # hidden (the `exact` below).
-        widens = (False, False)
-        if oracles != (None, None):
-            open_node = spreads is None or all(
-                len(items) == 1 and items[0].exact for items in spreads.values()
-            )
-            widens = tuple(
-                # A label ending in h widens where a bench is hidden too (IKA-294).
-                (open_node or specs[side].hidden)
-                and cells[side] > 0
-                and oracles[side] is not None
-                for side in (0, 1)
-            )
-        # Each agent's wider menus by width: `own_wider` from side 0's construction.
-        own_wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
-        foe_wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
-        menu_started = perf_counter()
-        # Side -> the completion that side's ranking read, per agent: `own_views` from
-        # side 0's construction, `foe_views` from side 1's when it builds its own.
-        own_views: dict[int, tuple[int, tuple[str, ...]]] = {}
-        foe_views: dict[int, tuple[int, tuple[str, ...]]] | None = None
-        rank_scores.at_node(len(record.decisions), pos.turn, 0)  # IKA-278
-        prebuilt = None
-        with scope(0):
-            decided = _decide(
-                reg, pos, limits, own_leaf, foe_leaf, budget, ranked[0], policies[0], spreads,
-                same_menu, cells, depths, selects, any(widens), views_rule[0], own_views, fills[0],
-            )
-            if decided is not None:
-                # IKA-457 stage 2.4: the menus and the node over them, one request.
-                ours, theirs, prebuilt = decided
-            else:
-                ours, theirs = _menus(
-                    reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
-                    rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
-                    # Side 1 reads these too when the two build one menu.
-                    wide=[oracles[side] for side in (0, 1) if widens[side] and (side == 0 or same_menu)],
-                    wider=own_wider,
-                )
-        menu_seconds = perf_counter() - menu_started
-        if not ours or not theirs:
-            break
-
-        own_seconds = foe_seconds = 0.0
-        foe_solved = False
-        foe_search_value: float | None = None
-        # What each side's best-first deepening did here (IKA-33); None where it did not.
-        deepened: list[Any] = [None, None]
-
-        if spreads is not None:
-            # Each side is uncertain about a different bench, so each gets its own answer.
-            # The node underneath them is resolved once: their hidden slots are disjoint
-            # and a cell that reaches neither resolves the same way whatever is standing
-            # on either bench.
-            #
-            # Unless neither is (IKA-33): then the node is the open game's, and a side
-            # that deepens solves it as one, with `search`. A node with a bench still
-            # hidden stays with `belief_solve`, which has no depth (IKA-111).
-            exact = cells != (0, 0) and all(
-                len(items) == 1 and items[0].exact for items in spreads.values()
-            )
-            deep = (exact and cells[0] > 0, exact and cells[1] > 0)
-            # A label ending in h deepens the Bayesian root where a bench is still hidden
-            # (IKA-294): `belief_solve` spends it, per side, on its own game.
-            hidden_deep = tuple(
-                not exact and specs[side].hidden and cells[side] > 0 for side in (0, 1)
-            )
-
-            own_deep = foe_deep = None
-            solve_started = perf_counter()
-            try:
-                # Two menus mean two solves, each read on one side only: this one for
-                # side 0, the one over side 1's menu below for side 1. Asking each for
-                # the side it is read on is what keeps the other side's node and LP from
-                # being built and thrown away (IKA-282: half of the board's matrix,
-                # dirty fill and LP).
-                with scope(0):
-                    asked = tuple(
-                        side for side in ((0, 1) if same_menu else (0,)) if not deep[side]
-                    )
-                    answers = (
-                        belief_solve(
-                            reg, pos, ours, theirs, spreads,
-                            {0: own_leaf, 1: foe_leaf}, budget=budget,
-                            sides=asked, depth=depths,
-                            deepen={
-                                side: _belief_deepen(
-                                    cells[side], how[side],
-                                    own_wider.get(oracles[side]) if widens[side] else None,
-                                    deep_restricted[side],
-                                )
-                                for side in asked
-                                if hidden_deep[side]
-                            } or None,
-                            select=selects,
-                            prebuilt=prebuilt,
-                        )
-                        if asked
-                        else {}
-                    )
-                    if deep[0]:
-                        own_deep = search(
-                            reg, pos, ours, theirs, own_leaf, budget=budget,
-                            deepen=cells[0], solve_restricted=deep_restricted[0],
-                            outside=own_wider.get(oracles[0]) if widens[0] else None,
-                            **how[0],
-                        )
-                    if same_menu and deep[1]:
-                        # One agent on both sides reads both strategies off one solve.
-                        foe_deep = (
-                            own_deep
-                            if own_deep is not None
-                            and leaves[1] is leaves[0]
-                            and deepens[1] == deepens[0]
-                            else search(
-                                reg, pos, ours, theirs, foe_leaf, budget=budgets[1],
-                                deepen=cells[1], solve_restricted=deep_restricted[1],
-                                outside=own_wider.get(oracles[1]) if widens[1] else None,
-                                **how[1],
-                            )
-                        )
-            except EquilibriumError:
-                break
-            own_seconds = perf_counter() - solve_started
-            record.unmodelled.extend(
-                set().union(*(answer.unmodelled for answer in answers.values()))
-            )
-            if own_deep is None:
-                own_strategy = answers[0].strategy
-                search_value = answers[0].value
-                if answers[0].deepened is not None:
-                    # The Bayesian root's menus, grown by its oracle when it widens.
-                    deepened[0] = answers[0].deepened
-                    ours = answers[0].ours
-            foe_theirs = theirs
-            if own_deep is not None:
-                record.unmodelled.extend(own_deep.unmodelled)
-                own_strategy = np.asarray(own_deep.equilibrium.row_strategy, dtype=np.float64)
-                search_value = float(own_deep.equilibrium.value)
-                deepened[0] = own_deep.deepened
-                # The root's menu, grown by the oracle when it widens (IKA-293); the
-                # same actions otherwise.
-                ours = own_deep.ours
-            if same_menu and foe_deep is not None:
-                if foe_deep is not own_deep:
-                    record.unmodelled.extend(foe_deep.unmodelled)
-                foe_strategy = np.asarray(foe_deep.equilibrium.col_strategy, dtype=np.float64)
-                foe_theirs = foe_deep.theirs
-                foe_search_value = float(foe_deep.equilibrium.value)
-                deepened[1] = foe_deep.deepened
-            elif same_menu:
-                foe_strategy = answers[1].strategy
-                if answers[1].deepened is not None:
-                    deepened[1] = answers[1].deepened
-                    foe_theirs = answers[1].theirs
-                # Side 1 solved the negated transpose, so its value is minus side 0's
-                # win probability as side 1 believes it; negated back into side 0's units.
-                foe_search_value = -answers[1].value
-            if not same_menu:
-                # The open path rebuilds the column player's game when the settings
-                # differ; this one used to skip that entirely, so under a hidden bench
-                # `ranked[1]` and `policies[1]` were dead arguments -- the provenance
-                # recorded them per side and only side 0's were ever played. The anchor
-                # of the hidden-bench scale was measured this way, with the hp-share arm
-                # handed a menu ranked by the other arm's value function in one seat.
-                foe_started = perf_counter()
-                foe_views = {}
-                rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
-                with scope(1):
-                    foe_ours, foe_theirs = _menus(
-                        reg, pos, limits, foe_leaf, budgets[1], ranked[1], policies[1], spreads,
-                        rank_view=views_rule[1], used=foe_views, rank_fill=fills[1],
-                        wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
-                    )
-                if not foe_ours or not foe_theirs:
-                    break
-                try:
-                    with scope(1):
-                        if deep[1]:
-                            foe_deep = search(
-                                reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
-                                deepen=cells[1], solve_restricted=deep_restricted[1],
-                                outside=foe_wider.get(oracles[1]) if widens[1] else None,
-                                **how[1],
-                            )
-                        else:
-                            foe_answers = belief_solve(
-                                reg, pos, foe_ours, foe_theirs, spreads,
-                                {0: own_leaf, 1: foe_leaf}, budget=budgets[1], sides=(1,),
-                                depth=depths,
-                                deepen=(
-                                    {1: _belief_deepen(
-                                        cells[1], how[1],
-                                        foe_wider.get(oracles[1]) if widens[1] else None,
-                                        deep_restricted[1],
-                                    )}
-                                    if hidden_deep[1]
-                                    else None
-                                ),
-                                select=selects,
-                            )
-                except EquilibriumError:
-                    break
-                if foe_deep is not None:
-                    record.unmodelled.extend(foe_deep.unmodelled)
-                    foe_strategy = np.asarray(
-                        foe_deep.equilibrium.col_strategy, dtype=np.float64
-                    )
-                    foe_theirs = foe_deep.theirs
-                    foe_search_value = float(foe_deep.equilibrium.value)
-                    deepened[1] = foe_deep.deepened
-                else:
-                    record.unmodelled.extend(foe_answers[1].unmodelled)
-                    foe_strategy = foe_answers[1].strategy
-                    if foe_answers[1].deepened is not None:
-                        deepened[1] = foe_answers[1].deepened
-                        foe_theirs = foe_answers[1].theirs
-                    # Side 1 played off this solve, over its own menu, so its value is
-                    # this one.
-                    foe_search_value = -foe_answers[1].value
-                foe_seconds = perf_counter() - foe_started
-                foe_solved = True
-        else:
-            solve_started = perf_counter()
-            try:
-                with scope(0):
-                    own_search = search(
-                        reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
-                        solve_sparsely=sparse[0],
-                        solve_restricted=restricted[0] or deep_restricted[0],
-                        deepen=cells[0],
-                        outside=own_wider.get(oracles[0]) if widens[0] else None,
-                        select=selects,
-                        **how[0],
-                    )
-            except EquilibriumError:
-                break
-            own_seconds = perf_counter() - solve_started
-            record.unmodelled.extend(own_search.unmodelled)
-            equilibrium = own_search.equilibrium
-
-            # With a different leaf, depth or ranking the two sides are no longer solving
-            # one game, so the column player's strategy has to come from *its* matrix --
-            # over *its* menu, because a ranking that differs is a different menu.
-            # Identical settings on both sides skip all of this and behave exactly as
-            # before.
-            foe_equilibrium = equilibrium
-            foe_theirs = theirs
-            if (
-                leaves[1] is not leaves[0]
-                or depths[1] != depths[0]
-                or ranked[1] != ranked[0]
-                or policies[1] is not policies[0]
-                or sparse[1] != sparse[0]
-                or restricted[1] != restricted[0]
-                or (fills[1] != fills[0] and ranked[0] and policies[0] is None)
-                or deepens[1] != deepens[0]
-                or budgets[1] != budgets[0]
-                or binaries[1] != binaries[0]
-                or allies[1] != allies[0]
-                or holds[1] != holds[0]
-            ):
-                foe_started = perf_counter()
-                rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
-                with scope(1):
-                    foe_ours, foe_theirs = (
-                        (ours, theirs)
-                        if same_menu
-                        else _menus(
-                            reg, pos, limits, foe_leaf, budgets[1], ranked[1], policies[1],
-                            spreads, rank_view=views_rule[1], rank_fill=fills[1],
-                            wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
-                        )
-                    )
-                if same_menu:
-                    foe_wider = own_wider
-                if not foe_ours or not foe_theirs:
-                    break
-                try:
-                    with scope(1):
-                        foe_search = search(
-                            reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
-                            depth=depths[1], solve_sparsely=sparse[1],
-                            solve_restricted=restricted[1] or deep_restricted[1],
-                            deepen=cells[1],
-                            outside=foe_wider.get(oracles[1]) if widens[1] else None,
-                            select=selects,
-                            **how[1],
-                        )
-                except EquilibriumError:
-                    break
-                record.unmodelled.extend(foe_search.unmodelled)
-                foe_equilibrium = foe_search.equilibrium
-                deepened[1] = foe_search.deepened
-                if foe_search.deepened is not None:
-                    # Its root's menus, grown by the oracle when it widens (IKA-293).
-                    foe_theirs = foe_search.theirs
-                foe_seconds = perf_counter() - foe_started
-                foe_solved = True
-            own_strategy = np.asarray(equilibrium.row_strategy, dtype=np.float64)
-            foe_strategy = np.asarray(foe_equilibrium.col_strategy, dtype=np.float64)
-            search_value = float(equilibrium.value)
-            deepened[0] = own_search.deepened
-            if not foe_solved:
-                deepened[1] = own_search.deepened
-            if own_search.deepened is not None:
-                # The root's menus, grown by the oracle when it widens (IKA-293).
-                ours = own_search.ours
-                if not foe_solved:
-                    foe_theirs = own_search.theirs
-
-        if foe_solved:
-            # `same_menu` is the only case where one construction served both agents;
-            # otherwise side 0's menus are side 0's alone and side 1 timed its own.
-            shared = menu_seconds / 2 if same_menu else 0.0
-            record.search_seconds[0] += own_seconds + menu_seconds - shared
-            record.search_seconds[1] += foe_seconds + shared
-        elif one_agent:
-            # One construction and one solve served both sides of one agent. Neither of
-            # them would have spent less alone, and neither of them spent it alone.
-            record.search_seconds[0] += (menu_seconds + own_seconds) / 2
-            record.search_seconds[1] += (menu_seconds + own_seconds) / 2
-        else:
-            # Two agents, one leaf object -- a match of a configuration against itself,
-            # or against something that differs only off the board. The machine did the
-            # work once, and that is the whole point of letting the caller share the
-            # object, but neither agent would have spent less than all of it alone and
-            # this field is what one agent spends. Charging the halves here is how a
-            # pricing run would come back reading half the configuration's cost, with
-            # the ratio it is usually read as intact and the absolute silently doubled
-            # against every figure recorded before the arms could be shared.
-            record.search_seconds[0] += menu_seconds + own_seconds
-            record.search_seconds[1] += menu_seconds + own_seconds
-
-        own_index = _sample_index(rng, own_strategy)
-        if first_action is not None and not record.decisions:
-            # Side 0's opening move, overridden once. Everything after it is the search's
-            # own, so the game measures "what happens if this is played here" rather than
-            # "what happens if this is played forever".
-            #
-            # It exists for the one hypothesis the recorded games cannot settle. The
-            # equilibrium prices the switch to the sweeper at zero in 60% of the positions
-            # where it is available, and the 14% of times it is taken are the ones where
-            # the equilibrium already liked it -- which say the leaf ranks *those*
-            # correctly and nothing about the 60%. Forcing it there and playing on is the
-            # only way to ask whether the zero is right.
-            wanted = [i for i, a in enumerate(ours) if a.to_choice() == first_action]
-            if not wanted:
-                record.unmodelled.append(
-                    f"forced opening {first_action!r} was not among this side's actions"
-                )
-            else:
-                own_index = wanted[0]
-        foe_index = _sample_index(rng, foe_strategy)
-        for side, menu, strategy in ((0, ours, own_strategy), (1, foe_theirs, foe_strategy)):
-            if forced_species[side] is None or record.forced_mega[side] is not None:
-                continue
-            forced = _forced_mega_choice(
-                pos, side, forced_species[side], menu, strategy, rng
-            )
-            if forced is None:
-                continue  # the species is not on the field yet
-            index, note = forced
-            record.forced_mega[side] = {"turn": pos.turn, **note}
-            if index is not None:
-                if side == 0:
-                    own_index = index
-                else:
-                    foe_index = index
-        chosen = [
-            ours[own_index],
-            foe_theirs[foe_index],
-        ]
-        for side, menu in ((0, ours), (1, foe_theirs)):
-            # IKA-419g's positive control, read off the menus the side played from: the
-            # holder stood on the field, the gate was shut, the unheld pool held a Baton Pass
-            # (so the hold had something to take out), and neither the menu nor the choice
-            # has one. A leak is counted, and the match's check refuses a game that has one.
-            if holds[side] is not None:
-                tally = record.baton_hold[side]
-                for slot, opened in baton_slots(pos, side, holds[side]):
-                    if opened:
-                        tally["open"] += 1
-                        tally["open_menu"] += int(any(uses_baton(a, {slot}) for a in menu))
-                        continue
-                    tally["held"] += 1
-                    tally["held_legal"] += int(
-                        any(uses_baton(a, {slot}) for a in side_actions(reg, pos, side))
-                    )
-                    tally["leaks"] += int(
-                        any(uses_baton(a, {slot}) for a in menu)
-                        or uses_baton(chosen[side], {slot})
-                    )
-            # IKA-181's positive control: the side's own menu held an ally target, and it
-            # played one.
-            if allies[side] != "off":
-                record.ally_menus[side] += int(any(names_ally(reg, a) for a in menu))
-                record.ally_played[side] += int(names_ally(reg, chosen[side]))
-        record.decisions.append(
-            Decision(
-                turn=pos.turn,
-                kind="move",
-                position=pos.to_json(),
-                own_actions=[a.to_choice() for a in ours],
-                own_policy=[float(x) for x in own_strategy],
-                foe_actions=[a.to_choice() for a in foe_theirs],
-                foe_policy=[float(x) for x in foe_strategy],
-                search_value=search_value,
-                own_chosen=chosen[0].to_choice(),
-                foe_chosen=chosen[1].to_choice(),
-                rank_views=_rank_views(own_views, foe_views),
-                shown=recorded_shown,
-                foe_search_value=foe_search_value,
-                deepened=(
-                    [None if got is None else got.to_json() for got in deepened]
-                    if any(got is not None for got in deepened)
-                    else None
-                ),
-            )
-        )
-        timing.decided("move")
-        advanced = _advance_turn(
-            reg, rng, pos, chosen, record, leaves, objective,
-            hidden=_HiddenBench(
-                sheets, list(seen), bench_prior, list(leads),
-                hidden_game.number if stepped is not None and hidden_game is not None else None,
-            ),
-        )
-        if advanced is None:
-            record.end_reason = "unresolved"
-            break
-        pos = advanced
-        record.turns = pos.turn
-
-    if pos.ended and pos.winner is not None:
-        record.outcome = 1.0 if pos.winner == pos.sides[0].id else 0.0
-    _close_record(record, pos)
-    return record
-
-
-def _advance_turn(
-    reg: Regulation,
-    rng: np.random.Generator,
-    pos: Position,
-    chosen: list[SideAction],
-    record: GameRecord,
-    leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
-    objective: Objective,
-    *,
-    hidden: _HiddenBench | None = None,
-) -> Position | None:
-    """Resolves the chosen actions and samples one outcome, all through the port.
-
-    The weights come first and are sampled here, so the generator draws once a turn as it
-    always has; then the drawn branch, or the drawn pause, is asked for. A pause is a
-    decision node (`_do_self_switch_node`) and is carried on with the port's own
-    continuation (IKA-209: it used to be resolved again in Python, whose continuation
-    could not cross the process boundary).
-    """
-    from . import portlp
-
-    # IKA-458 stage 3.1: the weights, the draw and the drawn branch in one request, the draw
-    # being numpy's own from the generator's PCG64 state (IKA-460: the only road; the draw in
-    # Python that sampled the same index from the same weights is gone).
-    if type(rng.bit_generator).__name__ != "PCG64":
-        raise TypeError(
-            "the port draws a turn's branch from numpy's PCG64 state; got "
-            f"{type(rng.bit_generator).__name__}"
-        )
-    # IKA-458 stage 3.2: a drawn pause is carried on there too, where the leaves are the
-    # inference server's.
-    ready = _self_switch_request(leaves, hidden)
-    advanced = port.advance(
-        reg, pos, chosen, Budget.exact(), rng,
-        None if ready is None else ready[0],
-    )
-    portlp.COUNTS["advanced"] += 1
-    weights = advanced
-    record.unmodelled.extend(weights.unmodelled)
-    if advanced.index is None:
-        return None
-    index = advanced.index
-    landed = advanced.position
-    if advanced.chain is not None:
-        return _apply_chain(record, advanced, ready[1])
-    if index < len(weights.branches):
-        return landed
-    paused = port.turn(reg, pos, chosen, Budget.exact(), select=index).pause
-    if paused is None:
-        raise port.PortRefused(f"the port gave no pause at index {index} of the turn")
-    return _advance(
-        reg, rng, None, record, leaves, objective, first_pause=paused, hidden=hidden
-    )
 
 
 def _self_switch_request(
@@ -2182,50 +1050,6 @@ def _self_switch_request(
     return request, owners
 
 
-def _apply_chain(record: GameRecord, advanced: Any, owners: list[Any]) -> Position | None:  # noqa: ANN401
-    """The self-switch nodes the port played (`advanceTurn`'s `chain`) as `_record_self_switch`
-    writes them, the server's work booked on the leaves; the turn's end, None if it had none."""
-    from . import portlp
-
-    chain = advanced.chain
-    record.unmodelled.extend(chain["notes"])
-    for owner, served in zip(owners, chain["served"], strict=True):
-        waited = float(served.get("waitUs", 0.0)) / 1e6
-        rustnode.PORT_WAITED[0] -= waited
-        requests, rows = int(served.get("requests", 0)), int(served.get("rows", 0))
-        owner.waited += waited
-        owner.copied += float(served.get("copyUs", 0.0)) / 1e6
-        owner.calls += requests
-        owner.evaluated += rows
-        owner.ended += int(served.get("ended", 0))
-        timing.count("leaves", rows)
-        timing.count("forward.passes", requests)
-        timing.count("serve.requests", requests)
-    waiting = ["pass"]
-    for node in chain["nodes"]:
-        chooser, options, best = int(node["chooser"]), list(node["options"]), int(node["best"])
-        policy = [0.0] * len(options)
-        policy[best] = 1.0
-        record.decisions.append(
-            Decision(
-                turn=int(node["turn"]),
-                kind="selfswitch",
-                position=Position.from_json(node["position"]).to_json(),
-                own_actions=options if chooser == 0 else waiting,
-                own_policy=policy if chooser == 0 else [1.0],
-                foe_actions=waiting if chooser == 0 else options,
-                foe_policy=[1.0] if chooser == 0 else policy,
-                search_value=float(node["value"]),
-                own_chosen=options[best] if chooser == 0 else waiting[0],
-                foe_chosen=waiting[0] if chooser == 0 else options[best],
-                shown=[list(ids) for ids in node["shown"]],
-            )
-        )
-        timing.decided("selfswitch")
-        portlp.COUNTS["selfswitched"] += 1
-    return advanced.position
-
-
 @dataclass(frozen=True)
 class _HiddenBench:
     """What a mid-turn decision needs to price the opponent's bench it has not seen.
@@ -2239,55 +1063,9 @@ class _HiddenBench:
     seen: list[frozenset[str]]
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None
     leads: list[frozenset[str] | None]
-    #: IKA-458 stage 3.4: this game's number in the port (`hiddenstep.Game`), or None where the
-    #: port does not hold the game (stage 3.2's road then leaves a pause to Python).
+    #: IKA-458 stage 3.4: this game's number in the port (the removed `hiddenstep.Game`), or
+    #: None where the port does not hold the game (a pause is then left to Python).
     game: int | None = None
-
-
-def _advance(
-    reg: Regulation,
-    rng: np.random.Generator,
-    result: PortTurn | ResumedTurn | None,
-    record: GameRecord,
-    leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
-    objective: Objective,
-    first_pause: PortPause | None = None,
-    hidden: _HiddenBench | None = None,
-) -> Position | None:
-    """Samples one outcome of a resolved turn, answering any mid-turn request on the way.
-
-    Returns ``None`` when the turn produced nothing to continue from, which the caller
-    treats as the end of the game.
-
-    `result` is a full port turn (`PortTurn.outcomes` and `pauses`), or a resumed turn's
-    weights whose drawn outcome is asked for alone (`ResumedTurn`, IKA-350). ``first_pause`` is
-    for a caller that has already drawn a pause -- `_advance_turn` samples the weights
-    itself, so the generator is used exactly once per turn whichever way the turn goes --
-    and `result` is then None.
-    """
-    for attempt in range(5):
-        if attempt == 0 and first_pause is not None:
-            pause = first_pause
-        else:
-            assert result is not None
-            weights = np.array(result.branches + result.suspended, dtype=np.float64)
-            if not weights.size or float(weights.sum()) <= 0:
-                return None
-            index = _sample_index(rng, weights)
-            # The drawn outcome alone (IKA-350): a resumed turn's weights came first, and
-            # only this branch or pause is asked for, not every branch's position.
-            picked = result.pick(index)
-            if index < len(result.branches):
-                return picked
-            pause = picked
-        resumed = _do_self_switch_node(
-            reg, pause, record, leaves, objective, hidden=hidden
-        )
-        if resumed is None:
-            return None
-        result = resumed
-    record.unmodelled.append("more than five mid-turn replacements in one turn")
-    return None
 
 
 def _do_self_switch_node(
@@ -2796,8 +1574,6 @@ def _do_replacement_node(
     leads: list[frozenset[str] | None] | None = None,
     recorded_shown: list[list[str]] | None = None,
     selects: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
-    stepped: Any = None,  # noqa: ANN401 - `hiddenstep.Step`: the completions the port made
-    hidden_number: int | None = None,
 ) -> Position:
     """Solves and applies the replacement phase.
 
@@ -2816,33 +1592,6 @@ def _do_replacement_node(
     completion: a replacement names a *slot*, and which slots are free is public even when
     who is standing in them is not.
     """
-    if stepped is not None and stepped.error is None:
-        # IKA-458 stage 3.6a: the options, the node, both draws and the phase in one request.
-        from . import replacephase
-
-        played = replacephase.play(
-            reg, rng, pos, leaves, selects, hidden_number, stepped.seen, leads or [None, None]
-        )
-        if played is not None:
-            record.decisions.append(
-                Decision(
-                    turn=pos.turn,
-                    kind="replacement",
-                    position=pos.to_json(),
-                    own_actions=played.options[0],
-                    own_policy=played.policy[0],
-                    foe_actions=played.options[1],
-                    foe_policy=played.policy[1],
-                    search_value=played.value,
-                    own_chosen=played.options[0][played.chosen[0]],
-                    foe_chosen=played.options[1][played.chosen[1]],
-                    shown=recorded_shown,
-                    foe_search_value=played.foe_value,
-                )
-            )
-            timing.decided("replacement")
-            record.unmodelled.extend(played.notes)
-            return played.position
     options: list[list[SideAction]] = []
     for side_index in range(2):
         must = list(owed[side_index])
@@ -2861,26 +1610,20 @@ def _do_replacement_node(
 
     foe_value: float | None = None
     seen = shown or [frozenset(), frozenset()]
-    if stepped is not None:
-        # The port made them with the step (IKA-458 stage 3.4).
-        if stepped.error is not None:
-            record.unmodelled.append(f"hidden bench at a replacement: {stepped.error}")
-        spreads = {} if stepped.error is not None else stepped.spreads
-    else:
-        try:
-            spreads = {
-                side: completions(
-                    reg, pos, side, sheets[side], seen=seen[side],
-                    weights=_bench_weights(
-                        bench_prior, side, pos, seen[side], record,
-                        (leads or [None, None])[side],
-                    ),
-                )
-                for side in (0, 1)
-            }
-        except ValueError as problem:
-            record.unmodelled.append(f"hidden bench at a replacement: {problem}")
-            spreads = {}
+    try:
+        spreads = {
+            side: completions(
+                reg, pos, side, sheets[side], seen=seen[side],
+                weights=_bench_weights(
+                    bench_prior, side, pos, seen[side], record,
+                    (leads or [None, None])[side],
+                ),
+            )
+            for side in (0, 1)
+        }
+    except ValueError as problem:
+        record.unmodelled.append(f"hidden bench at a replacement: {problem}")
+        spreads = {}
     if spreads:
         from . import replacenode
 
@@ -2979,7 +1722,6 @@ __all__ = [
     "GameRecord",
     "final_position",
     "lead_branches_from_sets",
-    "play_game",
     "position_from_sets",
     "positions_from_sets",
     "replacement_matrix",

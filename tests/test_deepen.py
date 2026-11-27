@@ -40,9 +40,7 @@ from pokeuraou.equilibrium import solve
 from pokeuraou.narrow import narrow, slot_options
 from pokeuraou.pool import load_pool
 from pokeuraou.port import batched_payoff
-from pokeuraou.position import Position
 from pokeuraou.provenance import LEGACY_DEEPEN, agent_name, provenance
-from pokeuraou.regulation import load_regulation
 from pokeuraou.search import (
     DEFAULT_SUB_BRANCHES,
     DEFAULT_SUB_LIMIT,
@@ -292,89 +290,7 @@ def test_seconds_turn_into_a_budget_at_measured_prices() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# play_game
-
-
-@pytest.fixture(scope="module")
-def setup():  # noqa: ANN201
-    reg = load_regulation("gen9championsvgc2026regmb")
-    register_mega_stones(reg)
-    sheet = list(load_roster("rizabanadohido").sets)[:6]
-    return reg, sheet
-
-
-def _hidden_game(setup, label):  # noqa: ANN001, ANN202
-    reg, sheet = setup
-    return selfplay.play_game(
-        reg, np.random.default_rng(33), sheet[:4], sheet[2:6], "test",
-        search_limit=3, max_turns=25, sheets=(sheet, sheet), deepen=label,
-    )
-
-
-def _both_shown(decision) -> bool:  # noqa: ANN001
-    """Neither bench hidden: every one of each side's four is in `shown`."""
-    pos = Position.from_json(decision.position)
-    return all(len(decision.shown[i]) == len(pos.sides[i].pokemon) for i in (0, 1))
-
-
-def _payload(record) -> dict:  # noqa: ANN001
-    out = record.to_json(objective="hp-share", search_limit=3)
-    out.pop("searchSeconds", None)
-    out.pop("engine", None)
-    return out
-
-
-@pytest.mark.parametrize("label", ["r60", "m60"])
-def test_under_a_hidden_bench_it_deepens_exactly_where_nothing_is_hidden(setup, label) -> None:  # noqa: ANN001
-    base = _hidden_game(setup, "none")
-    again = _hidden_game(setup, "none")
-    assert _payload(base) == _payload(again)
-    payload = base.to_json(objective="hp-share", search_limit=3)
-    assert "deepen" not in payload
-    assert all("deepened" not in d for d in payload["decisions"])
-    moves = [d for d in base.decisions if d.kind == "move"]
-    open_nodes = [d for d in moves if _both_shown(d)]
-    # The test is only worth something if the game reaches such nodes and hidden ones.
-    assert open_nodes, "the game never showed both fours; nothing could fire"
-    assert len(open_nodes) < len(moves)
-
-    deep = _hidden_game(setup, label)
-    assert deep.deepen == [label, label]
-    fired = 0
-    first = None
-    for k, d in enumerate(deep.decisions):
-        if d.kind != "move":
-            assert d.deepened is None
-            continue
-        if _both_shown(d):
-            assert d.deepened is not None and d.deepened[0] is not None, k
-            assert d.deepened[1] == d.deepened[0]
-            fired += 1
-            first = k if first is None else first
-        else:
-            assert d.deepened is None, f"decision {k} deepened with a bench hidden"
-    assert fired > 0
-    # Until the first deepened node the game is the default one, decision for decision.
-    base_json = _payload(base)["decisions"]
-    deep_json = _payload(deep)["decisions"]
-    assert deep_json[:first] == base_json[:first]
-    assert _payload(deep)["deepen"] == [label, label]
-    # Some node actually refined something (the report is not only a label).
-    assert any(d.deepened[0]["expanded"] > 0 for d in deep.decisions if d.deepened)
-
-
-def test_a_deepen_label_goes_with_depth_1_and_a_label(setup) -> None:  # noqa: ANN001
-    reg, sheet = setup
-    with pytest.raises(ValueError, match="deepen"):
-        selfplay.play_game(
-            reg, np.random.default_rng(34), sheet[:4], sheet[2:6], "test",
-            search_limit=3, max_turns=1, sheets=(sheet, sheet), deepen="m40", depth=2,
-        )
-    with pytest.raises(ValueError, match="deepen"):
-        selfplay.play_game(
-            reg, np.random.default_rng(34), sheet[:4], sheet[2:6], "test",
-            search_limit=3, max_turns=1, sheets=(sheet, sheet), deepen="40",
-        )
+# a pool's agent
 
 
 @pytest.fixture(scope="module")
@@ -673,46 +589,3 @@ def test_the_wider_menus_come_from_the_same_ranking(roster) -> None:  # noqa: AN
             assert [[a.to_choice() for a in m] for m in wider[8]] == [
                 [a.to_choice() for a in m] for m in alone
             ]
-
-
-@pytest.mark.parametrize("label", ["m60o6", "m60oall", "m60s6", "b60sall"])
-def test_under_a_hidden_bench_the_oracle_widens_where_it_deepens(setup, label) -> None:  # noqa: ANN001
-    base = _hidden_game(setup, "none")
-    plain = _hidden_game(setup, "m60")
-    deep = _hidden_game(setup, label)
-    fired = widened = 0
-    first = None
-    for k, d in enumerate(deep.decisions):
-        if d.deepened is None:
-            continue
-        assert d.kind == "move" and _both_shown(d)
-        report = d.deepened[0]
-        assert {"probed", "widened", "fills"} <= set(report)
-        assert ("swapped" in report) == ("s" in label[1:])
-        if label.startswith("b"):
-            assert report["expanded"] == 0 and report["depth"] == 1
-        fired += 1
-        first = k if first is None else first
-        widened += report["widened"]
-        # The recorded menus are the grown ones, and the policies index them.
-        assert len(d.own_policy) == len(d.own_actions) and len(d.foe_policy) == len(d.foe_actions)
-        assert d.own_chosen in d.own_actions and d.foe_chosen in d.foe_actions
-    assert fired > 0 and widened > 0, (fired, widened)
-    # Until the first deepened node the game is the default one.
-    assert _payload(deep)["decisions"][:first] == _payload(base)["decisions"][:first]
-    assert _payload(deep)["deepen"] == [label, label]
-    # With nothing outside (the oracle's width is the menu's) it plays `m60` exactly.
-    null = _hidden_game(setup, "m60o3")
-    strip = {"probed", "widened", "fills"}
-    for got in (null,):
-        payload = _payload(got)
-        want = _payload(plain)
-        assert payload["deepen"] == ["m60o3", "m60o3"]
-        payload["deepen"] = want["deepen"]
-        for decision in payload["decisions"]:
-            for side in decision.get("deepened") or []:
-                if side is not None:
-                    assert side["probed"] == 0 and side["widened"] == 0
-                    for key in strip:
-                        side.pop(key)
-        assert payload == want

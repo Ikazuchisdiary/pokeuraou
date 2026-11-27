@@ -1555,13 +1555,8 @@ def belief_solve(
     progress: _deepen.Progress | None = None,
     child_q: int | None = None,
     select: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
-    prebuilt: Any = None,  # noqa: ANN401 - a `beliefnode.BeliefNode`
 ) -> dict[int, BeliefResult]:
     """Both sides' answers, resolving each turn as few times as it has to be resolved.
-
-    ``prebuilt`` (IKA-457 stage 2.4) is the node over these very menus, built by the port in the
-    request that built the menus (`beliefnode.fused_node`): it stands for the one shared
-    `belief_payoffs` of a node whose two sides search with one leaf, solved for ``sides``.
 
     `completions_by_side[s]` completes side `s`'s own unseen slots, so side `1 - s` is the
     one solved over it. `evaluators[s]` is the leaf side `s` searches with.
@@ -1622,11 +1617,7 @@ def belief_solve(
         raise ValueError(f"belief_solve asked for no side: {sides!r}")
     row, col = list(ours), list(theirs)
     same = evaluators[0] is evaluators[1]
-    if prebuilt is not None:
-        if not same:
-            raise ValueError("a prebuilt node stands for one leaf's shared node (IKA-457)")
-        nodes = {0: prebuilt, 1: prebuilt}
-    elif same:
+    if same:
         node = belief_payoffs(
             reg, position, row, col, evaluators[0], budget=budget,
             spreads=completions_by_side, solve=wanted,

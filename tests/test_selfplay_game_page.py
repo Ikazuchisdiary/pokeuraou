@@ -13,16 +13,12 @@ import copy
 import json
 import re
 
-import numpy as np
 import pytest
 
 from pokeuraou import rustnode
-from pokeuraou.damage import register_mega_stones
-from pokeuraou.regulation import load_regulation
-from pokeuraou.selfplay import play_game
-from pokeuraou.teams import load_roster
 
 from ._harness import load_tool
+from ._worker_games import worker_games
 
 
 @pytest.fixture(scope="module")
@@ -34,18 +30,11 @@ def tools():  # noqa: ANN201
 
 
 @pytest.fixture(scope="module")
-def played():  # noqa: ANN201
-    reg = load_regulation("gen9championsvgc2026regmb")
-    register_mega_stones(reg)
-    sheet = list(load_roster("rizabanadohido").sets)[:6]
-    own = sheet[:4]
-    foe = [sheet[i] for i in (1, 0, 4, 5)]
-    record = play_game(
-        reg, np.random.default_rng(3), own, foe, "test",
-        search_limit=3, max_turns=4, sheets=(sheet, sheet),
-    )
-    payload = json.loads(json.dumps(record.to_json(objective="hp-share", search_limit=4)))
-    return reg, payload, rustnode.RustNode(reg)
+def played(tmp_path_factory):  # noqa: ANN001, ANN201
+    """A game of the Rust generation worker (IKA-463; `play_game`'s until then), as its JSON."""
+    pool, games = worker_games(tmp_path_factory.mktemp("page"), 2)
+    game = max(games, key=lambda g: sum(d["kind"] == "move" for d in g["decisions"]))
+    return pool.reg, json.loads(json.dumps(game)), rustnode.RustNode(pool.reg)
 
 
 def _sections(page: str) -> list[str]:
@@ -161,7 +150,9 @@ def test_a_mixture_row_names_the_target_of_a_single_target_move(tools, played) -
             for choice in actions:
                 pair = game_page.pair_of(reg, loc, d["position"], side, choice)
                 full = show_game.name_action(reg, loc, d["position"]["sides"], side, choice)
-                for part, whole in zip(pair, full.split(" ｜ "), strict=False):
+                # `pair_of` leaves out a slot with no action (a pass, once a side is down to one).
+                wholes = [w for w in full.split(" ｜ ") if w.partition(": ")[2] != "行動なし"]
+                for part, whole in zip(pair, wholes, strict=True):
                     if " → 敵" in whole and not whole.split(": ", 1)[1].startswith("交代"):
                         assert "→ 相手の" in part["text"], (choice, part, whole)
                         seen_target += 1

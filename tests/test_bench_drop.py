@@ -266,39 +266,6 @@ def _counting(monkeypatch):  # noqa: ANN001, ANN202
     return seen
 
 
-def _game(setup, drop):  # noqa: ANN001, ANN202
-    reg, sheet, _position = setup
-    return selfplay.play_game(
-        reg, np.random.default_rng(283), sheet[:4], sheet[:4], "test",
-        search_limit=3, max_turns=3, sheets=(sheet, sheet), bench_drop=drop,
-    )
-
-
-def _without_drop(record) -> dict:  # noqa: ANN001
-    payload = record.to_json(objective="hp-share", search_limit=3)
-    payload.pop("benchDrop", None)
-    payload.pop("searchSeconds", None)
-    payload.pop("engine", None)
-    return payload
-
-
-def test_a_bar_nothing_falls_under_plays_the_default_game(setup, monkeypatch) -> None:  # noqa: ANN001
-    """Without a prior every completion weighs 1/6, which clears 5%: the same game."""
-    seen = _counting(monkeypatch)
-    base = _game(setup, "none")
-    base_seen = list(seen)
-    seen.clear()
-    same = _game(setup, "w5")
-    assert seen == base_seen and base_seen[0] == (6, 6)
-    assert _without_drop(same) == _without_drop(base)
-    assert "benchDrop" not in base.to_json(objective="hp-share", search_limit=3)
-    assert same.to_json(objective="hp-share", search_limit=3)["benchDrop"] == ["w5", "w5"]
-    # Positive control: 1/6 is under 20%, so each belief keeps its heaviest alone.
-    seen.clear()
-    _game(setup, "w20")
-    assert seen[0] == (1, 1)
-
-
 def test_the_drop_is_recorded_only_when_it_differs() -> None:
     base = dict(seat="s", leaves=("m", "m"), limits=(12, 12), rankings=("leaf", "leaf"),
                 information=("hidden-bench", "hidden-bench"))

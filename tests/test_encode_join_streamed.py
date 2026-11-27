@@ -25,13 +25,13 @@ from tests._harness import load_tool
 
 pytest.importorskip("torch", reason="the dataset needs the optional learn group")
 encode_dataset = load_tool("encode_dataset")
-from tests.test_encode_games_port import _args, _game, _line, _members, _write_games  # noqa: E402
+from tests.test_encode_games_port import _args, _games, _line, _members, _write_games  # noqa: E402
 
 
 @pytest.fixture(scope="module")
-def played() -> list[dict]:
-    """test_encode_games_port's three games."""
-    return [_game(5, 40, True), _game(8, 3, False), _game(11, 6, True)]
+def played(tmp_path_factory) -> list[dict]:  # noqa: ANN001
+    """test_encode_games_port's three games (the Rust generation worker's, IKA-463)."""
+    return _games(tmp_path_factory.mktemp("join"))
 
 
 def _shards(tmp_path: Path, played: list[dict]) -> list[Path]:

@@ -25,13 +25,12 @@ import numpy as np
 import pytest
 
 from pokeuraou import deepen as deepen_mod
-from pokeuraou import qhead, qrank, selfplay
+from pokeuraou import qhead, qrank
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.equilibrium import solve
 from pokeuraou.narrow import narrow
 from pokeuraou.port import batched_payoff
-from pokeuraou.regulation import load_regulation
 from pokeuraou.search import DEFAULT_SUB_BRANCHES, DEFAULT_SUB_LIMIT
 from pokeuraou.teams import load_roster
 
@@ -270,63 +269,3 @@ def test_the_batched_pass_is_each_requests_own_pass(roster, tmp_path) -> None:  
         assert a.shape == b.shape
         np.testing.assert_allclose(b, a, atol=1e-6)
         assert np.array_equal(b, c)
-
-
-@pytest.fixture(scope="module")
-def setup():  # noqa: ANN201
-    reg = load_regulation("gen9championsvgc2026regmb")
-    register_mega_stones(reg)
-    sheet = list(load_roster("rizabanadohido").sets)[:6]
-    return reg, sheet
-
-
-def _hidden_game(setup, label):  # noqa: ANN001, ANN202
-    reg, sheet = setup
-    return selfplay.play_game(
-        reg, np.random.default_rng(33), sheet[:4], sheet[2:6], "test",
-        search_limit=3, max_turns=12, sheets=(sheet, sheet), deepen=label,
-    )
-
-
-def _payload(record) -> dict:  # noqa: ANN001
-    out = record.to_json(objective="hp-share", search_limit=3)
-    out.pop("searchSeconds", None)
-    out.pop("engine", None)
-    return out
-
-
-def test_in_a_game_g8_is_the_game_and_c_asks_the_q(setup) -> None:  # noqa: ANN001
-    reg, _sheet = setup
-    plain = _payload(_hidden_game(setup, "m60h"))
-    told = _payload(_hidden_game(setup, "m60hg8"))
-    stops = 0
-    for decision in told["decisions"]:
-        for side in decision.get("deepened") or []:
-            if side is not None:
-                assert side["levels"] == 8 and side["stop"] in ("budget", "exhausted")
-                stops += 1
-                for key in ("levels", "stop", "lines", "guarded"):
-                    side.pop(key)
-    assert stops > 0
-    assert told["deepen"] == ["m60hg8", "m60hg8"]
-    told["deepen"] = plain["deepen"]
-    assert told == plain
-
-    model = _BatchedStubQ(Encoder(reg))
-    qrank.install(model)
-    try:
-        first = _payload(_hidden_game(setup, "m60hc3"))
-        second = _payload(_hidden_game(setup, "m60hc3"))
-    finally:
-        qrank._INSTALLED.clear()  # noqa: SLF001
-    assert first == second
-    asked = sum(
-        side["childQ"]
-        for decision in first["decisions"]
-        for side in decision.get("deepened") or []
-        if side is not None
-    )
-    # Two games' passes; a node with no bench hidden is one tree for both sides, so its
-    # report is written on each side and counted twice here.
-    assert asked > 0 and asked <= model.passes <= 2 * asked
-    assert first["decisions"] != plain["decisions"]

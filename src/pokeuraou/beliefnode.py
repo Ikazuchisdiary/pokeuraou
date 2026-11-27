@@ -300,49 +300,6 @@ def belief_payoffs(
     return done
 
 
-def fused_node(  # noqa: PLR0913 - the node's pieces
-    reg: Regulation,
-    position: Position,
-    planned,  # noqa: ANN001 - `rootmenus.Plan`
-    budget: Budget,
-    spreads: dict[int, list],
-    evaluate: Callable[[list[Position]], np.ndarray],
-    solve: Sequence[int],
-) -> BeliefNode | None:
-    """IKA-457 stage 2.4: the menus (`planned`, `rootmenus.plan`) and the node over them in one
-    `moveNode` request: the `BeliefNode` `belief_payoffs` would build over those menus, with the
-    menus in ``planned.menus``. None where the leaf is not the inference server's, or the binary
-    encoded with another rule (then nothing has been sent but the request, and the menus and the
-    node are built apart)."""
-    from .encode import rules_of
-    from .inference import RemoteValue
-
-    owner = getattr(evaluate, "__self__", evaluate)
-    if type(owner) is not RemoteValue:
-        return None
-    rules = rules_of(evaluate)
-    if rules.patch_shares_side:
-        return None
-    hidden = {
-        side: (items[0].slots if items and not items[0].exact else ())
-        for side, items in spreads.items()
-    }
-    encoder = getattr(owner, "encoder", None) or _encoder_for(reg)
-    if timing.ON:
-        timing.refine("hidden" if any(hidden.values()) else "exact")
-        timing.count("completions", sum(len(items) for items in spreads.values()))
-    done = _node_in_port(
-        reg, owner, position, None, None, budget, rules, hidden, spreads, solve, encoder,
-        fused=planned,
-    )
-    if done is _NOT_ON_THIS_BINARY:
-        return None
-    from . import portlp
-
-    portlp.COUNTS["decided"] += 1
-    return done
-
-
 def _fold_answer(
     answer: dict, jobs: list, m: int, n: int, asks: list
 ) -> tuple[list[np.ndarray], dict]:

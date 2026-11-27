@@ -2,32 +2,23 @@
 
 Generation and the board are played by the Rust workers (IKA-458 stage 3.7); their agents are
 the configs `rustworker.build_config` and `rustworker.board_config` write, and `worker_drift`
-builds both from generation's flags and compares them by value. A tool that calls `play_game`
-must name a leaf, a width, a narrowing order, the sheets that hide the bench, the bench prior
-and the fill. A tool that omits one of those is not measuring the agent that ships -- it is
-measuring a different one and labelling the difference as whatever it set out to study.
+builds both from generation's flags and compares them by value. A tool that leaves its fill or
+its Q unnamed must resolve it as generation does (`resolution_drift`), and the time match must
+build the agent a person meets (`play_agent_drift`). A tool that drifts is not measuring the
+agent that ships -- it is measuring a different one and labelling the difference as whatever
+it set out to study.
 
 That is not hypothetical. On 2026-09-19 `selection_check` was found never to pass
 `evaluate`, so every board number it had ever produced came from games the hp-share
 heuristic played while the value function's claim sat beside them; it voided G2's recorded
 -21.8 point miss, a six-team calibration panel and a 0-for-30 that looked like a
-value-function collapse. `book_check` had the same gap on `rank_by_leaf`. The tool that
-stayed correct, `generation_match`, is also the only one that wrote its agent into each
-row's provenance -- writing it down is what makes the drift visible.
-
-So this reads the call sites and prints the difference, rather than trusting anyone to
-notice. Parsed with `ast`, because a grep for keyword names finds them in docstrings and
-misses the ones spelled across a line break.
+value-function collapse. Until IKA-463 this file also read every tool's `play_game(...)` call
+for the arguments that decide the agent; IKA-463 removed `play_game`, so no tool calls it.
 
     uv run python tools/agent_drift.py            # the report
-    uv run python tools/agent_drift.py --check    # and fail if the set below moved
+    uv run python tools/agent_drift.py --check    # and fail on any drift
 
-Printing it was never enough on its own: this file existed on the day `selection_check`
-was found, and it had not been run. `--check` is what CI calls, and it compares the
-drifted set against `KNOWN_DRIFT` below rather than requiring it to be empty -- seven
-tools drift today and fixing them is not this check's job. It fails in *both* directions:
-a new tool that drifts is the thing to catch, and a tool that stopped drifting has to be
-struck off the list, or the list stops describing anything.
+`--check` is what CI calls.
 """
 
 from __future__ import annotations
@@ -43,56 +34,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou.qrank import DEFAULT_Q  # noqa: E402
 from pokeuraou.search import SHIPPED_RANK_FILL  # noqa: E402
-
-#: The arguments that decide which agent plays. `objective` is not here: it names the
-#: payoff, not the player, and every caller passes it.
-AGENT_ARGS = (
-    "evaluate",
-    "search_limit",
-    "rank_by_leaf",
-    "depth",
-    "policy",
-    "solve_sparsely",
-    "solve_restricted",
-    "sheets",
-    # What the search believes the hidden bench holds. Generation has passed it since
-    # IKA-5 and `generation_match` did not, so every hidden-bench match until IKA-122
-    # played the uniform belief -- a different agent -- while this list, lacking the name,
-    # reported the match as the agent that ships.
-    "bench_prior",
-    # Which completion a hidden-bench menu is ranked from (IKA-143). Its default is what
-    # ships, so omitting it drifts nothing; a tool that passes "first" plays the old rule.
-    "rank_view",
-    # How a leaf ranking fills its cells (IKA-268). Since IKA-341 `play_game`'s default is
-    # no longer what generation ships: unnamed, a leaf-ranked side plays q-nocover by
-    # the process's Q. M-C generation passes it too: its tools' fill is checked where they
-    # resolve it, at their options (`resolution_drift` below), since no `play_game` call shows it.
-    "rank_fill",
-    # Which completions a hidden-bench belief leaves out (IKA-283). Its default is what
-    # ships, so omitting it drifts nothing; a tool that passes a drop plays another game.
-    "bench_drop",
-    # A best-first deepening budget in cells (IKA-33). Its default is what ships (0, off),
-    # so omitting it drifts nothing; a tool that passes a budget plays another search.
-    "deepen",
-)
-#: One argument a tool may omit for a reason, where excusing the whole file in `EXPECTED`
-#: would also excuse every other argument it might stop passing later.
-EXCUSED_ARGS: dict[str, dict[str, str]] = {
-    # `branch_dedup.py` stood here (bench_prior) until IKA-212 deleted it.
-}
-#: Tools that drive something other than a full game on purpose, so a missing argument is
-#: a choice rather than a drift. Each one says why.
-EXPECTED: dict[str, str] = {
-    # diff_generation.py stood here until IKA-458 stage 3.7 deleted it with the Python worker.
-    # diff_narrow, diff_node, diff_solve_node, dump_turn_cases and cells_needed stood here
-    # until IKA-212 deleted them with Python's resolver.
-}
-#: The tools that drift as of 2026-09-19, recorded so that `--check` can fail on an
-#: eighth without first demanding these seven be fixed. Not an excuse: a board number from
-#: any of them is still a number about a different player, which is what the report says.
-#: Struck off by fixing the call site, which `--check` then insists on.
-KNOWN_DRIFT: frozenset[str] = frozenset()
-
 
 #: The options that name a leaf-ranked menu's fill. M-C generation's worker leaves them
 #: unset and resolves them with `search.resolve_rank_fill` (q-nocover for a leaf-ranked
@@ -239,55 +180,6 @@ def resolution_drift(path: Path) -> list[str]:
     return problems
 
 
-def calls(path: Path) -> list[tuple[int, set[str]]]:
-    """(line, keyword names) for every `play_game(...)` in this file.
-
-    A `**kwargs` splat is recorded as the name `**`, because what it passes cannot be read
-    from here.
-    """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    out: list[tuple[int, set[str]]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if name != "play_game":
-            continue
-        out.append((node.lineno, {k.arg or "**" for k in node.keywords}))
-    return out
-
-
-def unstated(path: Path) -> list[int]:
-    """Lines of the `play_game` calls here that do not name `sheets` (IKA-123, IKA-460).
-
-    `sheets` is required since the open game was removed, so such a call stops at run
-    time; a tool nobody runs finds out late, so it is read here too.
-    """
-    return [
-        line
-        for line, kwargs in calls(path)
-        if not kwargs & {"sheets", "**"}
-    ]
-
-
-#: The arguments a `play_game` call must name to play generation's agent: those whose default is
-#: not what ships. Generation itself no longer calls `play_game` (its games and the board's are
-#: the Rust workers', IKA-458 stage 3.7; `worker_drift` holds their configs), so the set is
-#: written here: the leaf (None means hp-share), the narrowing order (False means damage), the
-#: sheets (required), the width (8, where generation plays 12), the bench prior (None means the
-#: uniform belief) and the fill (None means q-nocover by the process's Q). `depth`, `policy`,
-#: `solve_sparsely` and `solve_restricted` default to what generation ships.
-SHIPPING_ARGS = frozenset({
-    "evaluate", "rank_by_leaf", "sheets", "search_limit", "bench_prior", "rank_fill",
-})
-
-
-def shipping_args() -> set[str]:
-    """The arguments a `play_game` call must name whose default is not what ships."""
-    return set(SHIPPING_ARGS) & set(AGENT_ARGS)
-
-
 #: IKA-458 stage 3.7: generation's config (`rustworker.build_config`) and every board arm
 #: (`rustworker.board_config`) built from generation's flags agree on every key, by value, except
 #: those `pokeuraou.workeragent.ALLOWED_DIFFERENT` names with its reason.
@@ -320,11 +212,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--check",
         action="store_true",
-        help="exit non-zero unless the drifted set is exactly KNOWN_DRIFT",
+        help="exit non-zero on any drift",
     )
     args = ap.parse_args(argv)
 
-    reference = shipping_args()
     worker = worker_drift()
     if worker:
         print(f"  DRIFTED   rustworker.py: the board's worker builds another agent than "
@@ -332,12 +223,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  ok        rustworker.py: generation's config and every board arm agree on "
               f"{WORKER_AGENT}, by value (IKA-458 stage 3.7)")
-    print(f"  a play_game call must name: {', '.join(sorted(reference))}")
-    print("  (depth, policy, solve_sparsely and solve_restricted default to the shipped\n"
-          "   setting, so an omission there is not a drift)\n")
-
-    drifted: set[str] = set()
-    silent: list[str] = []
     # IKA-338: the fill and the Q a tool plays when they are left off, beside the arguments
     # it passes. The reference is M-C generation's worker, held to the same rule.
     print(f"  an unnamed fill of a leaf-ranked menu (M-C): {SHIPPED_RANK_FILL} by {DEFAULT_Q} "
@@ -366,61 +251,9 @@ def main(argv: list[str] | None = None) -> int:
     for note in PLAY_ONLY_DEFAULTS:
         print(f"  own way   play_human.py: {note}")
     print()
-    # `tools/oneshot/` is in scope too. A tool is shelved there when its question was
-    # asked once, not because it stopped being runnable -- and a shelved tool that builds
-    # an agent the current generation would not recognise is exactly the thing someone
-    # re-runs later and reads as a board number. Scanning only `tools/*.py` would also let
-    # a drifting tool leave the check by being moved, which is how `matchup.py` fell out.
-    for path in sorted(glob.glob(str(ROOT / "tools/**/*.py"), recursive=True)):
-        p = Path(path)
-        found = calls(p)
-        if not found:
-            continue
-        for line in unstated(p):
-            silent.append(f"{p.relative_to(ROOT).as_posix()}:{line}")
-            print(f"  UNSTATED  {p.name}:{line} names no sheets")
-        passed: set[str] = set()
-        for _, kwargs in found:
-            passed |= kwargs
-        excused = EXCUSED_ARGS.get(p.name, {})
-        for name in sorted((reference - passed) & set(excused)):
-            print(f"  excused   {p.name:<26} omits {name}  -- {excused[name]}")
-        missing = sorted(reference - passed - set(excused))
-        note = EXPECTED.get(p.name)
-        if not missing:
-            print(f"  ok        {p.name}")
-            continue
-        if note:
-            print(f"  expected  {p.name:<26} missing {', '.join(missing)}  -- {note}")
-            continue
-        drifted.add(p.name)
-        print(f"  DRIFTED   {p.name:<26} missing {', '.join(missing)}")
-
-    print(f"\n  {len(drifted)} tool(s) build an agent generation would not recognise.")
-    if drifted:
-        print("  A board number from one of those is a number about a different player.")
-
     if not args.check:
         return 0
 
-    appeared = sorted(drifted - KNOWN_DRIFT)
-    fixed = sorted(KNOWN_DRIFT - drifted)
-    if appeared:
-        print(
-            f"\n  NEW: {', '.join(appeared)} drifted since the list was written.\n"
-            "  Pass the missing arguments, or add the file to EXPECTED with the reason it\n"
-            "  drives something other than a full game."
-        )
-    if fixed:
-        print(
-            f"\n  STALE: {', '.join(fixed)} no longer drifts and is still in KNOWN_DRIFT.\n"
-            "  Strike it off, so the list keeps meaning what it says."
-        )
-    if silent:
-        print(
-            f"\n  UNSTATED: {', '.join(silent)} call play_game without saying which game.\n"
-            "  Pass the sixes as `sheets`."
-        )
     if unresolved:
         print(
             f"\n  DEFAULT: {', '.join(unresolved)} resolve an unnamed fill or Q apart from "
@@ -438,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             f"\n  PLAY: {'; '.join(play_drift)}.\n  The time match has to play the agent a "
             "person meets: build it as play_human does, with play_human's defaults."
         )
-    return 1 if (appeared or fixed or silent or worker or unresolved or play_drift) else 0
+    return 1 if (worker or unresolved or play_drift) else 0
 
 
 if __name__ == "__main__":

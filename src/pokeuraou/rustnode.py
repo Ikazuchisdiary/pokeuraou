@@ -775,8 +775,6 @@ class RustNode:
         self._forget_owed = False
         #: IKA-350: the slot-action numbers this process has been given (`_defined`).
         self._acts: set[int] = set()
-        #: IKA-458 stage 3.4: the games (`hiddenstep.Game`) this process has been given.
-        self._games: set[int] = set()
 
     def close(self) -> None:
         if self._process.poll() is None:
@@ -986,17 +984,6 @@ class RustNode:
             chain=response.get("chain"),
         )
 
-    @timing.timed("rust.hidden")
-    def hidden_step(self, request: dict[str, Any], game: Any) -> dict[str, Any]:  # noqa: ANN401
-        """IKA-458 stage 3.4: what each side has shown and its completions (`hiddenStep`), the
-        game's sheets and priors defined first if this process has not been given them."""
-        if game.number not in self._games:
-            if len(self._games) >= 16:  # the port's own bound (`hiddenbench.rs`)
-                self._games.clear()
-            self._process.stdin.write(game.line)
-            self._games.add(game.number)
-        return self._exchange(request)
-
     @timing.timed("rust.lp")
     def lp(self, request: dict[str, Any]) -> dict[str, Any]:
         """IKA-381: an `lp` or `folds` request (`portlp`), its one header line back."""
@@ -1024,24 +1011,6 @@ class RustNode:
     def replacement_node(self, request: dict[str, Any]) -> dict[str, Any]:
         """IKA-457 stage 2.2: a replacement node (`replacementNode`) in one crossing. Timed as
         the replacement fills it replaces were (`rust.replacements`)."""
-        return self._exchange(request)
-
-    @timing.timed("rust.replacements")
-    def replacement_phase(self, request: dict[str, Any]) -> dict[str, Any]:
-        """IKA-458 stage 3.6a: a replacement phase's options, node, draws and phase
-        (`replacementPhase`) in one crossing."""
-        return self._exchange(request)
-
-    @timing.timed("rust.game")
-    def play_game(self, request: dict[str, Any], game: Any) -> dict[str, Any]:  # noqa: ANN401
-        """IKA-458 stage 3.6b: a game's turns (`playGame`) in one crossing, the game's sheets and
-        priors defined first if this process has not been given them (a board's game; a
-        generation game's `prepGame` defined it, and its line is empty)."""
-        if game.number not in self._games:
-            if len(self._games) >= 16:  # the port's own bound (`hiddenbench.rs`)
-                self._games.clear()
-            self._process.stdin.write(game.line)
-            self._games.add(game.number)
         return self._exchange(request)
 
     def parallel(self) -> dict[str, Any]:

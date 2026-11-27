@@ -4,7 +4,6 @@ The hidden bench was added after the open game, as `--hide-bench`, so for months
 command played the open game -- the easier one, and not the one that ships. IKA-123 made the
 caller name the condition. IKA-460 removed the open game, so there is nothing left to name:
 
-* `play_game` requires `sheets` (the two sixes) and has no `open_information`
 * `--hide-bench` is the default of every tool that took it, and `--open-bench` stops
 * `provenance` wants `information` (recorded open games are still read)
 
@@ -15,21 +14,12 @@ had, so an old open record still reads under the name it was written with.
 from __future__ import annotations
 
 import argparse
-import inspect
-from pathlib import Path
 
 import pytest
 
 from pokeuraou.benchflags import OPEN_REMOVED, add_bench_flags, bench_argv, require_bench
 from pokeuraou.provenance import agent_name, provenance
-from pokeuraou.selfplay import play_game
 from tests._harness import load_tool
-
-
-def test_play_game_has_no_open_game() -> None:
-    parameters = inspect.signature(play_game).parameters
-    assert "open_information" not in parameters
-    assert parameters["sheets"].default is inspect.Parameter.empty
 
 
 def test_provenance_has_no_default_information() -> None:
@@ -51,20 +41,6 @@ def test_the_bench_is_hidden_by_default_and_open_stops(capsys: pytest.CaptureFix
     with pytest.raises(SystemExit):
         _parser().parse_args(["--open-bench"])
     assert OPEN_REMOVED.split(":")[0] in capsys.readouterr().err
-
-
-def test_agent_drift_finds_a_call_that_does_not_name_the_sheets(tmp_path: Path) -> None:
-    drift = load_tool("agent_drift")
-    silent = tmp_path / "silent.py"
-    silent.write_text(
-        "play_game(reg, rng, a, b, 'x', search_limit=12)\n"
-        "play_game(reg, rng, a, b, 'x', sheets=s)\n"
-        "play_game(reg, rng, a, b, 'x', **kwargs)\n",
-        encoding="utf-8",
-    )
-    assert drift.unstated(silent) == [1]
-    # And the tree itself has none: `--check` passes.
-    assert drift.main(["--check"]) == 0
 
 
 def test_the_rating_zero_is_the_hidden_hp_share() -> None:

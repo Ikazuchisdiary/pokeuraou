@@ -17,21 +17,18 @@ import numpy as np
 import pytest
 
 from pokeuraou.actions import side_actions
-from pokeuraou.damage import register_mega_stones
 from pokeuraou.position import Position
-from pokeuraou.regulation import load_regulation
 from pokeuraou.selfplay import (
     END_REASONS,
     GameRecord,
     _close_record,
     final_position,
-    play_game,
     replay_shown,
 )
-from pokeuraou.teams import load_roster
 from tests._harness import load_tool
 
 from ._port import Budget, resolve_turn
+from ._worker_games import worker_games
 
 # `tools/encode_dataset.py` imports `pokeuraou.value`, which imports torch at module
 # scope; without the learn group this file raised at collection (IKA-51).
@@ -40,39 +37,27 @@ encode_dataset = load_tool("encode_dataset")
 
 
 @pytest.fixture(scope="module")
-def setup():  # noqa: ANN201
-    reg = load_regulation("gen9championsvgc2026regmb")
-    register_mega_stones(reg)
-    roster = load_roster("rizabanadohido")
-    return reg, list(roster.sets)[:6]
-
-
-def _payload(record) -> dict:  # noqa: ANN001
-    return json.loads(json.dumps(record.to_json(objective="hp-share", search_limit=2)))
-
-
-def _play(setup, *, seed: int, max_turns: int, hidden: bool) -> dict:  # noqa: ANN001
-    reg, sheet = setup
-    own = sheet[:4]
-    foe = [sheet[i] for i in (1, 0, 4, 5)]
-    record = play_game(
-        reg, np.random.default_rng(seed), own, foe, "test",
-        search_limit=2, max_turns=max_turns,
-        sheets=(sheet, sheet),
-    )
-    return _payload(record)
+def played(tmp_path_factory):  # noqa: ANN001, ANN201
+    """(the regulation, a finished game of the Rust generation worker whose last decision is a
+    move). IKA-463: these were `play_game`'s games; the worker writes finished games only, so the
+    capped game of IKA-87's test (`endReason` turn-cap) is not made here any more."""
+    pool, games = worker_games(tmp_path_factory.mktemp("final"), 3)
+    for game in games:
+        moves = [d for d in game["decisions"] if d["kind"] == "move"]
+        if game["decisions"][-1]["kind"] == "move" and len(moves) >= 2:
+            return pool.reg, game
+    raise AssertionError("no game of the three ends on a move decision; pick another seed")
 
 
 @pytest.fixture(scope="module")
-def finished(setup) -> dict:  # noqa: ANN001
+def setup(played):  # noqa: ANN001, ANN201
+    return played[0], None
+
+
+@pytest.fixture(scope="module")
+def finished(played) -> dict:  # noqa: ANN001
     """A hidden-bench game played to its result."""
-    return _play(setup, seed=5, max_turns=40, hidden=True)
-
-
-@pytest.fixture(scope="module")
-def capped(setup) -> dict:  # noqa: ANN001
-    """A hidden-bench game stopped by the cap (`max_turns * 2` decision steps) after a move."""
-    return _play(setup, seed=8, max_turns=3, hidden=True)
+    return played[1]
 
 
 def _board(pos: dict) -> list:
@@ -122,16 +107,6 @@ def test_the_final_position_follows_the_last_decision(setup, finished) -> None: 
     assert _board(finished["finalPosition"]) in boards
 
 
-def test_a_capped_game_records_the_board_the_cap_left(setup, capped) -> None:  # noqa: ANN001
-    reg, _ = setup
-    game = capped
-    assert game["endReason"] == "turn-cap"
-    assert game["outcome"] is None
-    final = final_position(game)
-    assert final is not None and not final.ended
-    assert _board(game["finalPosition"]) in _branches(reg, _last_move(game))
-
-
 def test_the_check_is_not_vacuous(setup, finished) -> None:  # noqa: ANN001
     """The last decision's own board is not among its branches: the check can fail."""
     reg, _ = setup
@@ -142,8 +117,8 @@ def test_the_check_is_not_vacuous(setup, finished) -> None:  # noqa: ANN001
     assert _board(earlier["position"]) not in _branches(reg, last)
 
 
-def test_every_reason_is_a_named_one(finished, capped) -> None:  # noqa: ANN001
-    assert {finished["endReason"], capped["endReason"]} <= set(END_REASONS)
+def test_every_reason_is_a_named_one(finished) -> None:  # noqa: ANN001
+    assert finished["endReason"] in END_REASONS
 
 
 def test_the_reason_reads_the_board(finished) -> None:  # noqa: ANN001
