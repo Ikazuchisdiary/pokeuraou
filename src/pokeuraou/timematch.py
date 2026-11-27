@@ -88,6 +88,8 @@ class Condition:
     #: is a board's ``d1@W``), or None: the rule.
     width: int | None = None
     child_q: int | None = None
+    #: Where a deepened move is read (`humanplay.DEEPEN_ROADS`, IKA-464); None: the module's.
+    road: str | None = None
     #: The width rule, then -- instead of the deepening -- the stages of a ladder read
     #: coarse to fine within the rest of the budget (`humanplay.Agent.ladder`, IKA-367): a
     #: name in `ladder.LADDERS` or stages joined by ``+``. None: off.
@@ -137,6 +139,7 @@ class Condition:
             + (f", selection read {self.selection}" if self.selection is not None else "")
             + (f" for {self.selection_seconds:g} s" if self.selection_seconds is not None else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
+            + (f", deepened in the {self.road}" if self.road is not None else "")
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -148,7 +151,7 @@ class Condition:
 
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
-                  "width", "child_q", "ladder", "hidden_ladder", "root_widths", "selection",
+                  "width", "child_q", "road", "ladder", "hidden_ladder", "root_widths", "selection",
                   "selection_seconds", "child")
 
 
@@ -210,6 +213,10 @@ def parse_condition(spec: str) -> Condition:
             got["max_levels"] = int(value) or None
         elif key == "child_q":
             got["child_q"] = int(value)
+        elif key == "road":
+            if value not in humanplay.DEEPEN_ROADS:
+                raise ValueError(f"road is one of {humanplay.DEEPEN_ROADS}, not {value!r}")
+            got["road"] = value
         elif key == "width":
             got[key] = int(value)
         elif key in ("ladder", "hidden_ladder"):
@@ -535,7 +542,7 @@ class Match:
             selection_reading=condition.selection,
             # A board reads the stages a reading names, on the count clock (no seconds).
             selection_seconds=condition.selection_seconds, max_levels=condition.max_levels,
-            child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
+            child_q=condition.child_q, road=condition.road, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).
             ponder=False, ponder_seconds=humanplay.PLAY_PONDER_SECONDS,
         )

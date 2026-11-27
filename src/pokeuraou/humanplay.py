@@ -1243,6 +1243,8 @@ class Agent:
     max_levels: int | None = None
     #: The children's menus by the Q's k best (IKA-307, ``c<k>``), or None: `narrow`'s.
     child_q: int | None = None
+    #: Where a deepened move is read (`DEEPEN_ROADS`, IKA-464), or None: `DEEPEN_ROAD`.
+    road: str | None = None
     #: The root's swap oracle while deepening (a label's ``s<W>`` / ``sall``, IKA-293/310;
     #: IKA-307's allocation "width first, the rest to deepening with the swap oracle"):
     #: the width of the menu whose rest it asks (`deepen.ALL_ACTIONS`: every legal
@@ -2089,6 +2091,7 @@ class HumanGame:
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
                 cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
                 outside=outside, progress=progress if ladder is None else None, ladder=ladder,
+                road=agent.road,
             )
         except EquilibriumError:
             return None
