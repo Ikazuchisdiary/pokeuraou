@@ -345,12 +345,21 @@ _FROM: dict[int, tuple[Any, RemoteValue]] = {}
 
 def served_from(owner: Any) -> RemoteValue:  # noqa: ANN401 - a leaf with `from_encoded`, `encoder`
     """A `RemoteValue` of this process on a server answering with ``owner.from_encoded`` (one per
-    leaf, kept for the life of the process: a module fixture may hold the leaf for many tests)."""
+    leaf, kept for the life of the process: a module fixture may hold the leaf for many tests).
+    The server answers each connection on its own thread, and the owner may be a `RemoteValue`
+    with one block and one connection: its calls go one at a time (IKA-467: the port's cell
+    threads ask at once, and two calls wrote each other's rows into the owner's block)."""
     found = _FROM.get(id(owner))
     if found is None:
         import atexit
 
-        model = model_of(owner.from_encoded)
+        scores = model_of(owner.from_encoded)
+        lock = threading.Lock()
+
+        def model(arrays: dict[str, np.ndarray], rows: int) -> np.ndarray:
+            with lock:
+                return scores(arrays, rows)
+
         shut, address = serve({"stub": model})
         leaf = RemoteValue(address, "stub", owner.encoder, buffer_bytes=64 << 20)
 

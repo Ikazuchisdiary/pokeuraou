@@ -35,6 +35,12 @@ from .regulation import Regulation
 CHILD_WIDTH = 8
 #: The branches a refined cell keeps (as the search's depth 2 kept, IKA-12).
 BRANCHES = 3
+#: Cells a step refines (IKA-467): the port picks this many best cells, fills their children
+#: on its cell threads and solves the tree again once. The same at any thread count, so a read
+#: on counted cells is the same read on 1 thread or 16; 1 is the read before IKA-467. At 8 the
+#: analysis mode's 10 s read refined 1.5 to 4.1 times the cells of 1 on two recorded positions
+#: (1, 4 and 16 threads); 16 was slower than 8 on one of them at 1 thread.
+BATCH = 8
 #: A slice of wall time between two readings of the move's budget, in milliseconds.
 SLICE_MS = 250.0
 #: Steps in a slice where the budget is read off counted work (a `deepen.Cost`).
@@ -184,11 +190,13 @@ def deepen_move(  # noqa: PLR0913, PLR0915, C901 - the node, the budget and the 
     progress: Callable[[Step], None] | None = None,
     hidden: bool = True,
     grow: Callable[[float], Any] | None = None,
+    batch: int | None = None,
 ) -> Answer:
     """Side ``me``'s deepened answer on the menus ``ours`` (side 0's) x ``theirs`` over the
     other side's completions ``items`` (one exact item for an open node), the budget
     ``cells`` read by ``cost`` as `deepen._Meter` reads it (None: counted cells). ``grow``
-    (`deepen.Grow`, IKA-354) is asked before each slice for actions to add to the root."""
+    (`deepen.Grow`, IKA-354) is asked before each slice for actions to add to the root.
+    ``batch`` is the cells a step refines (None: `BATCH`)."""
     from .beliefnode import _encoder_for, node_request, served_leaf  # noqa: PLC2701
     from .deepen import MAX_LEVELS
     from .encode import rules_of
@@ -211,6 +219,7 @@ def deepen_move(  # noqa: PLR0913, PLR0915, C901 - the node, the budget and the 
         "weights": [float(w) for w in weights],
         "outside": None if outside is None else [_codes(outside[0]), _codes(outside[1])],
         "levels": guard, "discount": discount, "branches": BRANCHES, "childWidth": CHILD_WIDTH,
+        "batch": max(1, int(BATCH if batch is None else batch)),
         **_q_server(reg),
     }
     answer = port.ask(reg, lambda node: node._exchange(start))  # noqa: SLF001
@@ -344,4 +353,4 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
     )
 
 
-__all__ = ["BRANCHES", "CHILD_WIDTH", "COUNTS", "SLICE_MS", "Answer", "deepen_move"]
+__all__ = ["BATCH", "BRANCHES", "CHILD_WIDTH", "COUNTS", "SLICE_MS", "Answer", "deepen_move"]

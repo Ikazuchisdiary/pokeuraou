@@ -1185,6 +1185,8 @@ class Agent:
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
     ponder: bool = False
     ponder_seconds: float = PLAY_PONDER_SECONDS
+    #: The cells a step of the deepening refines (IKA-467), or None: `portdeepen.BATCH`.
+    batch: int | None = None
 
     def __post_init__(self) -> None:
         if self.clock not in CLOCKS:
@@ -1252,6 +1254,7 @@ def solve_move(
     progress: Callable[[Any], None] | None = None,
     discount: float | None = None,
     grow: Any = None,  # noqa: ANN401 - deepen.Grow
+    batch: int | None = None,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game when ``exact`` (one exact completion a side, `open_spreads`), else the
@@ -1259,7 +1262,8 @@ def solve_move(
     `beliefNode` (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens best first in
     the port (`portdeepen`, IKA-464), the budget read by ``cost``; ``outside`` adds the
     root's swap oracle; ``levels`` and ``discount`` are the depth guard and the depth
-    discount (IKA-342); ``grow`` widens the root mid-read (`deepen.Grow`, IKA-354). What
+    discount (IKA-342); ``grow`` widens the root mid-read (`deepen.Grow`, IKA-354);
+    ``batch`` is the cells a step refines (None: `portdeepen.BATCH`, IKA-467). What
     `HumanGame` asks at each move, and what the analysis mode asks with no budget
     (IKA-337). Raises `EquilibriumError` as the solves do."""
     you = 1 - me
@@ -1275,7 +1279,7 @@ def solve_move(
         got = portdeepen.deepen_move(
             reg, pos, me, list(ours), list(theirs), items, leaf, budget=budget, cells=cells,
             cost=cost, levels=levels, discount=discount, outside=outside, progress=progress,
-            hidden=not exact, grow=grow,
+            hidden=not exact, grow=grow, batch=batch,
         )
         return SolvedMove(
             strategy=got.strategy, model=_averaged(got.replies, [item.weight for item in items]),
@@ -1760,7 +1764,7 @@ class HumanGame:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
                 cells=cells, cost=cost, levels=agent.max_levels,
-                outside=outside, progress=progress,
+                outside=outside, progress=progress, batch=agent.batch,
             )
         except EquilibriumError:
             return None
@@ -2318,6 +2322,7 @@ def play(
            if agent.oracle is not None else {}),
         **({"maxLevels": agent.max_levels} if agent.max_levels is not None else {}),
         **({"ponder": {"seconds": agent.ponder_seconds}} if agent.ponder else {}),
+        **({"batch": agent.batch} if agent.batch is not None else {}),
         "rule": {
             "widths": list(WIDTHS),
             "widthShare": WIDTH_SHARE,

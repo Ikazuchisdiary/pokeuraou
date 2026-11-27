@@ -202,8 +202,9 @@ def test_the_person_seat_solves_its_replacements(pool, monkeypatch) -> None:  # 
         return got
 
     monkeypatch.setattr(humanplay.HumanGame, "_replacement_mixture", spy)
+    # One cell a step (IKA-467): this pair's game, as it was, reaches a person's replacement.
     lines = timematch.play_pair(
-        _match(pool, _cond("a", 0.1), _cond("b", 0.1), turns=12), 2,
+        _match(pool, _cond("a", 0.1, batch=1), _cond("b", 0.1, batch=1), turns=12), 2,
         (pool.teams[0], pool.teams[1]),
     )
     rows = [r for ln in lines for r in ln["others"] if r["kind"] == "replacement"]

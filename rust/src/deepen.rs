@@ -16,7 +16,7 @@
 //!   "menus": [A0, A1],               // the root's menus, side 0's and side 1's (`Act` codes)
 //!   "weights": [w..],                // the other side's completions (its jobs, in order)
 //!   "outside": [A0, A1] | null,      // the swap oracle's candidates (`sall`: every legal action)
-//!   "levels": L, "discount": d | null, "branches": 3, "childWidth": 8,
+//!   "levels": L, "discount": d | null, "branches": 3, "childWidth": 8, "batch": K,
 //!   "qServer": S, "properties": bool, "megaFromSlots": bool }
 //! { "kind": "deepenRun", "id": n, "ms": t?, "cells": c?, "steps": k?, "grow": [A0, A1]?,
 //!   "walk": bool? }                  // false: the lines of the last walk (default true)
@@ -40,6 +40,15 @@
 //! default was `narrow`'s damage order, which is not in the port), the child's matrix on the
 //! inference server and its zero-sum LP. A finished branch is its result. The cell's value is
 //! its branches' values, weighted, and every node up to the root is solved again.
+//!
+//! **A batch** (IKA-467, `batch` K, default 1): a step refines the K best cells, each picked
+//! as the best with the ones picked before it in this step set aside. Their turns are resolved
+//! one after another, the children's menus of all of them are one `menus_of`, and the
+//! children's fills and LPs run on the port's cell threads (`par::Pool`, each thread with its
+//! own encoder and its own block for the leaf's arrays) or, on one thread, in order. They are
+//! applied in the order picked, and the tree is solved again once: each node on a refined
+//! cell's path, deepest first, once, and the root once. A step's answer is the same at any
+//! thread count; K = 1 is the read before IKA-467.
 //!
 //! **The priority** is `deepen.py`'s ``bern/gap`` (d(1 - d) over the two actions' regrets plus
 //! `GAP_FLOOR`), times the completion's weight at the root; below it a node's cells inherit
@@ -180,6 +189,8 @@ struct Root {
     eq: Eq,
     children: BTreeMap<(usize, usize, usize), Branches>,
     refused: BTreeSet<(usize, usize, usize)>,
+    /// The root's LPs solved (`rootSolves`, IKA-467's positive control).
+    solves: u64,
 }
 
 impl Root {
@@ -217,6 +228,7 @@ impl Root {
 
     /// Re-solve at today's prices; the last answer stands where the LP fails.
     fn solve(&mut self) -> bool {
+        self.solves += 1;
         match solve_bayes(&self.prices, self.m(), self.n(), &self.w) {
             Some(eq) => {
                 self.eq = eq;
@@ -247,6 +259,53 @@ enum Target {
     Root((usize, usize, usize)),
     Node(usize, (usize, usize)),
 }
+
+/// The cells picked so far in a step (IKA-467): the next pick sets them aside, as it sets
+/// aside the refined and the refused ones.
+#[derive(Default)]
+struct Pending {
+    root: HashSet<(usize, usize, usize)>,
+    nodes: HashSet<(usize, (usize, usize))>,
+}
+
+impl Pending {
+    fn add(&mut self, target: Target) {
+        match target {
+            Target::Root(cell) => {
+                self.root.insert(cell);
+            }
+            Target::Node(at, cell) => {
+                self.nodes.insert((at, cell));
+            }
+        }
+    }
+}
+
+/// A `beliefNode` answer as the tree reads it: its notes, its wait on the server, and the
+/// matrices, a refusal (`Ok(Err)`) or a fault (`Err`).
+struct Filled {
+    notes: Vec<String>,
+    wait_us: f64,
+    got: Result<Result<Vec<f64>, String>, Value>,
+}
+
+/// A child's fill and its LP: what a cell thread hands back (IKA-467).
+struct ChildFill {
+    filled: Filled,
+    eq: Option<Eq>,
+}
+
+/// A picked cell's turn (IKA-467): its kept branches and their total, or None where the cell
+/// is refused before its children (its turn refused or suspended, no branch, a menu empty).
+struct Prep {
+    target: Target,
+    level: usize,
+    branches: Option<(Vec<(f64, Position)>, f64)>,
+}
+
+/// The step's phases, in microseconds (`phaseUs`): picking, the turns, the children's menus,
+/// the children's fills and LPs with their adoption, solving the tree again, and the oracle.
+const PHASES: [&str; 6] = ["pick", "turns", "menus", "fills", "solve", "oracle"];
 
 /// A node met while looking for the best cell: its bound, the order it was met, what it
 /// inherited (None at the root).
@@ -313,11 +372,102 @@ struct Read {
     level_sum: u64,
     root_sum: u64,
     elapsed: std::time::Duration,
+    /// Cells refined in a step (IKA-467).
+    batch: usize,
+    /// Microseconds in each of `PHASES`.
+    phase_us: [f64; 6],
+    /// Children filled on the cell threads (`parallelFills`, the positive control).
+    parallel_fills: u64,
 }
 
 thread_local! {
     static READS: RefCell<HashMap<u64, Read>> = RefCell::new(HashMap::new());
     static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// A cell thread's own blocks for the leaf's arrays (IKA-467), each beside the name of the
+    /// block it stands in for: the caller's block is the asking thread's, and two threads
+    /// writing one block would read each other's values.
+    static OWN_BLOCKS: RefCell<Vec<(String, crate::shm::Shared)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The cell threads' blocks made so far, for their names.
+static OWN_MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Blocks a cell thread keeps at most.
+const OWN_KEPT: usize = 4;
+
+/// `server` (a leaf's) with this thread's own block of the same size in place of its block.
+fn own_server(server: &Value) -> Result<Value, String> {
+    let name = server["shm"].as_str().ok_or("the leaf's server names no block")?;
+    let bytes = server["bytes"].as_u64().ok_or("the leaf's server gives no block size")? as usize;
+    let own = OWN_BLOCKS.with(|blocks| -> Result<String, String> {
+        let mut blocks = blocks.borrow_mut();
+        if let Some((_, block)) = blocks.iter().find(|(of, block)| of == name && block.capacity() >= bytes) {
+            return Ok(block.name().to_string());
+        }
+        let k = OWN_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let block = crate::shm::Shared::create(&format!("pokeuraou_d{}_{k}", std::process::id()), bytes)
+            .ok_or("a cell thread could not make a block of its own")?;
+        let made = block.name().to_string();
+        if blocks.len() >= OWN_KEPT {
+            blocks.remove(0);
+        }
+        blocks.push((name.to_string(), block));
+        Ok(made)
+    })?;
+    let mut server = server.clone();
+    server["shm"] = json!(own);
+    Ok(server)
+}
+
+/// `request` (a `beliefNode`'s) with the two lists (side 0's, side 1's) and their features.
+fn fill_request(reg: &Reg, mut request: Value, ours: &[SideAct], theirs: &[SideAct]) -> Value {
+    request["ours"] = request_actions(ours);
+    request["theirs"] = request_actions(theirs);
+    request["rows"] = json!(ours.len());
+    request["cols"] = json!(theirs.len());
+    request["rowFeat"] = Value::Array(ours.iter().map(|a| crate::qmenus::action_feature(reg, a)).collect());
+    request["colFeat"] = Value::Array(theirs.iter().map(|a| crate::qmenus::action_feature(reg, a)).collect());
+    request["solve"] = json!([]);
+    request
+}
+
+/// `beliefNode` on `request`, read as a `Filled`.
+fn filled(reg: &Reg, encoder: &crate::encode::Encoder, request: &Value) -> Filled {
+    let answer = crate::beliefplan::belief_node(reg, encoder, request);
+    if let Some(bad) = failed(&answer) {
+        return Filled { notes: Vec::new(), wait_us: 0.0, got: Err(bad) };
+    }
+    let notes = answer["unmodelled"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect();
+    let wait_us = answer["served"]["waitUs"].as_f64().unwrap_or(0.0);
+    let got = match answer.get("refused") {
+        Some(refused) => Ok(Err(format!("the port refused a cell: {refused}"))),
+        None => f64s(&answer["matrices"]).map(Ok).map_err(|e| json!({ "fault": e })),
+    };
+    Filled { notes, wait_us, got }
+}
+
+/// A child's request: `base` (the read's `child_base`) on the position, held by number for
+/// this thread or written out for a cell thread, with the two lists.
+fn child_request(base: &Value, reg: &Reg, pos: &Position, rows: &[SideAct], cols: &[SideAct], held: bool) -> Value {
+    let mut request = base.clone();
+    let id = if held { json!({ "held": crate::held::keep(pos) }) } else { pos.to_json() };
+    request["position"] = id.clone();
+    request["p0"] = id;
+    request["jobs"][0]["pk"] = json!(pos.sides[1]
+        .pokemon
+        .iter()
+        .map(|m| json!([crate::reg::to_id(m.species.as_str()), crate::reg::to_id(m.base_species.as_str()), m.slot]))
+        .collect::<Vec<_>>());
+    fill_request(reg, request, rows, cols)
+}
+
+/// A child's fill and, where it has matrices, its zero-sum LP.
+fn child_fill(reg: &Reg, encoder: &crate::encode::Encoder, request: &Value, rows: usize, cols: usize) -> ChildFill {
+    let filled = filled(reg, encoder, request);
+    let eq = match &filled.got {
+        Ok(Ok(payoff)) => solve_zero(payoff, rows, cols),
+        _ => None,
+    };
+    ChildFill { filled, eq }
 }
 
 /// The process's reads started and steps taken: the positive control a test reads.
@@ -370,31 +520,24 @@ impl Read {
         &mut self,
         reg: &Reg,
         encoder: &crate::encode::Encoder,
-        mut request: Value,
+        request: Value,
         ours: &[SideAct],
         theirs: &[SideAct],
     ) -> Result<Result<Vec<f64>, String>, Value> {
-        request["ours"] = request_actions(ours);
-        request["theirs"] = request_actions(theirs);
-        request["rows"] = json!(ours.len());
-        request["cols"] = json!(theirs.len());
-        request["rowFeat"] = Value::Array(ours.iter().map(|a| crate::qmenus::action_feature(reg, a)).collect());
-        request["colFeat"] = Value::Array(theirs.iter().map(|a| crate::qmenus::action_feature(reg, a)).collect());
-        request["solve"] = json!([]);
-        let answer = crate::beliefplan::belief_node(reg, encoder, &request);
-        if let Some(bad) = failed(&answer) {
-            return Err(bad);
+        let request = fill_request(reg, request, ours, theirs);
+        let got = filled(reg, encoder, &request);
+        self.absorb(got)
+    }
+
+    /// A fill's notes and wait taken in; its matrices, refusal or fault.
+    fn absorb(&mut self, filled: Filled) -> Result<Result<Vec<f64>, String>, Value> {
+        let Filled { notes, wait_us, got } = filled;
+        if got.is_err() {
+            return got;
         }
-        for note in answer["unmodelled"].as_array().into_iter().flatten() {
-            if let Some(text) = note.as_str() {
-                self.notes.insert(text.to_string());
-            }
-        }
-        self.wait_us += answer["served"]["waitUs"].as_f64().unwrap_or(0.0);
-        if let Some(refused) = answer.get("refused") {
-            return Ok(Err(format!("the port refused a cell: {refused}")));
-        }
-        f64s(&answer["matrices"]).map(Ok).map_err(|e| json!({ "fault": e }))
+        self.notes.extend(notes);
+        self.wait_us += wait_us;
+        got
     }
 
     /// This side's prices of `rows` x `cols` in every completion, in its orientation.
@@ -431,8 +574,9 @@ impl Read {
             .collect())
     }
 
-    /// The best unrefined cell with a positive priority, or None (`deepen._best`).
-    fn best(&mut self) -> Option<Target> {
+    /// The best unrefined cell with a positive priority, or None (`deepen._best`); the cells in
+    /// `pending` are set aside.
+    fn best(&mut self, pending: &Pending) -> Option<Target> {
         let mut best: Option<(f64, Target)> = None;
         let mut blocked: f64 = 0.0;
         let mut met = 0u64;
@@ -452,7 +596,7 @@ impl Read {
                     let mut top: Option<(f64, usize)> = None;
                     for (c, s) in scores.iter().enumerate() {
                         let cell = (c / (m * n), (c / n) % m, c % n);
-                        if root.children.contains_key(&cell) || root.refused.contains(&cell) {
+                        if root.children.contains_key(&cell) || root.refused.contains(&cell) || pending.root.contains(&cell) {
                             continue;
                         }
                         if top.is_none_or(|(t, _)| *s > t) {
@@ -496,7 +640,10 @@ impl Read {
                     let mut top: Option<(f64, usize)> = None;
                     for (c, s) in scores.iter().enumerate() {
                         let cell = (c / n, c % n);
-                        if node.children.contains_key(&cell) || node.refused.contains(&cell) {
+                        if node.children.contains_key(&cell)
+                            || node.refused.contains(&cell)
+                            || pending.nodes.contains(&(at, cell))
+                        {
                             continue;
                         }
                         if top.is_none_or(|(t, _)| *s > t) {
@@ -533,8 +680,9 @@ impl Read {
         best.map(|(_, t)| t)
     }
 
-    /// Refine one cell (`deepen._expand`): Ok(true) when it took a deeper value.
-    fn expand(&mut self, reg: &Reg, encoder: &crate::encode::Encoder, target: Target) -> Result<bool, Value> {
+    /// A picked cell's turn (`deepen._expand`'s first half): its branches, the likeliest
+    /// `branches` of them, or None where the cell is refused before its children.
+    fn prepare(&mut self, reg: &Reg, target: Target) -> Prep {
         let (pos, pair, level) = match target {
             Target::Root((k, i, j)) => (self.root.comps[k].clone(), self.root.pair(i, j), 0),
             Target::Node(at, (i, j)) => {
@@ -545,18 +693,18 @@ impl Read {
         self.spent += 1;
         self.refines += 1;
         self.level_sum += level as u64;
-        self.root_sum += (self.root.comps.len() * self.root.m() * self.root.n()) as u64;
+        let refused = Prep { target, level, branches: None };
         let actions = [slot_actions(&pair[0]), slot_actions(&pair[1])];
         let result = match resolve_turn(reg, &pos, &actions, self.budget) {
             Ok(result) => result,
             Err(reason) => {
                 self.notes.insert(format!("the port refused a deepened cell's turn: {reason}"));
-                return Ok(false);
+                return refused;
             }
         };
         self.notes.extend(result.unmodelled.iter().cloned());
         if !result.suspended.is_empty() || result.branches.is_empty() {
-            return Ok(false);
+            return refused;
         }
         let mut branches: Vec<(f64, Position)> = result.branches.into_iter().map(|b| (b.probability, b.position)).collect();
         branches.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -566,11 +714,27 @@ impl Read {
         }
         let total: f64 = branches.iter().map(|b| b.0).sum();
         if total <= 0.0 {
-            return Ok(false);
+            return refused;
         }
-        let live: Vec<usize> = (0..branches.len()).filter(|&b| !branches[b].1.ended).collect();
-        let positions: Vec<Position> = live.iter().map(|&b| branches[b].1.clone()).collect();
-        let menus = if positions.is_empty() {
+        Prep { target, level, branches: Some((branches, total)) }
+    }
+
+    /// One step's picked cells refined (IKA-467): their turns, the children's menus in one
+    /// request, the children's fills and LPs (on the cell threads where there are several and
+    /// a pool), adopted in the order picked, and the tree solved again once.
+    fn step(&mut self, reg: &Reg, encoder: &crate::encode::Encoder, targets: Vec<Target>) -> Result<(), Value> {
+        let clock = Instant::now();
+        let mut preps: Vec<Prep> = targets.into_iter().map(|t| self.prepare(reg, t)).collect();
+        // The root's cells once a step: the step solves the root once (`Cost.root`).
+        self.root_sum += (self.root.comps.len() * self.root.m() * self.root.n()) as u64;
+        let mut clock = self.phase(1, clock);
+        // The children's menus by the Q: every live branch of every picked cell, in order.
+        let positions: Vec<Position> = preps
+            .iter()
+            .filter_map(|p| p.branches.as_ref())
+            .flat_map(|(branches, _)| branches.iter().filter(|b| !b.1.ended).map(|b| b.1.clone()))
+            .collect();
+        let mut menus = if positions.is_empty() {
             Vec::new()
         } else {
             let server = crate::served::Server::from_json(&self.q_server).map_err(|e| json!({ "fault": e }))?;
@@ -581,10 +745,119 @@ impl Read {
             self.child_passes += 1;
             self.child_ranked += positions.len() as u64;
             got.menus
-        };
-        if menus.iter().any(|[a, b]| a.is_empty() || b.is_empty()) {
-            return Ok(false);
         }
+        .into_iter();
+        drop(positions);
+        let mut menus_of: Vec<Vec<[Vec<SideAct>; 2]>> = Vec::with_capacity(preps.len());
+        for prep in preps.iter_mut() {
+            let live = prep.branches.as_ref().map_or(0, |(b, _)| b.iter().filter(|x| !x.1.ended).count());
+            let mine: Vec<[Vec<SideAct>; 2]> = (0..live).map(|_| menus.next().expect("a menu per live branch")).collect();
+            if mine.iter().any(|[a, b]| a.is_empty() || b.is_empty()) {
+                prep.branches = None;
+            }
+            menus_of.push(mine);
+        }
+        clock = self.phase(2, clock);
+        // The children's fills: on the cell threads, every one at once; else each as it is
+        // adopted, so a cell refused at a child fills none after it.
+        let pool = crate::par::Pool::global().filter(|_| self.batch > 1);
+        let base = self.child_base.clone();
+        let mut ready: Vec<std::vec::IntoIter<ChildFill>> = Vec::with_capacity(preps.len());
+        if let Some(pool) = pool {
+            let mut jobs: Vec<(usize, Value, usize, usize)> = Vec::new();
+            for (p, prep) in preps.iter().enumerate() {
+                let Some((branches, _)) = &prep.branches else { continue };
+                let mut mine = menus_of[p].iter();
+                for (_, pos) in branches.iter().filter(|b| !b.1.ended) {
+                    let [rows, cols] = mine.next().expect("a menu per live branch");
+                    jobs.push((p, child_request(&base, reg, pos, rows, cols, false), rows.len(), cols.len()));
+                }
+            }
+            let done = pool.map_with(
+                jobs.len(),
+                || crate::encode::Encoder::new(reg),
+                |own_encoder, k| {
+                    let (_, request, rows, cols) = &jobs[k];
+                    if !crate::par::on_worker() {
+                        return child_fill(reg, own_encoder, request, *rows, *cols);
+                    }
+                    let mut request = request.clone();
+                    match own_server(&request["server"]) {
+                        Ok(server) => request["server"] = server,
+                        Err(why) => {
+                            let fault = Filled { notes: Vec::new(), wait_us: 0.0, got: Err(json!({ "fault": why })) };
+                            return ChildFill { filled: fault, eq: None };
+                        }
+                    }
+                    child_fill(reg, own_encoder, &request, *rows, *cols)
+                },
+            );
+            self.parallel_fills += jobs.len() as u64;
+            let mut each: Vec<Vec<ChildFill>> = (0..preps.len()).map(|_| Vec::new()).collect();
+            for ((p, ..), got) in jobs.iter().zip(done) {
+                each[*p].push(got);
+            }
+            ready.extend(each.into_iter().map(Vec::into_iter));
+        } else {
+            ready.extend((0..preps.len()).map(|_| Vec::new().into_iter()));
+        }
+        let lazy = pool.is_none();
+        let mut refined: Vec<Target> = Vec::with_capacity(preps.len());
+        for ((prep, menus), ready) in preps.into_iter().zip(menus_of).zip(ready.iter_mut()) {
+            let target = prep.target;
+            let took = match prep.branches {
+                None => false,
+                Some((branches, total)) => {
+                    let mut fill = |pos: &Position, rows: &[SideAct], cols: &[SideAct]| -> ChildFill {
+                        if lazy {
+                            let request = child_request(&base, reg, pos, rows, cols, true);
+                            child_fill(reg, encoder, &request, rows.len(), cols.len())
+                        } else {
+                            ready.next().expect("a fill per live branch")
+                        }
+                    };
+                    self.adopt(target, prep.level, branches, total, menus, &mut fill)?
+                }
+            };
+            if took {
+                self.expanded += 1;
+                refined.push(target);
+            } else {
+                self.refused_count += 1;
+                match target {
+                    Target::Root(cell) => {
+                        self.root.refused.insert(cell);
+                    }
+                    Target::Node(at, cell) => {
+                        self.nodes[at].refused.insert(cell);
+                    }
+                }
+            }
+        }
+        clock = self.phase(3, clock);
+        self.propagate(&refined);
+        self.phase(4, clock);
+        Ok(())
+    }
+
+    /// Adds the time since `since` to phase `k`; now.
+    fn phase(&mut self, k: usize, since: Instant) -> Instant {
+        let now = Instant::now();
+        self.phase_us[k] += (now - since).as_secs_f64() * 1e6;
+        now
+    }
+
+    /// A picked cell's children made of its fills (`deepen._expand`'s second half): Ok(true)
+    /// when it took a deeper value. `fill` answers each live branch's fill, in order.
+    fn adopt(
+        &mut self,
+        target: Target,
+        level: usize,
+        branches: Vec<(f64, Position)>,
+        total: f64,
+        menus: Vec<[Vec<SideAct>; 2]>,
+        fill: &mut dyn FnMut(&Position, &[SideAct], &[SideAct]) -> ChildFill,
+    ) -> Result<bool, Value> {
         let mut made: Vec<(f64, Result<Child, f64>)> = Vec::with_capacity(branches.len());
         let mut menus = menus.into_iter();
         for (probability, child_pos) in branches {
@@ -597,16 +870,8 @@ impl Read {
                 continue;
             }
             let [rows, cols] = menus.next().expect("a menu per live branch");
-            let mut request = self.child_base.clone();
-            let id = json!({ "held": crate::held::keep(&child_pos) });
-            request["position"] = id.clone();
-            request["p0"] = id;
-            request["jobs"][0]["pk"] = json!(child_pos.sides[1]
-                .pokemon
-                .iter()
-                .map(|m| json!([crate::reg::to_id(m.species.as_str()), crate::reg::to_id(m.base_species.as_str()), m.slot]))
-                .collect::<Vec<_>>());
-            let payoff = match self.node_fill(reg, encoder, request, &rows, &cols)? {
+            let ChildFill { filled, eq } = fill(&child_pos, &rows, &cols);
+            let payoff = match self.absorb(filled)? {
                 Ok(flat) => flat,
                 Err(why) => {
                     self.notes.insert(why);
@@ -615,7 +880,7 @@ impl Read {
             };
             self.fills += 1;
             self.spent += (rows.len() * cols.len()) as u64;
-            let Some(eq) = solve_zero(&payoff, rows.len(), cols.len()) else {
+            let Some(eq) = eq else {
                 return Ok(false);
             };
             made.push((
@@ -669,35 +934,55 @@ impl Read {
         kids.iter().map(|(w, k)| w * self.kid_value(k)).sum()
     }
 
-    /// Write the refined cell's value and re-solve every node up to the root
-    /// (`deepen._propagate`). A node whose LP fails keeps its last answer, and stops it.
-    fn propagate(&mut self, target: Target) {
-        let mut here = target;
-        loop {
-            match here {
-                Target::Root((k, i, j)) => {
-                    let value = self.cell_value(&self.root.children[&(k, i, j)]);
-                    let n = self.root.n();
-                    self.root.prices[k][i * n + j] = if self.root.side == 0 { value } else { -value };
-                    self.root.solve();
-                    return;
+    /// Write the refined cells' values and re-solve every node on their paths up to the root
+    /// (`deepen._propagate`), each once (IKA-467): the deepest first, so a node reads its
+    /// children's new answers, and the root last. A node whose LP fails keeps its last answer,
+    /// and its path stops there: its parent is solved again only for another of its cells.
+    fn propagate(&mut self, refined: &[Target]) {
+        // The cells to write again, by node (the deepest, then the first made, first).
+        let mut below: BTreeMap<(std::cmp::Reverse<usize>, usize), BTreeSet<(usize, usize)>> = BTreeMap::new();
+        let mut root: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
+        for target in refined {
+            match *target {
+                Target::Root(cell) => {
+                    root.insert(cell);
                 }
                 Target::Node(at, cell) => {
-                    let value = self.cell_value(&self.nodes[at].children[&cell]);
-                    let node = &mut self.nodes[at];
-                    let n = node.n();
-                    node.payoff[cell.0 * n + cell.1] = value;
-                    match solve_zero(&node.payoff, node.rows.len(), n) {
-                        Some(eq) => node.eq = eq,
-                        None => return,
-                    }
-                    here = match node.up {
-                        Up::Root(cell) => Target::Root(cell),
-                        Up::Node(parent, cell) => Target::Node(parent, cell),
-                    };
+                    below.entry((std::cmp::Reverse(self.nodes[at].level), at)).or_default().insert(cell);
                 }
             }
         }
+        while let Some(((_, at), cells)) = below.pop_first() {
+            let values: Vec<((usize, usize), f64)> =
+                cells.iter().map(|cell| (*cell, self.cell_value(&self.nodes[at].children[cell]))).collect();
+            let node = &mut self.nodes[at];
+            let n = node.n();
+            for (cell, value) in values {
+                node.payoff[cell.0 * n + cell.1] = value;
+            }
+            match solve_zero(&node.payoff, node.rows.len(), n) {
+                Some(eq) => node.eq = eq,
+                None => continue,
+            }
+            match node.up {
+                Up::Root(cell) => {
+                    root.insert(cell);
+                }
+                Up::Node(parent, cell) => {
+                    let level = self.nodes[parent].level;
+                    below.entry((std::cmp::Reverse(level), parent)).or_default().insert(cell);
+                }
+            }
+        }
+        if root.is_empty() {
+            return;
+        }
+        let n = self.root.n();
+        for (k, i, j) in root {
+            let value = self.cell_value(&self.root.children[&(k, i, j)]);
+            self.root.prices[k][i * n + j] = if self.root.side == 0 { value } else { -value };
+        }
+        self.root.solve();
     }
 
     fn support_rows(&self) -> Vec<usize> {
@@ -1078,6 +1363,10 @@ impl Read {
             "grownCells": self.grown_cells,
             "levelSum": self.level_sum,
             "rootSum": self.root_sum,
+            "batch": self.batch,
+            "rootSolves": root.solves,
+            "parallelFills": self.parallel_fills,
+            "phaseUs": PHASES.iter().zip(self.phase_us).map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
             "elapsedMs": self.elapsed.as_secs_f64() * 1e3,
             "unmodelled": self.notes.iter().collect::<Vec<_>>(),
             // The root's cells read deeper than the leaf, and the ones refused: (k, i, j),
@@ -1115,29 +1404,30 @@ impl Read {
             self.steps += 1;
             STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if self.oracle.is_some() {
+                let clock = Instant::now();
                 self.probe(reg, encoder)?;
-                if self.widen(reg, encoder)? {
+                let widened = self.widen(reg, encoder)?;
+                self.phase(5, clock);
+                if widened {
                     continue;
                 }
             }
-            let Some(target) = self.best() else {
+            let clock = Instant::now();
+            let Some(first) = self.best(&Pending::default()) else {
+                self.phase(0, clock);
                 self.exhausted = true;
                 break "exhausted";
             };
-            if self.expand(reg, encoder, target)? {
-                self.expanded += 1;
-                self.propagate(target);
-            } else {
-                self.refused_count += 1;
-                match target {
-                    Target::Root(cell) => {
-                        self.root.refused.insert(cell);
-                    }
-                    Target::Node(at, cell) => {
-                        self.nodes[at].refused.insert(cell);
-                    }
-                }
+            let mut pending = Pending::default();
+            pending.add(first);
+            let mut targets = vec![first];
+            while targets.len() < self.batch {
+                let Some(next) = self.best(&pending) else { break };
+                pending.add(next);
+                targets.push(next);
             }
+            self.phase(0, clock);
+            self.step(reg, encoder, targets)?;
         };
         self.elapsed += started.elapsed();
         Ok(why)
@@ -1255,6 +1545,7 @@ fn start(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Result<V
             eq: Eq { value: 0.0, x: Vec::new(), ys: Vec::new(), row_loss: Vec::new(), col_loss: Vec::new() },
             children: BTreeMap::new(),
             refused: BTreeSet::new(),
+            solves: 0,
         },
         nodes: Vec::new(),
         oracle,
@@ -1284,6 +1575,9 @@ fn start(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Result<V
         level_sum: 0,
         root_sum: 0,
         elapsed: std::time::Duration::ZERO,
+        batch: value["batch"].as_u64().unwrap_or(1).max(1) as usize,
+        phase_us: [0.0; 6],
+        parallel_fills: 0,
     };
     let (own, other) = (read.root.own.clone(), read.root.other.clone());
     read.root.prices = read.root_fill(reg, encoder, &own, &other)?;

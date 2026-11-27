@@ -22,6 +22,13 @@ from ._exact_standins import ExactQStub, exact_leaf
 from .test_humanplay import pool  # noqa: F401 - the fixture
 
 
+@pytest.fixture(autouse=True)
+def _one_cell_a_step(monkeypatch) -> None:  # noqa: ANN001
+    """The reads here are the deepening's of one cell a step (``batch`` 1), whose trees the
+    frozen answers of Python's deepening hold; a test of the batch names its own."""
+    monkeypatch.setattr(portdeepen, "BATCH", 1)
+
+
 @pytest.fixture
 def served(pool):  # noqa: ANN001, ANN201, F811
     from pokeuraou.inference import RemoteValue
@@ -82,6 +89,51 @@ def test_the_port_reads_a_move_deeper_on_counted_cells(pool, served) -> None:  #
             moved += abs(deep.value - depth1.value) > 1e-6
     assert portdeepen.COUNTS["reads"] == reads + 12
     assert moved >= 3, "the deepened value never left the depth-1 value"
+
+
+def _last_snapshot(pool, pos, me, served, cells, **kwargs) -> tuple:  # noqa: ANN001, ANN003, F811
+    """A read's answer and the port's last snapshot (the ``done`` report's)."""
+    steps: list = []
+    got = _read(pool, pos, me, served, cells, levels=4, progress=steps.append, **kwargs)
+    return got, steps[-1].root.port
+
+
+def test_a_batch_reads_the_same_tree_on_one_thread_and_on_several(pool, served) -> None:  # noqa: ANN001, F811
+    """IKA-467: a step of ``batch`` K refines the K best cells and solves the root once. The
+    read is the same at any thread count: at K = 8 on 1 thread and on 3 threads, the same
+    cells, steps, root solves, value, mixture and prices to the bit. The positive controls: the
+    3-thread reads filled children on the cell threads (``parallelFills``; none on 1 thread), a
+    step refined more than one cell and the root was solved once a step, not once a cell, while
+    at K = 1 it is solved once a refined cell (and once at the start). The comparison can fail:
+    before the stand-in leaf took its calls one at a time (`standin.served_from`), two cell
+    threads' rows met in its one block and the 3-thread reads took other values."""
+    keys = ("cells", "steps", "expanded", "refused", "fills", "nodes", "depth", "rootSolves",
+            "value", "x", "prices", "deep", "levelSum", "rootSum")
+    reads: dict[int, list] = {}
+    parallel: dict[int, int] = {}
+    try:
+        for threads in (1, 3):
+            humanplay.use_threads(threads)
+            reads[threads] = []
+            parallel[threads] = 0
+            for pos in _positions(pool, 2, seed=29):
+                for me in (0, 1):
+                    _got, snap = _last_snapshot(pool, pos, me, served, 3000, batch=8)
+                    reads[threads].append({k: snap[k] for k in keys})
+                    parallel[threads] += int(snap["parallelFills"])
+                    assert snap["batch"] == 8
+                    assert snap["expanded"] > snap["steps"] >= 2, "no step refined two cells"
+                    assert snap["rootSolves"] <= snap["steps"] + 1
+    finally:
+        humanplay.use_threads(1)
+    assert parallel[1] == 0 and parallel[3] > 0, parallel
+    for k, (one, three) in enumerate(zip(reads[1], reads[3], strict=True)):
+        assert one == three, (k, {key: (one[key], three[key]) for key in keys
+                                  if one[key] != three[key] and key != "prices"})
+    pos = _positions(pool, 1, seed=29)[0]
+    _got, one = _last_snapshot(pool, pos, 0, served, 3000, batch=1)
+    assert one["batch"] == 1 and one["expanded"] > 0
+    assert one["rootSolves"] == one["expanded"] + 1
 
 
 def test_the_swap_oracle_brings_in_actions_from_outside(pool, served) -> None:  # noqa: ANN001, F811

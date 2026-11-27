@@ -93,6 +93,8 @@ class Condition:
     #: The wall-clock seconds the selection reading runs (`humanplay.PLAY_SELECTION_SECONDS`
     #: is a person's game's 90); None: the stages the reading names.
     selection_seconds: float | None = None
+    #: The cells a step of the deepening refines (IKA-467), or None: `portdeepen.BATCH`.
+    batch: int | None = None
 
     @property
     def price_cores(self) -> int:
@@ -116,6 +118,7 @@ class Condition:
             + (f", width fixed at {self.width}" if self.width is not None else "")
             + (f", selection read {self.selection}" if self.selection is not None else "")
             + (f" for {self.selection_seconds:g} s" if self.selection_seconds is not None else "")
+            + (f", {self.batch} cell(s) a step" if self.batch is not None else "")
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -128,7 +131,7 @@ class Condition:
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
                   "width", "selection",
-                  "selection_seconds")
+                  "selection_seconds", "batch")
 
 
 def _oracle(spec: str) -> int | None:
@@ -188,6 +191,10 @@ def parse_condition(spec: str) -> Condition:
         elif key == "levels":
             got["max_levels"] = int(value) or None
         elif key == "width":
+            got[key] = int(value)
+        elif key == "batch":
+            if int(value) < 1:
+                raise ValueError(f"batch is a count of cells, 1 or more, not {value!r}")
             got[key] = int(value)
         elif key == "selection_seconds":
             got[key] = float(value)
@@ -490,6 +497,7 @@ class Match:
             oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).
             ponder=False, ponder_seconds=humanplay.PLAY_PONDER_SECONDS,
+            batch=condition.batch,
         )
 
 

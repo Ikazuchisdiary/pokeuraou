@@ -87,6 +87,14 @@ pub struct Pool {
 thread_local! {
     /// Set on a pool's own threads, for counting what ran off the asker's thread.
     static ON_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while this thread runs an item of a map (IKA-467): an item that fills a node asks
+    /// `Pool::global()` for its cells' pool, and the pool is busy with the map it is in.
+    static IN_MAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this thread is one of a pool's workers (not the thread that asked for the map).
+pub fn on_worker() -> bool {
+    ON_WORKER.with(|w| w.get())
 }
 
 impl Pool {
@@ -108,9 +116,14 @@ impl Pool {
         pool
     }
 
-    /// The process's pool, of `threads()`; None at 1, where nothing is shared.
+    /// The process's pool, of `threads()`; None at 1, where nothing is shared, and None inside
+    /// an item of a map (IKA-467): a map does not start another on the threads it holds, so
+    /// what an item asks for runs on that item's thread.
     pub fn global() -> Option<&'static Pool> {
         static GLOBAL: OnceLock<Option<&'static Pool>> = OnceLock::new();
+        if IN_MAP.with(|m| m.get()) {
+            return None;
+        }
         *GLOBAL.get_or_init(|| (threads() > 1).then(|| Pool::leaked(threads())))
     }
 
@@ -189,6 +202,7 @@ impl Pool {
         let failed: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);
         let task = || {
             let mut mine: Vec<(usize, Handoff<T>)> = Vec::new();
+            let was = IN_MAP.with(|m| m.replace(true));
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut local: Option<S> = None;
                 loop {
@@ -201,6 +215,7 @@ impl Pool {
                 }
                 // `local` goes here, on this thread, before the job is over.
             }));
+            IN_MAP.with(|m| m.set(was));
             if ON_WORKER.with(|w| w.get()) {
                 OFF_MAIN_ITEMS.fetch_add(mine.len(), Ordering::Relaxed);
             }
