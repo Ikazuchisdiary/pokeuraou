@@ -31,7 +31,8 @@ stages a rule writes past L5's, `unending`), which begins every stage while time
 One reader for both roots: the open game is the Bayesian game of one completion of weight 1,
 as `search._restricted_belief` is `_restricted_search` there. Cells are (row, column,
 completion), each completion's cell read in that completion's position (the determinization
-`_restricted_belief` uses).
+`_restricted_belief` used). IKA-463 removed `_restricted_search`, `_restricted_belief` and
+the agent's ``depth2_auto``; the ladder keeps their reading.
 
 Stages are written ``d<depth>r<rect>b<branches>k<child>[x]`` -- the depth (2 and up), the
 rectangle's side, the branches kept per refined cell (``a``: all), each child's menus by the
@@ -250,7 +251,7 @@ class LadderCost:
     node (its crossing, fold and LP), a resolved cell of a child's matrix, a forward pass
     of the Q for children's menus, and a child game read by a stage of its own (depth 3
     and up: its orderings, rectangles and LPs). Measured on the local form, one core, the
-    GPU leaf (`tools/position_set.py fit`)."""
+    GPU leaf (`tools/position_set.py fit`, removed in IKA-463)."""
 
     turn: float
     subgame: float
@@ -264,7 +265,7 @@ class LadderCost:
                 + work.get("reads", 0) * self.read)
 
 
-#: Measured (IKA-367, `tools/position_set.py fit`): non-negative least squares of each
+#: Measured (IKA-367, `tools/position_set.py fit`, removed in IKA-463): non-negative least squares of each
 #: stage's wall milliseconds on the work it added -- ladder L1 read at 64 s, one process with
 #: the machine to itself (a person's game), the stacked pass (`STACK`), the GPU leaf without
 #: CUDA graphs: 10 recorded open M-C positions and 6 hidden ones (3-6 completions), width 36;
@@ -652,7 +653,7 @@ def _read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the 
 
     ``memo`` (IKA-369): the caller's table of cells read, filled in place and read again --
     a read stopped and begun again with the same table reads no cell twice (the long
-    reference, `tools/position_set.py ladder-ref`). With it, a worker's cells are kept as
+    reference, `tools/position_set.py ladder-ref`, removed in IKA-463). With it, a worker's cells are kept as
     they arrive, also those a stop throws away before their turn; the answer is the same
     (a cell's value does not depend on when it was read). None: a table of this read's own.
     """

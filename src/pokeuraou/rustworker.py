@@ -25,9 +25,9 @@ from typing import Any
 
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN
-from .eqselect import DEFAULT_EQ_SELECT
 from .hidden import DEFAULT_BENCH_DROP
 from .regulation import repo_root
+from .selfplay import DEFAULT_EQ_SELECT
 
 #: The executable's subcommand.
 SUBCOMMAND = "selfplay-worker"

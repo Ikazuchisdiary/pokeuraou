@@ -63,15 +63,6 @@ OWN_RESOLUTION = {
     "driver's own default runs (IKA-98)",
     "time_match.py": "play_human's agent in both seats: q-nocover by the default Q, and a "
     "match stops without it as a board does (IKA-333)",
-    "position_set.py": "a verification position set read by time-match conditions: the menus "
-    "are q-nocover by the Q it names (the default Q), the same for every reading (IKA-362)",
-    "root_width.py": "reads a position set's recorded positions with a ladder at fixed or staged "
-    "root widths: menus q-nocover by the Q it names (the default Q), the same for every arm; "
-    "plays no game (IKA-418)",
-    "depth_outcome.py": "reads recorded held-out positions with a ladder to score its values "
-    "against the games' results: menus q-nocover by the Q it is given; plays no game (IKA-421)",
-    "child_menus.py": "measures child menus built by damage and by the Q it names (the "
-    "default Q); plays no game (IKA-362)",
     "selection_sweep.py": "reads selection cells as a person's move reads them, menus q-nocover "
     "by the Q it names (the default Q); plays no game (IKA-392)",
     "ranked_entry.py": "reads a ranked match's selection with play_human's own set-up "

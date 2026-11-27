@@ -154,7 +154,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - a report, and splitting it hides
         rank_theirs = leaf_ranking(reg, pos, 1, leaf, budget=budget)
         ours = narrow(reg, pos, 0, limit=args.limit, rank=rank_ours).actions
         theirs = narrow(reg, pos, 1, limit=args.limit, rank=rank_theirs).actions
-        result = search(reg, pos, ours, theirs, leaf, budget=budget, depth=1)
+        result = search(reg, pos, ours, theirs, leaf, budget=budget)
         eq = result.equilibrium
         payoff = np.asarray(result.payoff, dtype=np.float64)
         if args.save is not None:

@@ -31,7 +31,6 @@ from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import _decided  # noqa: E402
-from pokeuraou.search import search  # noqa: E402
 from pokeuraou.setup import parse_scenario  # noqa: E402
 from pokeuraou.value import BatchedValue, ValueConfig, build  # noqa: E402
 
@@ -214,18 +213,6 @@ def test_the_hidden_node_keeps_the_end_through_its_stacking(game) -> None:
     assert starts == [0, len(reference)]
 
 
-def test_one_sucker_punch_left_is_exactly_a_half_at_depth_two() -> None:
-    """IKA-253's control: every leaf of the second turn is decided, so the net drops out."""
-    reg, pos = _chomp_gambit(1)
-    encoder = Encoder(reg)
-    torch.manual_seed(7)
-    leaf = BatchedValue(build(encoder, ValueConfig()).eval(), encoder, device=torch.device("cpu"))
-    row = narrow(reg, pos, 0, limit=48).actions
-    col = narrow(reg, pos, 1, limit=48).actions
-    result = search(reg, pos, row, col, leaf, budget=Budget.matrix(), depth=2)
-    assert result.equilibrium.value == pytest.approx(0.5, abs=1e-9)
-
-
 def test_the_old_rule_leaves_the_nets_number_and_counts_the_same(game) -> None:
     """`EncodingRules(net_scores_ends=True)` is master's leaf, for a match measuring the fix."""
     from pokeuraou.encode import EncodingRules
@@ -251,9 +238,10 @@ def test_the_old_rule_leaves_the_nets_number_and_counts_the_same(game) -> None:
 
 @pytest.mark.parametrize("served", [False, True])
 def test_the_depth_two_cell_hidden_depth_two_reads_is_its_result(served: bool) -> None:
-    """`search._refined_value`, which IKA-111's `_restricted_belief` calls per cell and per bench
-    determinization: with one Sucker Punch left, Swords Dance into Sucker Punch leaves a turn in
-    which every cell ends -- Earthquake wins whatever Kingambit does -- so the cell is exactly 1."""
+    """`search._refined_value` (IKA-111's `_restricted_belief` called it per cell and per bench
+    determinization until IKA-463 removed it): with one Sucker Punch left, Swords Dance into
+    Sucker Punch leaves a turn in which every cell ends -- Earthquake wins whatever Kingambit
+    does -- so the cell is exactly 1."""
     from pokeuraou.inference import RemoteValue
     from pokeuraou.search import _refined_value
 

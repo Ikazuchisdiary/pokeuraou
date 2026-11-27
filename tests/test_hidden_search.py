@@ -63,7 +63,7 @@ def test_nothing_hidden_is_the_old_search_exactly(setup) -> None:  # noqa: ANN00
     reg, sheet, position = setup
     ours, theirs = _menus(reg, position)
     budget = Budget.matrix()
-    before = search(reg, position, ours, theirs, HP_SHARE.batch, budget=budget, depth=1)
+    before = search(reg, position, ours, theirs, HP_SHARE.batch, budget=budget)
     after = belief_solve(
         reg, position, ours, theirs,
         _spreads(reg, position, sheet, seen=SEEN_ALL), _leaves(), budget=budget,
@@ -205,55 +205,6 @@ def replacement():  # noqa: ANN201
     register_mega_stones(reg)
     position = Position.from_json(data["position"])
     return reg, position, replacements_needed(reg, position), data
-
-
-def _replace(reg, position, owed, sheets, shown):  # noqa: ANN001, ANN202
-    import numpy as np
-
-    from pokeuraou.selfplay import GameRecord, _do_replacement_node
-
-    record = GameRecord(own_team=[], foe_team=[], foe_archetype="test")
-    _do_replacement_node(
-        reg, np.random.default_rng(3), position.copy(), owed, record,
-        (HP_SHARE.batch, HP_SHARE.batch), sheets=sheets, shown=shown,
-    )
-    assert record.decisions, "the node recorded nothing"
-    return record.decisions[0], record
-
-
-def test_the_replacement_node_with_nothing_hidden_is_one_world(replacement) -> None:  # noqa: ANN001
-    """Every slot seen: the belief is the one true world, so the node is well formed.
-
-    (Until IKA-460 this compared the node with the open game's, which handed the search the
-    opponent's whole four; the open game is gone, and with it the exact comparison.)
-    """
-    reg, position, owed, data = replacement
-    sheets = _fixture_sheets(reg, position, data)
-    seen, record = _replace(reg, position, owed, sheets, [SEEN_ALL, SEEN_ALL])
-    assert not record.unmodelled, record.unmodelled
-    assert sum(seen.own_policy) == pytest.approx(1.0)
-    assert sum(seen.foe_policy) == pytest.approx(1.0)
-
-
-def test_hiding_the_bench_changes_the_replacement(replacement) -> None:  # noqa: ANN001
-    """And with slots unseen it must not give the all-seen answer back.
-
-    Without this the test above passes just as well against a branch that quietly falls
-    through to the all-seen path, which would leave the leak in place with every test green.
-    """
-    reg, position, owed, data = replacement
-    sheets = _fixture_sheets(reg, position, data)
-    open_node, _ = _replace(reg, position, owed, sheets, [SEEN_ALL, SEEN_ALL])
-    blind, record = _replace(
-        reg, position, owed, sheets, [frozenset({0, 1}), frozenset({0, 1})]
-    )
-    assert not record.unmodelled, record.unmodelled
-    assert sum(blind.own_policy) == pytest.approx(1.0)
-    assert sum(blind.foe_policy) == pytest.approx(1.0)
-    assert blind.search_value != open_node.search_value, (
-        "solving over six possible benches returned the all-seen value; "
-        "the belief path did not run"
-    )
 
 
 def test_the_menu_is_ranked_from_a_completion_and_not_from_the_position(setup) -> None:  # noqa: ANN001

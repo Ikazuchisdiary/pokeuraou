@@ -614,20 +614,12 @@ def test_a_stage_that_guarantees_less_keeps_the_answer_before(roster, monkeypatc
 
 
 def test_a_seat_swapped_read_is_the_other_sides_read(roster, monkeypatch) -> None:  # noqa: ANN001
-    """IKA-421's mirror (`tools/depth_outcome.py --swap` / ``--side 1``): side 0 reading the
-    position with its seats swapped is side 1 reading the position -- the same strategies, the
-    values one apart (1 - P against -P) -- under hp-share, whose value is the mirror's. And the
-    two sides' readings bound the same depth-1 game from either side at the start."""
-    import importlib
-
-    from pokeuraou.regulation import repo_root
-
+    """IKA-421's mirror: side 0 reading the position with its seats swapped is side 1 reading
+    the position -- the same strategies, the values one apart (1 - P against -P) -- under
+    hp-share, whose value is the mirror's. And the two sides' readings bound the same depth-1
+    game from either side at the start."""
     for name, value in {"DIAG": False, "VALUE": "guarantee", "ORACLE_PASSES": 0, "KEEP": False}.items():
         monkeypatch.setattr(ladder, name, value)
-    # The tool sets this default for its own reads at import; here it is undone after the test.
-    monkeypatch.setenv("POKEURAOU_LADDER_COUNT_FILL", "0")
-    monkeypatch.syspath_prepend(str(repo_root() / "tools"))
-    orientation = importlib.import_module("depth_outcome").orientation
     reg = roster.reg
 
     def by_action(menu, strategy):  # noqa: ANN001, ANN202 - the menus' orders may differ
@@ -643,10 +635,6 @@ def test_a_seat_swapped_read_is_the_other_sides_read(roster, monkeypatch) -> Non
         assert own.start[1] == pytest.approx(-other.start[1], abs=1e-9)
         assert [r.stage for r in swapped.rungs] == [r.stage for r in other.rungs]
         assert swapped.start[1] == pytest.approx(1 + other.start[1], abs=1e-9)
-        # The tool writes every read in the recorded side 0's units.
-        for (side, swap), read in (((1, False), other), ((0, True), swapped), ((0, False), own)):
-            a, b = orientation(side, swap)
-            assert a + b * read.start[1] == pytest.approx(own.start[1], abs=1e-9)
         menu_swapped = narrow(reg, flipped, 0, limit=8).actions
         menu_other = narrow(reg, pos, 1, limit=8).actions
         assert sorted(a.to_choice() for a in menu_swapped) == sorted(a.to_choice() for a in menu_other)

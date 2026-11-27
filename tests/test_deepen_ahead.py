@@ -35,7 +35,7 @@ from pokeuraou.narrow import narrow
 from pokeuraou.search import belief_solve, search
 from pokeuraou.teams import load_roster
 
-from .test_hidden_depth2 import LEAF, SEEN_ALL, _played
+from ._hidden_positions import LEAF, SEEN_ALL, _played
 from .test_subgame_batch import _SizedLeaf
 
 
@@ -200,7 +200,7 @@ from tests.test_deepen_ahead import _belief
 
 # `tests/conftest.py` does this for a test's own process: hp-share is the tests' served leaf.
 beliefnode.served_leaf = lambda evaluate, what="": hp_share_leaf()
-from tests.test_hidden_depth2 import LEAF, _played
+from tests._hidden_positions import LEAF, _played
 
 roster = load_roster("rizabanadohido")
 register_mega_stones(roster.reg)

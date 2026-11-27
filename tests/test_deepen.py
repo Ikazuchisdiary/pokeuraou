@@ -98,8 +98,8 @@ def test_zero_is_the_depth_one_search(roster) -> None:  # noqa: ANN001
         assert np.array_equal(plain.equilibrium.col_strategy, zero.equilibrium.col_strategy)
         assert plain.equilibrium.value == zero.equilibrium.value
         assert zero.deepened is None and plain.unmodelled == zero.unmodelled
-    with pytest.raises(ValueError, match="deepen"):
-        search(reg, pos, ours, theirs, LEAF, budget=Budget.matrix(), depth=2, deepen=5)
+    with pytest.raises(ValueError, match="deepen is 0"):
+        search(reg, pos, ours, theirs, LEAF, budget=Budget.matrix(), levels=4)
 
 
 def test_one_step_is_the_shipped_depth_two_value_of_the_best_cell(roster) -> None:  # noqa: ANN001

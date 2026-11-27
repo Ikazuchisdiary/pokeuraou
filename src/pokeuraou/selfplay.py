@@ -42,10 +42,8 @@ import numpy as np
 from . import port, qrank, rank_scores, rustnode, timing
 from .actions import (
     SideAction,
-    switch_actions_after_faint,
 )
 from .budget import Budget
-from .eqselect import DEFAULT_EQ_SELECT
 from .fold import TurnLeaves
 from .hidden import (
     DEFAULT_BENCH_DROP,
@@ -227,6 +225,10 @@ def replay_shown(record: dict[str, Any]) -> list[list[list[str]]]:
 #: turn was chosen at). There is no resignation in self-play, so no reason for one.
 END_REASONS = ("wipeout", "draw", "turn-cap", "unresolved")
 
+#: The label of the LP's own vertex in a record's ``eqSelect`` (IKA-196): what every game
+#: plays. The other labels and `eqselect` were removed in IKA-463.
+DEFAULT_EQ_SELECT = "lp"
+
 
 def _close_record(record: GameRecord, pos: Position) -> None:
     """Writes the final position and the reason the game stopped, as `play_game` ends.
@@ -333,8 +335,8 @@ class GameRecord:
     ally_targets: list[str] = field(default_factory=lambda: ["off", "off"])
     ally_menus: list[int] = field(default_factory=lambda: [0, 0])
     ally_played: list[int] = field(default_factory=lambda: [0, 0])
-    #: Which point of its optimal set each side played (`eqselect.parse_eq_select`,
-    #: IKA-196). Written only when a side played another than the LP's vertex.
+    #: Which point of its optimal set each side played (IKA-196; the selection was removed in
+    #: IKA-463). Written only when a side played another than the LP's vertex (old records).
     eq_select: list[str] = field(default_factory=lambda: [DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT])
     #: The species each side was told to Mega Evolve at the first turn it stands on the
     #: field (`play_game`'s ``force_mega``, IKA-419f), and what the forcing did per side:
@@ -1560,112 +1562,6 @@ def _with_bench(plan: TurnLeaves, other: int, item: Any) -> TurnLeaves:
     return TurnLeaves(positions=positions, root=plan.root, unmodelled=plan.unmodelled)
 
 
-def _do_replacement_node(
-    reg: Regulation,
-    rng: np.random.Generator,
-    pos: Position,
-    owed: tuple[tuple[bool, ...], tuple[bool, ...]],
-    record: GameRecord,
-    leaves: tuple[LeafEvaluator | None, LeafEvaluator | None] = (None, None),
-    *,
-    sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]],
-    shown: list[frozenset[int]] | None = None,
-    bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
-    leads: list[frozenset[str] | None] | None = None,
-    recorded_shown: list[list[str]] | None = None,
-    selects: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
-) -> Position:
-    """Solves and applies the replacement phase.
-
-    It is a simultaneous-move node like any other -- neither player sees the other's
-    replacement -- so it gets a matrix and an equilibrium rather than a heuristic pick.
-
-    It is also the node where the *reveal* happens: the Pokemon coming in is
-    the one that stops being hidden, and choosing what to send against an opponent whose
-    bench is unknown is the same Bayesian game the move nodes solve. `shown` is each
-    side's seen slots in *this* position -- `seen_slots` of the identities `play_game`
-    carries -- and never a set of numbers carried from an earlier one (IKA-117). `leads`
-    is the turn-1 lead pair per side, as `play_game` carries it (IKA-118).
-    `recorded_shown` is `Decision.shown`, written as given and read by nothing here.
-
-    The options are built once from the true position because they are the same in every
-    completion: a replacement names a *slot*, and which slots are free is public even when
-    who is standing in them is not.
-    """
-    options: list[list[SideAction]] = []
-    for side_index in range(2):
-        must = list(owed[side_index])
-        found = (
-            switch_actions_after_faint(reg, pos, side_index, must) if any(must) else []
-        )
-        if not found:
-            found = [
-                SideAction(
-                    slots=tuple(
-                        _pass(slot) for slot in range(len(pos.sides[side_index].active))
-                    )
-                )
-            ]
-        options.append(found)
-
-    foe_value: float | None = None
-    seen = shown or [frozenset(), frozenset()]
-    try:
-        spreads = {
-            side: completions(
-                reg, pos, side, sheets[side], seen=seen[side],
-                weights=_bench_weights(
-                    bench_prior, side, pos, seen[side], record,
-                    (leads or [None, None])[side],
-                ),
-            )
-            for side in (0, 1)
-        }
-    except ValueError as problem:
-        record.unmodelled.append(f"hidden bench at a replacement: {problem}")
-        spreads = {}
-    if spreads:
-        from . import replacenode
-
-        # IKA-457 stage 2.2: the whole node in one request to the port, on the inference
-        # server's leaf (IKA-460: the only road; side 1 minimises what side 0 maximises, so
-        # its game is the transpose of the negation, read over there from the same matrices).
-        answers = replacenode.solve(reg, options, spreads, leaves, selects)
-        own_policy, value = answers[0]
-        foe_policy = answers[1][0]
-        # Side 1's game is the negated transpose: back into side 0's units.
-        foe_value = -answers[1][1]
-    else:
-        own_policy = [1.0 / len(options[0])] * len(options[0])
-        foe_policy = [1.0 / len(options[1])] * len(options[1])
-        value = 0.5
-
-    chosen = [
-        options[0][_sample_index(rng, np.array(own_policy))],
-        options[1][_sample_index(rng, np.array(foe_policy))],
-    ]
-    record.decisions.append(
-        Decision(
-            turn=pos.turn,
-            kind="replacement",
-            position=pos.to_json(),
-            own_actions=[a.to_choice() for a in options[0]],
-            own_policy=own_policy,
-            foe_actions=[a.to_choice() for a in options[1]],
-            foe_policy=foe_policy,
-            search_value=value,
-            own_chosen=chosen[0].to_choice(),
-            foe_chosen=chosen[1].to_choice(),
-            shown=recorded_shown,
-            foe_search_value=foe_value,
-        )
-    )
-    timing.decided("replacement")
-    outcome = port.resolve_replacements(reg, pos, chosen, rng=rng)
-    record.unmodelled.extend(outcome.unmodelled)
-    return outcome.position
-
-
 def replacement_matrix(
     reg: Regulation,
     at: Position,
@@ -1694,12 +1590,6 @@ def replacement_matrix(
     else:
         scored = np.bincount(owner, weights=weights * values, minlength=len(cells))
     return scored.reshape(len(options[0]), len(options[1]))
-
-
-def _pass(slot: int) -> Any:  # noqa: ANN401
-    from .actions import PassAction
-
-    return PassAction(slot=slot)
 
 
 def _set_json(reg: Regulation, entry: SampledSet) -> dict[str, Any]:

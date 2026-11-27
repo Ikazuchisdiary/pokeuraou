@@ -204,9 +204,6 @@ def test_a_deepened_search_is_the_same_with_a_callback(pool) -> None:  # noqa: A
     assert seen[-1].our_p.tolist() == depth1.equilibrium.col_strategy.tolist()
     assert seen[-1].value == 1.0 - float(depth1.equilibrium.value)
     assert all(p.read == "leaf" for p in seen[-1].pv)
-    with pytest.raises(ValueError, match="progress"):
-        search(reg, pos, rows, cols, HP_SHARE.batch, budget=Budget.matrix(), depth=2,
-               progress=lambda step: None)
 
 
 def test_the_recorder_sends_the_first_and_the_last_and_throttles_between(pool) -> None:  # noqa: ANN001

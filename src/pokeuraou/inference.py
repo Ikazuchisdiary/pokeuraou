@@ -182,7 +182,7 @@ def start_server(
     It is `pokeuraou-damage inference-server` (`rustnet.server_command`: the nets exported as
     `.rnet` files beside ``log``, run on the card by cudarc, IKA-461). It needs a CUDA card; the
     Python server (`tools/inference_server.py`) is gone (IKA-460). For a tool that wants one
-    server for its own processes (`time_match --served`, `position_set --served`). The address is
+    server for its own processes (`time_match --served`). The address is
     the server's first line of stdout; its log is ``log``. Stop it with ``process.terminate()``.
     """
     import subprocess

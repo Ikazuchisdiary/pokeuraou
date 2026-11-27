@@ -255,24 +255,6 @@ def test_a_fixed_width_replaces_the_rule(pool) -> None:  # noqa: ANN001
     assert plan_move(0.1, 1, 40, 40, 3, width=36).width == 36
 
 
-def test_the_restricted_reading_deepens_the_rectangle(pool) -> None:  # noqa: ANN001
-    """IKA-362: ``restricted`` reads the deepened root as IKA-68's ``r`` -- on the Bayesian
-    root too -- and plays; the count clock replays it."""
-    r = _cond("r", 0.4, restricted=True)
-    m = _cond("m", 0.4)
-    teams = (pool.teams[0], pool.teams[1])
-    first = timematch.play_pair(_match(pool, r, m, turns=4), 3, teams)
-    again = timematch.play_pair(_match(pool, r, m, turns=4), 3, teams)
-    assert json.dumps(_timeless(first)) == json.dumps(_timeless(again))
-    rows = [row for ln in first for row in ln["moves"] if row["condition"] == "r"]
-    deep = [row for row in rows if (row.get("deepened") or {}).get("expanded")]
-    assert deep, "no restricted move deepened"
-    hidden = [row for row in deep if row["classes"] > 1]
-    assert hidden, "no Bayesian root was read restricted"
-    # Nothing probed by the swap oracle: the restricted reading asks the matrices itself.
-    assert all("probed" not in (row.get("deepened") or {}) for row in rows)
-
-
 def test_the_port_threads_leave_a_node_time_pair_as_it_was(pool, monkeypatch) -> None:  # noqa: ANN001
     """IKA-362's `--port-threads`: more cell threads in the port, the same games."""
     a, b = _cond("a", 0.3), _cond("b", 0.2)
@@ -286,51 +268,6 @@ def test_the_port_threads_leave_a_node_time_pair_as_it_was(pool, monkeypatch) ->
     assert json.dumps(_timeless(three)) == json.dumps(_timeless(one))
     monkeypatch.setattr(timematch, "PORT_THREADS", None)
     timematch.spread_threads(pool.reg, 1)
-
-
-def test_a_fixed_depth_two_read_plays_and_replays(pool) -> None:  # noqa: ANN001
-    """IKA-362's D: ``depth=2`` with ``width_only`` reads the support rectangle a ply
-    deeper on both kinds of root; the count clock replays it, and it plays another game
-    than the depth-1 agent at the same width (the read reached the answer)."""
-    d = _cond("d", 0.3, width_only=True, depth=2)
-    flat = _cond("flat", 0.3, width_only=True)
-    teams = (pool.teams[0], pool.teams[1])
-    first = timematch.play_pair(_match(pool, d, flat, turns=4), 5, teams)
-    again = timematch.play_pair(_match(pool, d, flat, turns=4), 5, teams)
-    assert json.dumps(_timeless(first)) == json.dumps(_timeless(again))
-    same = timematch.play_pair(_match(pool, flat, _cond("flat2", 0.3, width_only=True), turns=4), 5,
-                               teams)
-    assert json.dumps(_timeless([ln["moves"] for ln in first])) != json.dumps(
-        _timeless([ln["moves"] for ln in same])) or [ln["outcome"] for ln in first] != [
-        ln["outcome"] for ln in same]
-    assert parse_condition("d:seconds=3,clock=count,width_only=on,depth=2").depth == 2
-
-
-def test_the_openings_root_at_every_legal_action(pool, monkeypatch) -> None:  # noqa: ANN001
-    """IKA-366's ``root_all``: with ``depth2_auto``, a move where a side has more legal
-    actions than the widest menu reads every legal action of both sides at the root when
-    that node fits the budget; the count clock replays it; each move row carries its read's
-    value. The control: the same condition without it never reads past the widest menu.
-    The depth-2 read after it ranks its children by the Q, which this test has not: it is
-    left out (none fits), the root is what is checked."""
-    monkeypatch.setattr(humanplay, "depth2_children", lambda *_args: None)
-    wide = _cond("all", 1.0, depth2_auto=True, root_all=True)
-    rule = _cond("rule", 1.0, depth2_auto=True)
-    teams = (pool.teams[0], pool.teams[1])
-    first = timematch.play_pair(_match(pool, wide, rule, turns=2), 6, teams)
-    again = timematch.play_pair(_match(pool, wide, rule, turns=2), 6, teams)
-    assert json.dumps(_timeless(first)) == json.dumps(_timeless(again))
-    rows = [r for ln in first for r in ln["moves"]]
-    widened = [r for r in rows if r.get("rootAll")]
-    assert widened, "no root was widened; the check would be vacuous"
-    assert all(r["condition"] == "all" for r in widened)
-    assert any(max(r["rows"], r["cols"]) > humanplay.WIDTHS[-1] for r in widened)
-    assert all(max(r["rows"], r["cols"]) <= humanplay.WIDTHS[-1]
-               for r in rows if r["condition"] == "rule")
-    assert all(0.0 <= r["value0"] <= 1.0 for r in rows)
-    assert parse_condition("a:seconds=1,depth2_auto=on,root_all=on").root_all
-    with pytest.raises(ValueError, match="depth2_auto"):
-        _match(pool, wide, rule).agent(_cond("x", 1.0, root_all=True))
 
 
 # ------------------------------------------------------------------------ IKA-384

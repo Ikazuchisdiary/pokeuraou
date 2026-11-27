@@ -25,8 +25,8 @@ from pokeuraou.encode import Encoder
 from pokeuraou.search import search
 from pokeuraou.teams import load_roster
 
+from ._hidden_positions import _played
 from .test_deepen_ahead import _belief, _menus, _same_belief, _same_tree
-from .test_hidden_depth2 import _played
 from .test_subgame_batch import _SizedLeaf, _stacked_scoring
 
 

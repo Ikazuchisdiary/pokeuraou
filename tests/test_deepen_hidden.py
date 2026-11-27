@@ -35,8 +35,8 @@ from pokeuraou.search import (
 )
 from pokeuraou.teams import load_roster
 
+from ._hidden_positions import LEAF, _played
 from .test_deepen import _Act, _grown_by_oracle, pool  # noqa: F401
-from .test_hidden_depth2 import LEAF, _played
 
 
 @pytest.fixture(scope="module")

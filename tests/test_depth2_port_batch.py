@@ -23,9 +23,11 @@ answer:
   every branch must leave the hidden slots as the reference had them -- is shown to fire
   on cells that do bring one in, where reading the turn off would be wrong.
 
-The end-to-end answer (strategies, values, notes, counts of a hidden depth-2 decision) is
+The end-to-end answer (values, notes, counts of a hidden-bench pass) is
 `tests/test_subgame_batch.py`'s comparison with the per-sub-game pass, which resolves every
-cell's turn itself; that comparison now covers both changes.
+cell's turn itself; that comparison now covers both changes. Until IKA-463 the pass was a
+hidden depth-2 decision of `belief_solve`; it is now one `_refine_cells` pass over every
+completion with its `TurnShare`s (`test_subgame_batch._hidden`), as the ladder asks it.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
 from ._port import resolve_turn
-from .test_subgame_batch import _hidden, _hidden_answers, _SizedLeaf
+from .test_subgame_batch import _hidden, _SizedLeaf
 
 
 @pytest.fixture(scope="module")
@@ -201,13 +203,13 @@ def test_the_check_alone_catches_a_cell_marked_clean_wrongly(roster, positions, 
     monkeypatch.setattr(timing, "count", lambda name, n=1: seen.update({name: n}))
     pos = _with_dirty_cells(roster, positions)
     seen.clear()
-    reference = _hidden_answers(_hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos))
+    reference = _hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos)
     assert seen["depth2.turns.dirty"] > 0
     assert seen["depth2.turns.touched"] == 0
     seen.clear()
     # Only the depth-2 pass's mask: the depth-1 node's own sharing keeps the true one.
     monkeypatch.setattr(search_mod, "_cell_reaches_bench", lambda *_a, **_k: False)
-    forced = _hidden_answers(_hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos))
+    forced = _hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos)
     assert seen["depth2.turns.dirty"] == 0
     assert seen["depth2.turns.touched"] > 0, seen
     assert forced == reference
@@ -221,11 +223,11 @@ def test_without_the_check_a_wrong_mask_moves_the_answer(roster, positions, monk
     monkeypatch.setattr(timing, "ON", True)
     monkeypatch.setattr(timing, "count", lambda _name, _n=1: None)
     pos = _with_dirty_cells(roster, positions)
-    reference = _hidden_answers(_hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos))
+    reference = _hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos)
     # Only the depth-2 pass's mask: the depth-1 node's own sharing keeps the true one.
     monkeypatch.setattr(search_mod, "_cell_reaches_bench", lambda *_a, **_k: False)
     monkeypatch.setattr(beliefnode, "turn_in_completion", _unchecked)
-    broken = _hidden_answers(_hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos))
+    broken = _hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos)
     assert broken != reference
 
 
@@ -398,12 +400,13 @@ def test_a_pass_asks_the_port_by_the_stage(roster, positions, monkeypatch) -> No
 
     monkeypatch.setattr(search_mod.port, "pending_payoffs", counting)
     got = _hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos)
-    subgames = sum(a.subgames for a in got.values())
+    subgames = sum(solved for _value, _notes, solved in got)
     assert subgames >= 40
     crossings = seen["port.many.lines"] + seen["port.fills.lines"]
     assert sum(fills) >= subgames
     assert max(fills) <= search_mod.FILL_BATCH
-    # Two sides, two passes: a turns line, a menus line and ceil(sub-games / FILL_BATCH)
-    # fills lines a pass (and a second turns line where a read was declined).
+    # One pass: a turns line, a menus line and ceil(sub-games / FILL_BATCH) fills lines (and
+    # a second turns line where a read was declined). The bound is the one of the two sides'
+    # two passes the test held before IKA-463, so it is loose for one pass.
     assert crossings <= 4 * 3 + -(-subgames // search_mod.FILL_BATCH) + 4, seen
     assert crossings * 3 < subgames

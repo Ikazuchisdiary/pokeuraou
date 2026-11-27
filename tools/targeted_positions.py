@@ -14,7 +14,7 @@ This tool finds the positions where two conditions' answers differ, and `tools/t
     uv run python tools/time_match.py --starts C:/tmp/ika423/sel-AB.jsonl --pairs M \\
         --arm A:... --arm B:... --out C:/tmp/ika423/match-AB ...
 
-* **candidates**: the positions of a position set (`tools/depth_outcome.py build`: one
+* **candidates**: the positions of a position set (`tools/depth_outcome.py build`, removed in IKA-463: one
   move decision of a recorded game, with the identities each side had shown) where both sides
   have shown all four of their Pokemon. A bench nobody has seen is the one thing a start
   cannot restore (the recorded game's belief is not in the position), so such a position is

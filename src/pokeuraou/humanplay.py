@@ -457,25 +457,6 @@ def _find(cost: Any, kind: type) -> Any:  # noqa: ANN401
 
 CLOCKS = ("wall", "count")
 
-#: The children's widths a `depth2_auto` read picks from, widest first (IKA-362).
-DEPTH2_CHILDREN = (24, 16, 8)
-#: Its guess of the refined cells: a rectangle of `DEPTH2_RECT` a side per completion, this
-#: many branches a cell, each child k x k.
-DEPTH2_RECT = 4
-DEPTH2_BRANCHES = 1.5
-#: And its fixed cost a move (the Q's forward pass, the rectangle's LPs), in milliseconds.
-DEPTH2_FIXED_MS = 30.0
-
-
-def depth2_children(left_ms: float, classes: int, price: NodeTime) -> int | None:
-    """The widest of `DEPTH2_CHILDREN` whose depth-2 read is predicted within ``left_ms``,
-    or None (IKA-362)."""
-    for k in DEPTH2_CHILDREN:
-        cells = DEPTH2_RECT * DEPTH2_RECT * max(classes, 1) * DEPTH2_BRANCHES * k * k
-        if DEPTH2_FIXED_MS + price.cell_ms * cells <= left_ms:
-            return k
-    return None
-
 # ----------------------------------------------------------------------------- defaults
 # What `tools/play_human.py` and `tools/play.py` play with when no flag says otherwise
 # (IKA-343): the allocation IKA-307 measured best, spread over the cores IKA-32 measured
@@ -1266,47 +1247,6 @@ class Agent:
     #: None: no brake. Unset, it changes no move. A `MemoryBrake` also hears each move's
     #: start of deepening, so the watch measures that move's growth (IKA-355).
     halt: Any = None  # noqa: ANN401
-    #: Read narrow first and widen with what is left (IKA-354), or None: width first, the
-    #: rest to deepening, as before. ``(share, at)``: the first width is the one the width
-    #: rule picks at ``share`` of the budget instead of `WIDTH_SHARE`; once the deepening
-    #: has spent ``at`` of its budget the root is widened to the width the rule picks at
-    #: `WIDTH_SHARE` (the menus of the same ranking), the tree kept (`deepen.Grow`), and
-    #: the rest of the budget deepens the wider root.
-    widen: tuple[float, float] | None = None
-    #: Fork the knock-outs a crit or a high roll decides in every turn this move resolves --
-    #: the depth-1 matrix and each deepened cell (IKA-359's `Budget.enumerate_knockouts`;
-    #: IKA-362 asks whether the deepening's values need it). False: `Budget.matrix()`.
-    knockouts: bool = False
-    #: The deepening's children: each side's menu width in a refined cell's child games
-    #: (`narrow`'s damage order; `child_q` ranks by the Q instead) and how many of the
-    #: refined turn's likeliest branches are kept (IKA-362). None: `search`'s defaults (8, 3).
-    sub_limit: int | None = None
-    sub_branches: int | None = None
-    #: Read the deepened root the restricted way (IKA-68's ``r``: the depth-1 support's
-    #: rectangle deepened, the whole matrix its oracle; on a Bayesian root the same per
-    #: completion) instead of the whole mixed-depth matrix (IKA-362). The root's swap
-    #: oracle goes with the whole reading, so it is not asked. ``"open"``: open roots only
-    #: (no bench hidden), a Bayesian root read whole.
-    restricted: bool | str = False
-    #: A fixed depth-2 read (IKA-362's D; IKA-68's restricted ``search(depth=2)``, the
-    #: Bayesian root's `_restricted_belief`): the depth-1 support's rectangle read a ply
-    #: deeper, its children's matrices whole, whatever the clock says -- with
-    #: ``width_only`` it is the whole move. 1: none.
-    depth: int = 1
-    #: The depth-2 read's rectangle: each side's heaviest ``refine`` actions, grown by its
-    #: oracle over ``passes`` passes (None: `search`'s 4 and 2).
-    refine: int | None = None
-    passes: int | None = None
-    #: The width rule, then -- instead of the deepening -- a fixed depth-2 read of the support
-    #: rectangle with the children by the Q, as wide (`DEPTH2_CHILDREN`) as the rest of the
-    #: budget pays for at `node_time`'s price (`depth2_children`); none fits: the width alone
-    #: (IKA-362).
-    depth2_auto: bool = False
-    #: With ``depth2_auto``: where either side has more legal actions than the widest of
-    #: `WIDTHS` (the opening), the root is every legal action of both sides when that node
-    #: is predicted within the whole budget, and the depth-2 read gets what it leaves
-    #: (IKA-366). Elsewhere the width rule's menus, as without it.
-    root_all: bool = False
     #: The width rule, then -- instead of the deepening -- a ladder of stages read coarse to
     #: fine (`ladder.read`, IKA-367) within the whole budget on the agent's clock: a name in
     #: `ladder.LADDERS` or stages joined by ``+``. The answer is the last stage completed.
@@ -1344,15 +1284,6 @@ class Agent:
     def __post_init__(self) -> None:
         if self.clock not in CLOCKS:
             raise ValueError(f"clock is one of {CLOCKS}, not {self.clock!r}")
-        if self.widen is not None:
-            share, at = self.widen
-            if not (0.0 < share <= WIDTH_SHARE and 0.0 <= at < 1.0):
-                raise ValueError(
-                    f"widen is (share, at) with 0 < share <= {WIDTH_SHARE} and 0 <= at < 1, "
-                    f"not {self.widen!r}"
-                )
-        if self.root_all and not self.depth2_auto:
-            raise ValueError("root_all widens depth2_auto's root; it needs depth2_auto (IKA-366)")
         if self.root_widths is not None:
             if self.ladder is None:
                 raise ValueError("root_widths widens a ladder's root; it needs a ladder (IKA-418)")
@@ -1363,9 +1294,9 @@ class Agent:
             parse_ladder(self.ladder)
             if self.hidden_ladder is not None:
                 parse_ladder(self.hidden_ladder)
-            if self.depth2_auto or self.depth > 1 or self.width_only or self.ponder:
+            if self.width_only or self.ponder:
                 raise ValueError("a ladder is the move's whole reading after the width rule: "
-                                 "not with depth2_auto, depth, width_only or ponder (IKA-367)")
+                                 "not with width_only or ponder (IKA-367)")
             if self.clock == "count" and (self.form, self.cores) not in LADDER_COSTS:
                 raise ValueError(f"no ladder prices for {self.form!r} on {self.cores} core(s) "
                                  f"(ladder.LADDER_COSTS: {sorted(LADDER_COSTS)})")
@@ -1454,22 +1385,6 @@ def _not_asked(positions: list[Position]) -> np.ndarray:  # pragma: no cover - n
     raise AssertionError("the person's side is never solved")
 
 
-class _WidenOnce:
-    """`deepen.Grow` of an agent that widens mid-read (IKA-354): the wider menus, once, at
-    the first step whose reading of the budget is ``at`` or more."""
-
-    def __init__(self, at: float, menus: tuple[list[SideAction], list[SideAction]]) -> None:
-        self.at = at
-        self.menus = menus
-        self.done = False
-
-    def __call__(self, spent: float) -> tuple[list[SideAction], list[SideAction]] | None:
-        if self.done or spent < self.at:
-            return None
-        self.done = True
-        return self.menus
-
-
 @dataclass
 class SolvedMove:
     """One side's answer at a move decision (`solve_move`)."""
@@ -1510,12 +1425,6 @@ def solve_move(
     progress: Callable[[Any], None] | None = None,
     discount: float | None = None,
     grow: Any = None,  # noqa: ANN401 - deepen.Grow
-    sub_limit: int | None = None,
-    sub_branches: int | None = None,
-    restricted: bool | str = False,
-    depth: int = 1,
-    refine: int | None = None,
-    passes: int | None = None,
     ladder: dict[str, Any] | None = None,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
@@ -1529,31 +1438,20 @@ def solve_move(
 
     ``ladder`` reads the depth-1 node's answer on, stage by stage (`ladder.read`, IKA-367):
     its keyword arguments (``stages``, ``budget_ms``, ``clock``, ``cost``, ``start_ms``,
-    ``stop``, ``on_rung``). It goes with no deepening and no fixed depth."""
+    ``stop``, ``on_rung``). It goes with no deepening."""
     you = 1 - me
     if ladder is not None:
-        if cells or depth >= 2:
+        if cells:
             raise ValueError("a ladder is read on the depth-1 node alone (IKA-367)")
         return _ladder_move(reg, pos, me, ours, theirs, spreads, leaf, budget=budget,
                             exact=exact, how=ladder)
-    # The deepening's children, when given (IKA-362); else `search`'s defaults.
-    subs = {k: v for k, v in (("sub_limit", sub_limit), ("sub_branches", sub_branches),
-                              ("refine", refine), ("passes", passes))
-            if v is not None}
-    if depth >= 2 and cells:
-        raise ValueError("a fixed depth-2 read is not deepened as well (IKA-362's D)")
     if exact:
         got = search(
-            reg, pos, ours, theirs, leaf, budget=budget, **subs,
-            **({"depth": depth, "solve_restricted": True,
-                **({"child_q": child_q} if child_q is not None else {})} if depth >= 2 else {}),
+            reg, pos, ours, theirs, leaf, budget=budget,
             **(
                 {"deepen": cells, "deepen_cost": cost, "levels": levels,
                  "child_q": child_q, "discount": discount,
-                 # The restricted reading asks the whole matrix as its oracle; the
-                 # root's swap oracle goes with the mixed reading only (IKA-362).
-                 **({"solve_restricted": True} if restricted else
-                    {"outside": outside, "swap": outside is not None}),
+                 "outside": outside, "swap": outside is not None,
                  **({"grow": grow} if grow is not None else {})}
                 if cells else {}
             ),
@@ -1569,14 +1467,10 @@ def solve_move(
     assert spreads is not None
     answers = belief_solve(
         reg, pos, ours, theirs, spreads,
-        {me: leaf, you: _not_asked}, budget=budget, sides=(me,), **subs,
-        **({"depth": depth, **({"child_q": child_q} if child_q is not None else {})}
-           if depth >= 2 else {}),
+        {me: leaf, you: _not_asked}, budget=budget, sides=(me,),
         deepen=(
             {me: {"cells": cells, "cost": cost, "levels": levels,
-                  # The restricted reading asks the whole matrices itself (IKA-362).
-                  **({"reading": "restricted"} if restricted is True else
-                     {"reading": "mixed", "swap": outside is not None, "outside": outside}),
+                  "reading": "mixed", "swap": outside is not None, "outside": outside,
                   "child_q": child_q, "discount": discount,
                   **({"grow": grow} if grow is not None else {})}}
             if cells else None
@@ -2079,33 +1973,9 @@ class HumanGame:
             agent.seconds, agent.cores, *counts, form=agent.form, width_only=agent.width_only,
             width=agent.width,
         )
-        # IKA-354: read narrow first, widen to the rule's width with what is left.
-        later = None
-        if agent.widen is not None and not agent.width_only:
-            first = plan_move(
-                agent.seconds, agent.cores, *counts, form=agent.form, share=agent.widen[0],
-            )
-            if first.width < plan.width and first.deepen_ms > 0:
-                later, plan = plan.width, first
         budget = Budget.matrix()
-        if agent.knockouts:
-            from dataclasses import replace as _replace
-
-            budget = _replace(budget, enumerate_knockouts=True)
-        # IKA-362: a fixed depth-2 read in place of the deepening, its children as wide as
-        # the rest of the budget pays for.
-        d2k = None
-        # IKA-366: the opening's root at every legal action, when it fits the budget.
         limits = (plan.width, plan.width)
         node_ms = plan.predicted_ms
-        root_all = False
-        if agent.root_all and max(counts[0], counts[1]) > WIDTHS[-1]:
-            wide_ms = node_time(agent.cores, agent.form).ms(
-                counts[0] * counts[1] * max(classes, 1)
-            )
-            if wide_ms <= plan.budget_ms:
-                limits = (counts[0], counts[1]) if me == 0 else (counts[1], counts[0])
-                node_ms, root_all = wide_ms, True
         # IKA-418: the ladder's root widened step by step; the first step's menus the move
         # begins with, the later ones the same ranking's longer prefixes.
         steps: list[int] = []
@@ -2117,21 +1987,16 @@ class HumanGame:
             node_ms = node_time(agent.cores, agent.form).ms(cells0)
             plan = dc_replace(plan, width=steps[0], cells=cells0, predicted_ms=node_ms,
                               deepen_ms=max(0.0, plan.budget_ms - node_ms))
-        if agent.depth2_auto:
-            d2k = depth2_children(
-                plan.budget_ms - node_ms, classes, node_time(agent.cores, agent.form)
-            )
         wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
         wide = (
             [agent.oracle]
-            if agent.oracle is not None and plan.deepen_ms > 0 and not agent.depth2_auto
-            and agent.ladder is None
+            if agent.oracle is not None and plan.deepen_ms > 0 and agent.ladder is None
             else []
         )
         ours, theirs = _menus(
             reg, pos, limits, agent.leaf, budget, agent.rank_by_leaf,
             None, spreads, rank_fill=agent.rank_fill,
-            wide=[*wide, *([later] if later is not None else []), *steps[1:]], wider=wider,
+            wide=[*wide, *steps[1:]], wider=wider,
         )
         outside = wider.get(agent.oracle) if agent.oracle is not None else None
         if not ours or not theirs:
@@ -2172,7 +2037,7 @@ class HumanGame:
                                       node_time(agent.cores, agent.form), classes,
                                       WIDTH_SHARE * plan.budget_ms)} if len(steps) > 1 else {}),
             }
-        elif plan.deepen_ms > 0 and not agent.depth2_auto:
+        elif plan.deepen_ms > 0:
             if agent.clock == "wall":
                 cost = WallCost(started)
                 cells = int(round(plan.budget_ms))
@@ -2191,22 +2056,14 @@ class HumanGame:
             cost = Tally(cost)
             if agent.halt is not None:
                 cost = HaltingCost(cost, agent.halt, cells)
-        grow = None
-        if later is not None and cells > 0:
-            grow = _WidenOnce(agent.widen[1] * cells, wider[later])
         pondering = _find(cost, PonderCost)
         if asker is not None:
             asker.start()
         try:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
-                cells=cells, cost=cost, levels=agent.max_levels,
-                child_q=d2k if d2k is not None else agent.child_q,
-                sub_limit=agent.sub_limit, sub_branches=agent.sub_branches,
-                restricted=agent.restricted, depth=2 if d2k is not None else agent.depth,
-                refine=agent.refine, passes=agent.passes,
-                outside=outside, progress=progress if ladder is None else None, grow=grow,
-                ladder=ladder,
+                cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
+                outside=outside, progress=progress if ladder is None else None, ladder=ladder,
             )
         except EquilibriumError:
             return None
@@ -2251,7 +2108,6 @@ class HumanGame:
                 "deepenBudget": cells,
                 "exact": exact,
                 "classes": classes,
-                **({"widenTo": later} if later is not None else {}),
                 # The stop point replays the move (`PonderCost`): a count, not seconds.
                 # One per move of a pondering agent, deepened or not, so a replay pairs
                 # them with its moves in order (`ScriptPerson.from_record`).
@@ -2280,14 +2136,10 @@ class HumanGame:
             "nodeCells": len(ours) * len(theirs) * max(classes, 1),
             "predictedMs": round(plan.predicted_ms, 3),
             "deepenBudget": cells,
-            **({"depth2Children": d2k} if agent.depth2_auto else {}),
-            **({"rootAll": True} if root_all else {}),
             **({"ladder": solved.ladder.to_json()} if solved.ladder is not None else {}),
             **({"rootSteps": solved.root} if solved.root is not None else {}),
             # The read's value in side 0's units (IKA-366: the turns' share of a result).
             "value0": round(float(value), 5),
-            **({"widenTo": later, "widened": grow is not None and grow.done}
-               if later is not None else {}),
             # The budget's reading when the move stopped, in its units (the wall clock's
             # milliseconds since the move started, or the count clock's cells): what a
             # board hands the other side's `PonderCost` (IKA-333).

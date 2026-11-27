@@ -317,7 +317,7 @@ def main() -> None:
             print("    valuing it wrongly -- and it is not the one this case tests.")
             failures += 1
             continue
-        result = search(reg, pos, ours, theirs, leaf, budget=budget, depth=1)
+        result = search(reg, pos, ours, theirs, leaf, budget=budget)
         eq = result.equilibrium
         ev = np.asarray(eq.row_ev, dtype=np.float64)
         row = np.asarray(eq.row_strategy, dtype=np.float64)

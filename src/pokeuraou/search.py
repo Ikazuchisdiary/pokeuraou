@@ -151,10 +151,8 @@ from . import deepen as _deepen
 from . import port, portlp, portmenus, portserved, rank_scores, rustnode, timing
 from .actions import SideAction
 from .budget import Budget
-from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select, reselect_bayesian, reselected
 from .equilibrium import Equilibrium, EquilibriumError, solve
 from .narrow import narrow
-from .node_solver import solve_node
 from .port import batched_payoff
 from .position import Position
 from .regulation import Regulation
@@ -167,10 +165,6 @@ LeafEvaluator = Callable[[list[Position]], np.ndarray]
 #: cell, so this is quadratic: 4 is 16 cells, 6 is 36. Chosen to keep a refined decision
 #: within a small multiple of an unrefined one rather than from any property of the game.
 DEFAULT_REFINE = 4
-
-#: How many times the support may move before the search stops anyway. Two is enough for
-#: the support to shift once and settle; a third pass is worth measuring, not assuming.
-DEFAULT_PASSES = 2
 
 #: Candidate width inside a refined cell. Narrower than the root on purpose -- the point
 #: of the sub-solve is a better value for one cell, not a good strategy for a position
@@ -416,13 +410,10 @@ def search(
     evaluate: LeafEvaluator,
     *,
     budget: Budget,
-    depth: int = 1,
     refine: int = DEFAULT_REFINE,
-    passes: int = DEFAULT_PASSES,
     sub_limit: int = DEFAULT_SUB_LIMIT,
     sub_branches: int = DEFAULT_SUB_BRANCHES,
     solve_restricted: bool = False,
-    solve_sparsely: bool = False,
     deepen: int = 0,
     outside: tuple[Sequence[SideAction], Sequence[SideAction]] | None = None,
     deepen_cost: _deepen.Cost | None = None,
@@ -434,25 +425,15 @@ def search(
     progress: _deepen.Progress | None = None,
     discount: float | None = None,
     grow: _deepen.Grow | None = None,
-    select: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
 ) -> SearchResult:
-    """Solve this turn's matrix game, optionally refining the cells that decide it.
-
-    ``depth=1`` is the one-ply search unchanged, down to the arithmetic: the same
-    `batched_payoff` call and the same `solve`. That is deliberate and tested, because a
-    depth parameter whose lowest setting is not the old behaviour makes every comparison
-    against it meaningless.
-
-    ``solve_restricted`` changes only how the refined cells are read into a strategy, and
-    only at depth 2 -- see `_restricted_search`. On the board it beat both depth 1 and the
-    mixed reading (IKA-68). It is still an option and not the default, because depth 2
-    itself does not run where the agent ships: a hidden bench goes through `belief_solve`,
-    which had no depth at all until IKA-111 gave it this reading and no other.
+    """Solve this turn's matrix game (the depth-1 node: `batched_payoff` and `solve`),
+    optionally deepening the cells that decide it.
 
     ``deepen`` is a budget of cells to spend after the depth-1 solve, best first over the
-    whole tree (`deepen.best_first`, IKA-33). Zero is the depth-1 search unchanged; it
-    goes with ``depth=1`` only, and there ``solve_restricted`` picks the root's reading:
-    the restricted rectangle grown by its oracle, or the whole matrix.
+    whole tree (`deepen.best_first`, IKA-33). Zero is the depth-1 search unchanged.
+    ``solve_restricted`` picks the deepened root's reading: the restricted rectangle grown
+    by its oracle (IKA-68), or the whole matrix. The fixed depth-2 read (``depth=2``) and
+    its restricted reading were removed in IKA-463.
 
     ``outside`` turns on the root's double oracle while deepening (IKA-293): each side's
     candidates beyond its menu, asked every step whether they gain against the other
@@ -471,29 +452,10 @@ def search(
 
     ``grow`` widens the root while it deepens (IKA-354, `deepen.Grow`): the result's
     ``ours`` / ``theirs`` are then the grown menus.
-
-    ``select`` is (row player's, column player's) point of the optimal set
-    (`eqselect.parse_eq_select`, IKA-196): ``lp`` is the LP's vertex. Another label
-    replaces that player's strategy (never the value) of the depth-1 full-matrix answer,
-    and is refused with a deepening, depth 2 or the sparse solve.
     """
-    selecting = tuple(select) != (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT)
-    for label in select:
-        parse_eq_select(label)
-    if selecting and (deepen or depth > 1 or solve_sparsely):
-        raise ValueError(
-            f"equilibrium selection {tuple(select)} goes with the undeepened depth-1 "
-            "full-matrix search (IKA-196)"
-        )
-    if progress is not None and (depth > 1 or solve_sparsely):
-        raise ValueError("progress reports the depth-1 full-matrix search and its deepening")
-    if deepen and (depth > 1 or solve_sparsely):
-        raise ValueError("deepen is a budget on top of the depth-1 full-matrix search")
     if (
         outside is not None or deepen_cost is not None or swap or breadth_only
-        or q_probe is not None or levels is not None
-        # The children's menus by a Q go with depth 2 as well (IKA-362).
-        or (child_q is not None and depth < 2)
+        or q_probe is not None or levels is not None or child_q is not None
         or discount is not None or grow is not None
     ) and not deepen:
         raise ValueError(
@@ -502,18 +464,6 @@ def search(
         )
     row = list(ours)
     col = list(theirs)
-    if solve_sparsely and depth <= 1:
-        # An equilibrium needs about a fifth of a wide matrix and can prove it; the rest
-        # of the cells are work nobody reads. It reaches *an* equilibrium of the same
-        # value rather than the one a full LP returns, so it is asked for, not assumed.
-        solved = solve_node(reg, pos, row, col, evaluate, budget=budget)
-        return SearchResult(
-            equilibrium=solved.equilibrium,
-            payoff=solved.payoff,
-            ours=row,
-            theirs=col,
-            unmodelled=solved.unmodelled,
-        )
     with timing.region("open.node"):
         payoff, unmodelled = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
     with timing.region("lp.open"):
@@ -539,278 +489,15 @@ def search(
             refined=got.report.expanded,
             deepened=got.report,
         )
-    if depth <= 1:
-        if selecting:
-            with timing.region("lp.select"):
-                equilibrium = reselected(payoff, equilibrium, select)
-        if progress is not None:
-            _deepen.announce_depth1(progress, pos, row, col, payoff, equilibrium)
-        return SearchResult(
-            equilibrium=equilibrium,
-            payoff=payoff,
-            ours=row,
-            theirs=col,
-            unmodelled=unmodelled,
-        )
-
-    if solve_restricted:
-        with timing.region("d2"):
-            return _restricted_search(
-                reg,
-                pos,
-                row,
-                col,
-                evaluate,
-                budget=budget,
-                payoff=payoff,
-                equilibrium=equilibrium,
-                unmodelled=unmodelled,
-                refine=refine,
-                passes=passes,
-                sub_limit=sub_limit,
-                sub_branches=sub_branches,
-                child_q=child_q,
-            )
-
-    #: (i, j) -> the depth-2 value, so a cell is never refined twice across passes.
-    refined: dict[tuple[int, int], float] = {}
-    subgames = 0
-    converged = False
-    used = 0
-    for attempt in range(1, passes + 1):
-        used = attempt
-        wanted = _cells_to_refine(equilibrium, refine)
-        fresh = [cell for cell in wanted if cell not in refined]
-        if not fresh:
-            converged = True
-            break
-        found = _refine_cells(
-            reg,
-            [(pos, row[i], col[j]) for i, j in fresh],
-            evaluate,
-            budget=budget,
-            sub_limit=sub_limit,
-            sub_branches=sub_branches,
-            child_q=child_q,
-        )
-        for (i, j), (value, notes, solved) in zip(fresh, found, strict=True):
-            subgames += solved
-            unmodelled.update(notes)
-            if value is not None:
-                refined[(i, j)] = value
-        updated = payoff.copy()
-        for (i, j), value in refined.items():
-            updated[i, j] = value
-        payoff = updated
-        try:
-            equilibrium = solve(payoff)
-        except EquilibriumError:
-            # The refined matrix failed to solve; the depth-1 answer is still a valid
-            # answer to a well-posed game, so hand that back rather than nothing.
-            break
-
-    if refined:
-        unmodelled.add(
-            f"depth-2 value on {len(refined)} of {payoff.size} cells; the rest are depth 1"
-        )
-    if not converged:
-        unmodelled.add("depth-2 support had not settled when the pass budget ran out")
+    if progress is not None:
+        _deepen.announce_depth1(progress, pos, row, col, payoff, equilibrium)
     return SearchResult(
         equilibrium=equilibrium,
         payoff=payoff,
         ours=row,
         theirs=col,
         unmodelled=unmodelled,
-        refined=len(refined),
-        passes=used,
-        converged=converged,
-        subgames=subgames,
     )
-
-
-def _restricted_search(
-    reg: Regulation,
-    pos: Position,
-    row: list[SideAction],
-    col: list[SideAction],
-    evaluate: LeafEvaluator,
-    *,
-    budget: Budget,
-    payoff: np.ndarray,
-    equilibrium: Equilibrium,
-    unmodelled: set[str],
-    refine: int,
-    passes: int,
-    sub_limit: int,
-    sub_branches: int,
-    child_q: int | None = None,
-) -> SearchResult:
-    """The double-oracle's own answer: the refined rectangle solved as the game it is.
-
-    The loop in `search` refines the cells the depth-1 equilibrium weights and then
-    re-solves the *whole* matrix -- 16 cells at depth 2 sitting in 560 at depth 1. IKA-12
-    played that out and it lost 48.28% +-0.71 over 16,000 games while every number it
-    produced improved, and this module had named the suspect before the match ran.
-
-    Here the rectangle is the game. Every one of its cells has been resolved a ply
-    further, so its equilibrium is an equilibrium of something, and the full matrix is
-    demoted to what double-oracle uses it for: an oracle asked whether any action outside
-    the rectangle beats what the rectangle guarantees. Ranking is the one thing depth-1
-    values are still good at when they are wrong about the level, and ranking is all that
-    is asked of them here.
-
-    A pass adds at most one row and one column, and only when the oracle says that action
-    is better than the restricted game's value. A pass that adds neither is convergence --
-    no action outside the rectangle is worth playing at the prices in hand, which is the
-    statement the shipped reading cannot make at all. It is also cheaper than the shipped
-    second pass: that one can refine a whole second rectangle (up to 16 fresh cells),
-    while a row and a column of an enlarged rectangle is 9.
-
-    The value returned is what the strategy guarantees against *every* column at those
-    prices, not the restricted game's own value -- the restricted game restricts the
-    opponent too, so its value is optimistic by construction. The two coincide at
-    convergence and `optimism` reports the gap when they do not.
-    """
-    rows = [int(i) for i in _top(equilibrium.row_strategy, refine)]
-    cols = [int(j) for j in _top(equilibrium.col_strategy, refine)]
-    #: The best value in hand for every cell: depth 2 inside the rectangle, depth 1
-    #: outside it. Nothing is read *from* this matrix except a ranking.
-    prices = np.array(payoff, dtype=np.float64, copy=True)
-    refined: dict[tuple[int, int], float] = {}
-    unrefinable: set[tuple[int, int]] = set()
-    answer: Equilibrium | None = None
-    shape = (0, 0)
-    optimism = 0.0
-    subgames = 0
-    converged = False
-    used = 0
-    for attempt in range(1, passes + 1):
-        used = attempt
-        fresh = [
-            (i, j)
-            for i in rows
-            for j in cols
-            if (i, j) not in refined and (i, j) not in unrefinable
-        ]
-        # The pass's sub-games scored in one call to the leaf (IKA-291).
-        found = _refine_cells(
-            reg,
-            [(pos, row[i], col[j]) for i, j in fresh],
-            evaluate,
-            budget=budget,
-            sub_limit=sub_limit,
-            sub_branches=sub_branches,
-            child_q=child_q,
-        )
-        for (i, j), (value, notes, solved) in zip(fresh, found, strict=True):
-            subgames += solved
-            unmodelled.update(notes)
-            if value is None:
-                # The cell keeps its depth-1 price, so the rectangle is that much
-                # less consistent -- one cell of sixteen rather than 560 of 576, and
-                # counted out loud rather than left to be inferred.
-                unrefinable.add((i, j))
-                continue
-            refined[(i, j)] = value
-            prices[i, j] = value
-        try:
-            restricted = solve(prices[np.ix_(rows, cols)])
-        except EquilibriumError:
-            break
-        strategy = np.zeros(len(row), dtype=np.float64)
-        strategy[rows] = restricted.row_strategy
-        reply = np.zeros(len(col), dtype=np.float64)
-        reply[cols] = restricted.col_strategy
-        row_ev = prices @ reply
-        col_ev = strategy @ prices
-        guarantee = float(col_ev.min())
-        optimism = float(restricted.value) - guarantee
-        shape = (len(rows), len(cols))
-        answer = Equilibrium(
-            value=guarantee,
-            row_strategy=strategy,
-            col_strategy=reply,
-            row_ev=row_ev,
-            col_ev=col_ev,
-            row_ev_loss=np.clip(guarantee - row_ev, 0.0, None),
-            col_ev_loss=np.clip(col_ev - guarantee, 0.0, None),
-            duality_gap=float(restricted.duality_gap),
-        )
-        best_row = int(np.argmax(row_ev))
-        best_col = int(np.argmin(col_ev))
-        grew = False
-        if (
-            best_row not in rows
-            and float(row_ev[best_row]) > float(restricted.value) + ORACLE_TOLERANCE
-        ):
-            rows.append(best_row)
-            grew = True
-        if (
-            best_col not in cols
-            and float(col_ev[best_col]) < float(restricted.value) - ORACLE_TOLERANCE
-        ):
-            cols.append(best_col)
-            grew = True
-        if not grew:
-            converged = True
-            break
-
-    if answer is None:
-        # Nothing was solved. The depth-1 answer is still an answer to a well-posed game,
-        # which is the same fallback the shipped reading takes.
-        return SearchResult(
-            equilibrium=equilibrium,
-            payoff=payoff,
-            ours=row,
-            theirs=col,
-            unmodelled=unmodelled,
-        )
-    if unrefinable:
-        unmodelled.add(
-            f"depth-2 left {len(unrefinable)} cell(s) of the restricted game at depth 1"
-        )
-    unmodelled.add(
-        f"strategy read from the restricted {shape[0]}x{shape[1]} game; "
-        f"{len(refined)} cells of it at depth 2"
-    )
-    if not converged:
-        unmodelled.add("depth-2 best responses had not run out when the passes did")
-    return SearchResult(
-        equilibrium=answer,
-        payoff=prices,
-        ours=row,
-        theirs=col,
-        unmodelled=unmodelled,
-        refined=len(refined),
-        passes=used,
-        converged=converged,
-        subgames=subgames,
-        restricted=shape,
-        optimism=optimism,
-    )
-
-
-def _cells_to_refine(equilibrium: Equilibrium, refine: int) -> list[tuple[int, int]]:
-    """The cells the current equilibrium actually weights, heaviest first.
-
-    A cell changes the value of the game in proportion to the product of the two
-    probabilities on it, so that product is the ranking. Taking the top `refine` actions
-    per side rather than the top `refine**2` cells keeps the refined region a rectangle,
-    which is what the re-solve needs: a lone refined cell in an otherwise depth-1 row
-    makes that row look better or worse for a reason that is about depth, not about play.
-    """
-    rows = _top(equilibrium.row_strategy, refine)
-    cols = _top(equilibrium.col_strategy, refine)
-    return [(int(i), int(j)) for i in rows for j in cols]
-
-
-def _top(strategy: np.ndarray, count: int) -> np.ndarray:
-    """Indices of the heaviest `count` actions that carry any probability at all."""
-    live = np.flatnonzero(strategy > 1e-9)
-    if live.size <= count:
-        return live
-    order = np.argsort(-strategy[live], kind="stable")
-    return live[order[:count]]
 
 
 def _refined_value(
@@ -1546,15 +1233,10 @@ def belief_solve(
     *,
     budget: Budget,
     sides: Sequence[int] = (0, 1),
-    depth: int | tuple[int, int] = 1,
-    refine: int = DEFAULT_REFINE,
-    passes: int = DEFAULT_PASSES,
     sub_limit: int = DEFAULT_SUB_LIMIT,
     sub_branches: int = DEFAULT_SUB_BRANCHES,
     deepen: dict[int, dict[str, Any]] | None = None,
     progress: _deepen.Progress | None = None,
-    child_q: int | None = None,
-    select: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
 ) -> dict[int, BeliefResult]:
     """Both sides' answers, resolving each turn as few times as it has to be resolved.
 
@@ -1573,46 +1255,21 @@ def belief_solve(
     of each (IKA-282). With one leaf the shared node is built as before, whichever side is
     asked for, so self-play is unchanged; only the unread LP is skipped.
 
-    `depth` is per side, as `play_game`'s (IKA-111). At 1 the answer is the one above,
-    untouched. At 2 that answer is only the start of the restricted reading
-    (`_restricted_belief`): the double-oracle of `_restricted_search`, with a column set
-    per completion and each refined cell resolved and sub-solved in that completion's
-    position. The knobs are `search`'s and mean the same.
-
     `deepen` maps a side to how it deepens its Bayesian root after the depth-1 answer
     (IKA-294, a label ending in ``h``): `deepen.deepen_belief`'s ``cells``, ``reading``,
     ``swap``, ``q_probe`` (IKA-322), ``levels`` and ``child_q`` (IKA-307), ``discount``
     (IKA-342) and ``outside``
     -- the last in side 0's orientation,
-    as `search`'s (side 0's candidates, side 1's). It goes with depth 1 on that side. A side not in it is
-    answered as above.
+    as `search`'s (side 0's candidates, side 1's). A side not in it is answered as above.
 
     `progress` is called with each `deepen.Step` of every wanted side's answer as it forms
-    (IKA-332; the step's root says which side), deepened or not. Depth 1 only; it changes
-    nothing that is computed.
-
-    `select` is per side: which point of its optimal set a side plays
-    (`eqselect.parse_eq_select`, IKA-196). ``lp`` is the LP's vertex, as before; another
-    label replaces the strategy (never the value) of a depth-1 answer that was not
-    deepened, and is refused anywhere else.
+    (IKA-332; the step's root says which side), deepened or not. It changes nothing that is
+    computed.
     """
     from .beliefnode import belief_payoffs
 
-    depths = (depth, depth) if isinstance(depth, int) else tuple(depth)
     deepen = deepen or {}
-    for side in (0, 1):
-        parse_eq_select(select[side])
-        if select[side] != DEFAULT_EQ_SELECT and (side in deepen or depths[side] != 1):
-            raise ValueError(
-                f"equilibrium selection {select[side]!r} on side {side} goes with an "
-                "undeepened depth-1 answer (IKA-196)"
-            )
-    for side in deepen:
-        if depths[side] != 1:
-            raise ValueError("deepen on a hidden bench goes with depth 1 (IKA-294)")
     wanted = tuple(side for side in (0, 1) if side in sides)
-    if progress is not None and any(depths[side] != 1 for side in wanted):
-        raise ValueError("progress reports depth 1 and its deepening (IKA-332)")
     if not wanted:
         raise ValueError(f"belief_solve asked for no side: {sides!r}")
     row, col = list(ours), list(theirs)
@@ -1633,9 +1290,6 @@ def belief_solve(
         }
 
     out: dict[int, BeliefResult] = {}
-    #: Depth-2 cell values in side 0's orientation, shared by both sides' answers: with
-    #: one leaf, a position both sides' lists hold (an exact bench) is one position.
-    memo: dict[tuple, tuple[float | None, set[str], int]] = {}
     games: dict[int, tuple[list, np.ndarray]] = {}
     for side in wanted:
         built = nodes[side].matrices[side]
@@ -1665,11 +1319,6 @@ def belief_solve(
         matrices, weights = games[side]
         solved = ported[side]
         strategy = np.asarray(solved.row_strategy, dtype=np.float64)
-        if select[side] != DEFAULT_EQ_SELECT:
-            with timing.region("lp.select"):
-                strategy = reselect_bayesian(
-                    matrices, weights, float(solved.value), strategy, select[side]
-                )
         out[side] = BeliefResult(
             strategy=strategy,
             value=float(solved.value),
@@ -1714,196 +1363,11 @@ def belief_solve(
                 refined=got.report.expanded,
                 deepened=got.report,
             )
-        if depths[side] >= 2:
-            with timing.region("d2"):
-                out[side] = _restricted_belief(
-                    reg, side, row, col, items, matrices, weights, solved, evaluators[side],
-                    out[side], memo, budget=budget, refine=refine, passes=passes,
-                    sub_limit=sub_limit, sub_branches=sub_branches, child_q=child_q,
-                )
         out[side].node_payoff = (row, col, built, weights)
     return out
 
 
-def _restricted_belief(  # noqa: PLR0913 - one side's Bayesian node and the depth-2 knobs
-    reg: Regulation,
-    side: int,
-    row: list[SideAction],
-    col: list[SideAction],
-    items: list,
-    matrices: list[np.ndarray],
-    weights: np.ndarray,
-    solved,  # noqa: ANN001 - BayesianEquilibrium, the depth-1 answer
-    evaluate: LeafEvaluator,
-    start: BeliefResult,
-    memo: dict,
-    *,
-    budget: Budget,
-    refine: int,
-    passes: int,
-    sub_limit: int,
-    sub_branches: int,
-    child_q: int | None = None,
-) -> BeliefResult:
-    """`_restricted_search` for a side that cannot see the other side's bench (IKA-111).
-
-    `matrices[k]` is this side's own game (rows its actions) when the other bench is
-    completion `k`. The rectangle has one row set, because this side does not know `k`,
-    and a column set per completion, because the opponent does: the cells refined are
-    (i, j, k). Each is `_refined_value` on completion `k`'s position -- the turn resolved
-    there and the next turn's game solved as if that bench were known. That is the
-    determinization the issue named as the cheap choice: the belief is not carried into the
-    sub-game.
-
-    The oracles are the Bayesian ones. Our best row maximises sum_k w_k (M_k y_k); the
-    opponent's best column is per completion, the argmin of (x M_k). A row is added when
-    it beats the restricted game's value, a completion's column when it beats what that
-    completion's reply earns inside the rectangle. With one completion of weight 1 each
-    of these is `_restricted_search`'s, and so is the answer (tested).
-
-    The value returned is what the strategy guarantees against every column of every
-    completion at the prices in hand, sum_k w_k min_j (x M_k)_j -- not the restricted
-    game's own value, which restricts the opponent too.
-    """
-    from .equilibrium import solve_bayesian
-
-    w = np.asarray(weights, dtype=np.float64)
-    w = w / w.sum()
-    rows = [int(i) for i in _top(solved.row_strategy, refine)]
-    cols = [[int(j) for j in _top(y, refine)] for y in solved.col_strategies]
-    prices = [np.array(m, dtype=np.float64, copy=True) for m in matrices]
-    refined: set[tuple[int, int, int]] = set()
-    unrefinable: set[tuple[int, int, int]] = set()
-    unmodelled = set(start.unmodelled)
-    answer: BeliefResult | None = None
-    subgames = 0
-    converged = False
-    # The refined cells' turns, per pair of actions, across the completions and the passes
-    # (IKA-295): the completions differ only in the other side's hidden slots.
-    hidden_side = 1 - side
-    turns: dict[tuple[int, int], tuple] = {}
-    clean: dict[tuple[int, int], bool] = {}
-
-    def share_of(item, ours: int, theirs: int) -> TurnShare | None:  # noqa: ANN001 - Completion
-        if item.exact or not item.slots:
-            return None
-        if (ours, theirs) not in clean:
-            clean[(ours, theirs)] = not _cell_reaches_bench(
-                reg, row[ours], col[theirs], hidden_side, tuple(item.slots), item.position
-            )
-        return TurnShare(
-            cache=turns, key=(ours, theirs), side=hidden_side, slots=tuple(item.slots),
-            clean=clean[(ours, theirs)],
-        )
-
-    for _attempt in range(passes):
-        todo: list[tuple[int, int, int, tuple]] = []
-        #: The cells of this pass no answer has resolved yet, in the order they are met.
-        asked: dict[tuple, tuple[Position, SideAction, SideAction]] = {}
-        shares: list[TurnShare | None] = []
-        for k, item in enumerate(items):
-            for i in rows:
-                for j in cols[k]:
-                    if (i, j, k) in refined or (i, j, k) in unrefinable:
-                        continue
-                    # This side's (i, j) is side 0's (i, j), or (j, i) for side 1.
-                    ours, theirs = (i, j) if side == 0 else (j, i)
-                    key = (id(item.position), id(evaluate), ours, theirs)
-                    if key not in memo and key not in asked:
-                        asked[key] = (item.position, row[ours], col[theirs])
-                        shares.append(share_of(item, ours, theirs))
-                    todo.append((i, j, k, key))
-        if asked:
-            # Every completion's sub-games of the pass in one call to the leaf (IKA-291).
-            with timing.purpose("matrix"):
-                found = _refine_cells(
-                    reg, list(asked.values()), evaluate, budget=budget,
-                    sub_limit=sub_limit, sub_branches=sub_branches, shares=shares,
-                    child_q=child_q,
-                )
-            for key, answer in zip(asked, found, strict=True):
-                memo[key] = answer
-                subgames += answer[2]
-        for i, j, k, key in todo:
-            value, notes, _solved = memo[key]
-            unmodelled.update(notes)
-            if value is None:
-                unrefinable.add((i, j, k))
-                continue
-            refined.add((i, j, k))
-            prices[k][i, j] = value if side == 0 else -value
-        try:
-            restricted = solve_bayesian(
-                [prices[k][np.ix_(rows, cols[k])] for k in range(len(items))], w
-            )
-        except EquilibriumError:
-            break
-        strategy = np.zeros(len(prices[0]), dtype=np.float64)
-        strategy[rows] = restricted.row_strategy
-        replies = []
-        for k in range(len(items)):
-            reply = np.zeros(prices[k].shape[1], dtype=np.float64)
-            reply[cols[k]] = restricted.col_strategies[k]
-            replies.append(reply)
-        col_ev = [strategy @ prices[k] for k in range(len(items))]
-        row_ev = sum(w[k] * (prices[k] @ replies[k]) for k in range(len(items)))
-        guarantee = float(sum(w[k] * float(col_ev[k].min()) for k in range(len(items))))
-        answer = BeliefResult(
-            strategy=strategy,
-            value=guarantee,
-            replies=tuple(replies),
-            ours=start.ours,
-            theirs=start.theirs,
-            unmodelled=unmodelled,
-            classes=start.classes,
-            optimism=float(restricted.value) - guarantee,
-        )
-        grew = False
-        best_row = int(np.argmax(row_ev))
-        if (
-            best_row not in rows
-            and float(row_ev[best_row]) > float(restricted.value) + ORACLE_TOLERANCE
-        ):
-            rows.append(best_row)
-            grew = True
-        for k in range(len(items)):
-            earned = float(col_ev[k] @ replies[k])
-            best_col = int(np.argmin(col_ev[k]))
-            if (
-                best_col not in cols[k]
-                and float(col_ev[k][best_col]) < earned - ORACLE_TOLERANCE
-            ):
-                cols[k].append(best_col)
-                grew = True
-        if not grew:
-            converged = True
-            break
-
-    if timing.ON:
-        timing.count("depth2.cells", len(refined))
-        timing.count("depth2.subgames", subgames)
-    if answer is None:
-        # Nothing was solved; the depth-1 answer is still an answer, as in the open game.
-        return start
-    if unrefinable:
-        unmodelled.add(
-            f"hidden depth-2 left {len(unrefinable)} cell(s) of the restricted game at depth 1"
-        )
-    unmodelled.add(
-        f"hidden-bench strategy read from the restricted {len(rows)}x"
-        f"{'/'.join(str(len(c)) for c in cols)} game over {len(items)} completion(s); "
-        f"{len(refined)} cells of it at depth 2"
-    )
-    if not converged:
-        unmodelled.add("hidden depth-2 best responses had not run out when the passes did")
-    answer.refined = len(refined)
-    answer.subgames = subgames
-    answer.converged = converged
-    return answer
-
-
 __all__ = [
-    "DEFAULT_PASSES",
     "DEFAULT_RANK_FILL",
     "DEFAULT_REFERENCES",
     "DEFAULT_REFINE",

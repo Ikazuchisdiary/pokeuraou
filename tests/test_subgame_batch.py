@@ -10,6 +10,9 @@ rows share its call (on the card, 37 different answers for the same eight rows b
 batch's size. The batched pass equals the per-sub-game pass to the bit only if every
 sub-game is still scored as a block of its own size -- and the control that stacks the
 blocks into one call shows that the comparison sees it when they are not.
+
+Until IKA-463 the pass was read through the fixed depth-2 search (open and hidden); that
+search is gone, so the tests call `_refine_cells` as the ladder does.
 """
 
 from __future__ import annotations
@@ -24,7 +27,6 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.hidden import completions
 from pokeuraou.narrow import narrow
-from pokeuraou.search import belief_solve, search
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
@@ -130,72 +132,62 @@ def _positions(roster) -> list:  # noqa: ANN001
     return out
 
 
-def _hidden(roster, leaf, pos):  # noqa: ANN001, ANN202
+def _hidden(roster, leaf, pos, rect: int = 3) -> list:  # noqa: ANN001
+    """One `_refine_cells` pass, as a hidden-bench read asks it (the ladder; until IKA-463
+    `search._restricted_belief`): the ``rect`` x ``rect`` corner of the menus in every
+    completion of side 1's bench, each cell with its `TurnShare` across the completions.
+    Each cell's value, its notes and its count of sub-games."""
     reg = roster.reg
     sheet = list(roster.sets)[:6]
     ours = narrow(reg, pos, 0, limit=6).actions
     theirs = narrow(reg, pos, 1, limit=6).actions
-    spreads = {side: completions(reg, pos, side, sheet) for side in (0, 1)}
-    return belief_solve(
-        reg, pos, ours, theirs, spreads, {0: leaf.__call__, 1: leaf.__call__},
-        budget=Budget.matrix(), depth=2, refine=2, passes=2,
+    turns: dict = {}
+    clean: dict = {}
+    cells, shares = [], []
+    for item in completions(reg, pos, 1, sheet):
+        for i in range(min(rect, len(ours))):
+            for j in range(min(rect, len(theirs))):
+                cells.append((item.position, ours[i], theirs[j]))
+                if item.exact or not item.slots:
+                    shares.append(None)
+                    continue
+                if (i, j) not in clean:
+                    clean[(i, j)] = not search_mod._cell_reaches_bench(
+                        reg, ours[i], theirs[j], 1, tuple(item.slots), item.position
+                    )
+                shares.append(search_mod.TurnShare(
+                    cache=turns, key=(i, j), side=1, slots=tuple(item.slots), clean=clean[(i, j)],
+                ))
+    found = search_mod._refine_cells(
+        reg, cells, leaf.__call__, budget=Budget.matrix(), shares=shares,
+        sub_limit=search_mod.DEFAULT_SUB_LIMIT, sub_branches=search_mod.DEFAULT_SUB_BRANCHES,
     )
+    return [(value, sorted(notes), solved) for value, notes, solved in found]
 
 
-def _open(roster, leaf, pos, restricted: bool):  # noqa: ANN001, ANN202
-    reg = roster.reg
-    ours = narrow(reg, pos, 0, limit=6).actions
-    theirs = narrow(reg, pos, 1, limit=6).actions
-    return search(
-        reg, pos, ours, theirs, leaf.__call__, budget=Budget.matrix(),
-        depth=2, refine=2, passes=2, solve_restricted=restricted,
-    )
-
-
-def _hidden_answers(answers) -> list:  # noqa: ANN001
-    out = []
-    for side in sorted(answers):
-        a = answers[side]
-        out.append((
-            side, a.strategy.tobytes(), a.value, tuple(r.tobytes() for r in a.replies),
-            sorted(a.unmodelled), a.refined, a.subgames, a.converged, a.optimism,
-        ))
-    return out
-
-
-def _open_answer(result) -> tuple:  # noqa: ANN001
-    eq = result.equilibrium
-    return (
-        eq.row_strategy.tobytes(), eq.col_strategy.tobytes(), eq.value,
-        result.payoff.tobytes(), sorted(result.unmodelled), result.refined,
-        result.subgames, result.converged, result.optimism, result.restricted,
-    )
+_pass = _hidden
 
 
 def _all_answers(roster, positions) -> tuple[list, int, int]:  # noqa: ANN001
-    """Every depth-2 reading's answers on the positions, and the leaf's calls and sub-games."""
+    """The pass's answers on every position, and the leaf's calls and sub-games."""
     leaf = _SizedLeaf(Encoder(roster.reg))
     answers: list = []
     subgames = 0
     for pos in positions:
-        hidden = _hidden(roster, leaf, pos)
-        subgames += sum(a.subgames for a in hidden.values())
-        answers.append(_hidden_answers(hidden))
-        for restricted in (True, False):
-            opened = _open(roster, leaf, pos, restricted)
-            subgames += opened.subgames
-            answers.append(_open_answer(opened))
+        got = _pass(roster, leaf, pos)
+        subgames += sum(solved for _value, _notes, solved in got)
+        answers.append(got)
     return answers, leaf.total(), subgames
 
 
 def test_the_batched_pass_is_the_per_sub_game_pass_to_the_bit(roster, monkeypatch) -> None:  # noqa: ANN001
-    """Hidden depth 2 (both sides) and the open game's two depth-2 readings, on turn 1 and
-    later turns: strategies, values, replies, payoffs, notes and counts are the same bytes
-    as `_refined_value` per cell gives -- with a leaf whose answers move with batch size."""
+    """A pass over the open position's cells and its completions' cells, on turn 1 and later
+    turns: values, notes and counts are the same as `_refined_value` per cell gives -- with a
+    leaf whose answers move with batch size."""
     positions = _positions(roster)
     assert len(positions) >= 2
     batched, _calls, subgames = _all_answers(roster, positions)
-    assert subgames > 20, "the depth-2 readings must actually refine for this to test anything"
+    assert subgames > 20, "the pass must actually refine for this to test anything"
     monkeypatch.setattr(search_mod, "_refine_cells", _per_sub_game)
     reference, _calls, _subgames = _all_answers(roster, positions)
     assert batched == reference
@@ -204,38 +196,33 @@ def test_the_batched_pass_is_the_per_sub_game_pass_to_the_bit(roster, monkeypatc
 def test_stacking_the_sub_games_into_one_call_is_caught(roster, monkeypatch) -> None:  # noqa: ANN001
     """The positive control: score the pass's blocks as one batch -- the cheaper thing the
     issue first asked for -- and the answers are not the per-sub-game ones."""
-    positions = _positions(roster)[:1]
-    reference_leaf = _SizedLeaf(Encoder(roster.reg))
-    reference = _hidden_answers(_hidden(roster, reference_leaf, positions[0]))
+    pos = _positions(roster)[0]
+    reference = _pass(roster, _SizedLeaf(Encoder(roster.reg)), pos)
     monkeypatch.setattr(port, "score_segments", _stacked_scoring)
-    stacked_leaf = _SizedLeaf(Encoder(roster.reg))
-    stacked = _hidden_answers(_hidden(roster, stacked_leaf, positions[0]))
+    stacked = _pass(roster, _SizedLeaf(Encoder(roster.reg)), pos)
     assert stacked != reference
 
 
-def test_a_hidden_depth_2_decision_calls_the_leaf_once_a_pass(roster, monkeypatch) -> None:  # noqa: ANN001
+def test_a_pass_calls_the_leaf_once(roster, monkeypatch) -> None:  # noqa: ANN001
     """The count, with its positive control: the per-sub-game pass (the code before
-    IKA-291) calls the leaf once per sub-game; the batched pass once per pass that has
-    new cells, whatever the number of sub-games in it."""
+    IKA-291) calls the leaf once per sub-game; the batched pass once, whatever the number of
+    sub-games in it (a few more where it holds more than `GATHER_ROWS` rows)."""
     pos = _positions(roster)[0]
     batched_leaf = _SizedLeaf(Encoder(roster.reg))
-    batched = _hidden(roster, batched_leaf, pos)
-    subgames = sum(a.subgames for a in batched.values())
+    subgames = sum(solved for _value, _notes, solved in _pass(roster, batched_leaf, pos))
 
     monkeypatch.setattr(search_mod, "_refine_cells", _per_sub_game)
     before_leaf = _SizedLeaf(Encoder(roster.reg))
-    _hidden(roster, before_leaf, pos)
+    _pass(roster, before_leaf, pos)
 
     assert subgames >= 20
-    # Before: the node's own call(s), then one per sub-game and none batched.
+    # Before: one call per sub-game and none batched.
     assert before_leaf.calls["segments"] == 0
     assert before_leaf.calls["from_encoded"] >= subgames
-    # After: the node's own call(s), then one call per pass per side (two passes, two sides),
-    # or a few more where a pass holds more than `GATHER_ROWS` rows.
-    node_calls = batched_leaf.calls["from_encoded"] + batched_leaf.calls["positions"]
+    # After: the pass's sub-games in a few calls of segments, and no call of its own.
     assert batched_leaf.calls["segments"] * 5 < subgames
     assert batched_leaf.blocks >= subgames
-    assert node_calls < before_leaf.calls["from_encoded"] - subgames + 2
+    assert batched_leaf.calls["from_encoded"] + batched_leaf.calls["positions"] == 0
     assert batched_leaf.total() * 5 < before_leaf.total()
 
 
@@ -243,9 +230,9 @@ def test_a_pass_cut_by_gather_rows_is_the_same_pass(roster, monkeypatch) -> None
     """A pass whose sub-games are scored in several calls (the memory cap) is the same pass:
     a sub-game is its own block wherever the calls are cut."""
     pos = _positions(roster)[0]
-    whole = _hidden_answers(_hidden(roster, _SizedLeaf(Encoder(roster.reg)), pos))
+    whole = _pass(roster, _SizedLeaf(Encoder(roster.reg)), pos)
     monkeypatch.setattr(search_mod, "GATHER_ROWS", 1)
     leaf = _SizedLeaf(Encoder(roster.reg))
-    cut = _hidden_answers(_hidden(roster, leaf, pos))
+    cut = _pass(roster, leaf, pos)
     assert cut == whole
     assert leaf.calls["segments"] > 4

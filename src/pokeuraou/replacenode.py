@@ -23,7 +23,6 @@ import numpy as np
 
 from . import port, portlp, rustnode, timing
 from .actions import SideAction
-from .eqselect import reselect_bayesian
 from .position import Position
 from .regulation import Regulation
 
@@ -33,10 +32,11 @@ def solve(  # noqa: PLR0913 - the node's pieces
     options: Sequence[Sequence[SideAction]],
     spreads: dict[int, list],
     leaves: Sequence[Any],  # noqa: ANN401 - each side's leaf
-    selects: Sequence[str],
 ) -> dict[int, tuple[list[float], float]]:
-    """Each side's (strategy, value) for the replacement node, as `_do_replacement_node`'s
-    loop gives them."""
+    """Each side's (strategy, value) for the replacement node: side 0's in side 0's units,
+    side 1's of its own game (the negated transpose). ``options`` are each side's
+    replacements, ``spreads[s]`` the completions of side ``s``'s bench, ``leaves[s]`` side
+    ``s``'s leaf (an inference server's)."""
     from .beliefnode import served_leaf
     from .encode import rules_of
     from .inference import request_failed
@@ -137,10 +137,8 @@ def solve(  # noqa: PLR0913 - the node's pieces
     out: dict[int, tuple[list[float], float]] = {}
     for side in (0, 1):
         games, got = solved[side]
+        del games
         if isinstance(got, Exception):
             raise got
-        strategy = reselect_bayesian(
-            games, weights[side], float(got.value), got.row_strategy, selects[side]
-        )
-        out[side] = ([float(x) for x in strategy], float(got.value))
+        out[side] = ([float(x) for x in got.row_strategy], float(got.value))
     return out
