@@ -92,12 +92,6 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--threads", type=int, default=humanplay.default_threads(),
                     help="cores the read spreads over (IKA-32 stage 2: worker processes expand "
                     "cells ahead, a big game's two LPs at once); they change no answer")
-    ap.add_argument("--ladder", default=None,
-                    help="read by a ladder of stages instead of the deepening (IKA-367; a name in "
-                    "ladder.LADDERS such as L5, or stages joined by +) until stopped or its last "
-                    "stage (L6's stages do not run out, IKA-376), each completed stage the answer "
-                    "so far; its cells on --threads - 1 "
-                    "worker processes (IKA-364). Default: none (the deepening)")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
     ap.add_argument("--hp-share", action="store_true", help="no leaf: the hp-share proxy")
@@ -167,21 +161,12 @@ def main(argv: list[str] | None = None) -> None:
     # The menus, as play_human picks them (IKA-341: the same fallback, one function).
     q_path = args.q_model or (repo_root() / DEFAULT_Q)
     fill, q_files = install_menus(args.rank_fill, q_path, encoder, address, say)
-    if args.ladder is not None:
-        # IKA-364: the ladder's cells on threads - 1 worker processes.
-        humanplay.use_threads(args.threads)
-        workers = humanplay.use_ladder_pool(args.threads, reg, humanplay.ladder_spec(
-            address=address,
-            # The workers install the Q this process did (none: its fill needs none).
-            q_path=q_path if q_files else None))
-        say(f"ladder {args.ladder}: cells on {workers} worker process(es)")
-    else:
-        humanplay.use_threads(args.threads, reg, (address, "value"))
+    humanplay.use_threads(args.threads, reg, (address, "value"))
 
     settings = analysis.Settings(
         width=args.width, oracle=_oracle_width(args.oracle), levels=args.max_levels,
         discount=args.depth_discount, rank_fill=fill, bench_drop=args.bench_drop, open_information=args.open,
-        interval_ms=args.interval_ms, ladder=args.ladder,
+        interval_ms=args.interval_ms,
     )
     analyzer = analysis.Analyzer(reg, evaluate, name, loc=loc, settings=settings)
     sources = [analysis.Source(path.name, path, limit=args.limit) for path in args.record]

@@ -114,15 +114,13 @@ def test_a_condition_left_alone_is_the_human_play_agent() -> None:
             parse_condition(bad)
 
 
-def test_a_condition_names_how_its_ladder_reads_children() -> None:
-    """IKA-422: ``child`` is the ladder's `CHILD` for that condition's reads: left out, the
-    module's; ``seat`` or ``guarantee`` reach the agent (`Agent.ladder_child`); ``full`` (the
-    serial road's research reading) and anything else are refused."""
-    assert parse_condition("a:seconds=4,ladder=L6").child is None
-    got = parse_condition("a:seconds=4,ladder=L6,child=guarantee")
-    assert got.child == "guarantee" and got.to_json()["child"] == "guarantee"
-    assert parse_condition("a:seconds=4,child=seat").child == "seat"
-    for bad in ("child=full", "child=best", "child="):
+def test_a_condition_names_where_its_moves_are_deepened() -> None:
+    """IKA-464: ``road`` reaches the agent; left out, the module's. IKA-464 also removed the
+    ladder's keys (``ladder``, ``hidden_ladder``, ``root_widths``, ``child``)."""
+    assert parse_condition("a:seconds=4").road is None
+    got = parse_condition("a:seconds=4,road=port")
+    assert got.road == "port" and got.to_json()["road"] == "port"
+    for bad in ("road=gpu", "ladder=L6", "child=seat", "root_widths=12-24"):
         with pytest.raises(ValueError):
             parse_condition(f"a:seconds=4,{bad}")
 
@@ -574,7 +572,7 @@ def test_selection_seconds_is_a_condition_key_and_reaches_the_agent(pool) -> Non
 
 
 def test_a_list_of_servers_gives_worker_k_the_kth() -> None:
-    from pokeuraou.ladder import _worker_args
+    from pokeuraou.selection_deep import _worker_args
 
     spec = ("served", "a:1,b:2", "value", False, "q.pt", "q")
     assert [_worker_args(spec, k)[1] for k in range(4)] == ["a:1", "b:2", "a:1", "b:2"]

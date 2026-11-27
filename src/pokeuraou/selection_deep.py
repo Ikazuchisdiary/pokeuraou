@@ -204,7 +204,7 @@ class SerialReader:
 
 def _worker(format_id: str, spec: tuple, rank_fill: str | None, rank_by_leaf: bool,
             tasks: Any, results: Any, stop: Any) -> None:  # noqa: ANN401
-    """A pool worker: its own regulation, leaf and Q (`humanplay.ladder_process_leaf`) and a
+    """A pool worker: its own regulation, leaf and Q (`humanplay.worker_leaf`) and a
     port of one thread; reads the cells it is sent, or hands one back unread once ``stop``."""
     import traceback
 
@@ -216,7 +216,7 @@ def _worker(format_id: str, spec: tuple, rank_fill: str | None, rank_by_leaf: bo
     register_mega_stones(reg)
     rustnode.set_port_threads(1)
     try:
-        leaf = humanplay.ladder_process_leaf(reg, *spec)
+        leaf = humanplay.worker_leaf(reg, *spec)
     except Exception as error:  # noqa: BLE001 - said to the parent
         results.put(("failed", f"{type(error).__name__}: {error}"))
         return

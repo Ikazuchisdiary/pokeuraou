@@ -324,13 +324,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--oracle", default="sall",
                     help="the root's swap oracle while deepening: sall (every legal action, the "
                     "default: IKA-307's allocation), s<W> (the rest of a width-W menu) or none")
-    ap.add_argument("--ladder", default=None,
-                    help="read each move by a ladder of stages instead of the deepening (IKA-367; "
-                    "a name in ladder.LADDERS such as L5, or stages joined by +), the answer the "
-                    "last stage completed in the budget (L6 fills the budget on the wall clock "
-                    "and its stages do not run out, IKA-376). With --threads N its cells are read by "
-                    "N-1 worker processes (IKA-364; each asks the inference server)."
-                    "Default: none (the deepening)")
+    ap.add_argument("--road", default=None, choices=humanplay.DEEPEN_ROADS,
+                    help="where a move is deepened (IKA-464): python (deepen.py, narrow's "
+                    "children) or port (the port's deepening, the Q's children). Default: "
+                    "humanplay.DEEPEN_ROAD")
     ap.add_argument("--selection-reading", default=None,
                     help="how the AI reads the selection (IKA-392, selection_deep): `none` (the "
                     "value function's one estimate of each cell), `default` (the spec below), "
@@ -442,15 +439,7 @@ def main(argv: list[str] | None = None) -> None:
     fill, q_files = install_menus(args.rank_fill, q_path, encoder, address, say)
 
     threads, cores = resolve_cores(args.threads, args.cores, args.clock)
-    if args.ladder is not None:
-        # IKA-364: the ladder's cells on the workers; the port's cells and the LPs here.
-        humanplay.use_threads(threads)
-        spec = humanplay.ladder_spec(
-            address=address, q_path=q_path if qrank.is_q(fill) else None)
-        workers = humanplay.use_ladder_pool(threads, reg, spec)
-        say(f"ladder {args.ladder}: cells on {workers} worker process(es)")
-    else:
-        humanplay.use_threads(threads, reg, (address, "value"))
+    humanplay.use_threads(threads, reg, (address, "value"))
     selection_reading, selection_seconds = resolve_selection(args, evaluate)
     if selection_reading is not None:
         from pokeuraou import selection_deep
@@ -461,7 +450,7 @@ def main(argv: list[str] | None = None) -> None:
             # Made for each selection and closed after it: no idle workers through the moves.
             selection_deep.use_reader(selection_deep.LazyPoolReader(
                 reg, readers,
-                humanplay.ladder_spec(
+                humanplay.worker_spec(
                     address=address, q_path=q_path if qrank.is_q(fill) else None),
                 rank_fill=fill))
         say(f"selection read {selection_reading} on {max(readers, 1)} process(es)"
@@ -474,7 +463,7 @@ def main(argv: list[str] | None = None) -> None:
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,
         width_only=args.width_only, max_levels=args.max_levels or None, child_q=args.child_q,
         oracle=_oracle_width(args.oracle), halt=halt,
-        ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds, ladder=args.ladder,
+        ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds, road=args.road,
         selection_reading=selection_reading, selection_seconds=selection_seconds,
     )
     if args.child_q is not None and not qrank.is_q(fill):

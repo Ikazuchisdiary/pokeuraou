@@ -27,7 +27,7 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.narrow import narrow
 from pokeuraou.teams import load_roster
 
-from .test_ladder import _played
+from ._positions import played as _played
 
 
 @pytest.fixture(scope="module")
@@ -213,104 +213,6 @@ def test_the_ports_sub_games_are_folds_and_solves(roster) -> None:  # noqa: ANN0
     portlp.solve_subs(reg, whole)
     np.testing.assert_allclose([s.solved for s in whole], [
         float(equilibrium.solve(s.payoff).value) for s in whole], rtol=0, atol=TOL)
-
-
-def _kids(rng: np.random.Generator, count: int) -> list:
-    """Deep children (`ladder._Child`) begun on random prices, their first pass read."""
-    from pokeuraou import ladder
-
-    kids = []
-    for _ in range(count):
-        m, n = (int(v) for v in rng.integers(2, 9, 2))
-        prices = rng.random((m, n))
-        if rng.random() < 0.3:
-            prices = np.round(prices, 1)
-        start = equilibrium.solve(prices)
-        kid = ladder._Child(None, list(range(m)), list(range(n)), prices,
-                            np.asarray(start.row_strategy), np.asarray(start.col_strategy))
-        kid.rows = [int(i) for i in rng.permutation(m)[:max(1, m // 2)]]
-        kid.cols = [int(j) for j in rng.permutation(n)[:max(1, n // 2)]]
-        kid.trial = prices.copy()
-        kids.append(kid)
-    return kids
-
-
-def _read_pass(rng: np.random.Generator, kids: list) -> None:
-    for kid in kids:
-        for i in kid.rows:
-            for j in kid.cols:
-                kid.memo.setdefault((i, j), float(rng.random()) if rng.random() < 0.9 else None)
-
-
-def test_the_kids_passes_solved_together_are_solved_alone(roster) -> None:  # noqa: ANN001
-    """IKA-387 (`ladder._kids_solve`): a pass of many deep children, their rectangles solved in
-    the port in one crossing, is each child's `_kid_solve` with scipy -- answer, the oracle's
-    rows and columns, whether it goes on -- pass after pass, each child its own. The positive
-    control: the Bayesian games the port solved, one crossing a pass."""
-    from pokeuraou import ladder
-
-    was = portlp.ON[0]
-    try:
-        for seed in range(4):
-            got = {}
-            for on in (False, True):
-                rng = np.random.default_rng(3870 + seed)
-                kids = _kids(rng, 7)
-                portlp.set_on(on)
-                before = (portlp.COUNTS["bayes"], portlp.COUNTS["crossings"])
-                passes = 3
-                for attempt in range(passes + 1):
-                    _read_pass(rng, kids)
-                    live = [k for k in kids if k.active]
-                    ladder._kids_solve(roster.reg, [(k, attempt, passes) for k in live])
-                    if on and live:
-                        assert portlp.COUNTS["bayes"] - before[0] == len(live)
-                        assert portlp.COUNTS["crossings"] - before[1] == 1
-                        before = (portlp.COUNTS["bayes"], portlp.COUNTS["crossings"])
-                got[on] = [(k.rows, k.cols, k.active, k.answer) for k in kids]
-            for off, now in zip(got[False], got[True], strict=True):
-                assert off[:3] == now[:3]
-                assert (off[3] is None) == (now[3] is None)
-                if off[3] is not None:
-                    assert _close(off[3][0], now[3][0]) and off[3][2] == now[3][2]
-                    assert all(_close(a, b) for a, b in zip(off[3][1], now[3][1], strict=True))
-            # The children differ (a child's answer given to another would show).
-            assert len({str(a) for a in got[True]}) == len(got[True])
-    finally:
-        portlp.set_on(was)
-
-
-def test_the_kids_matrices_solved_together_are_solved_alone(roster, monkeypatch) -> None:  # noqa: ANN001
-    """IKA-387 (`ladder._kids_fill`): the deep children's own matrices, solved in the port in
-    one crossing, are each `solve` with scipy -- prices, both strategies, notes and counted
-    work. The leaf is the port's filled nodes with made-up values (`_filled`). The positive
-    control: the games the port solved."""
-    from pokeuraou import ladder
-
-    subs = _filled(roster)
-    pendings = [s.pending for s in subs]
-    monkeypatch.setattr(port, "pending_payoffs", lambda *_a, **_k: pendings)
-    monkeypatch.setattr(port, "score_stacked", lambda _leaf, encoded: [p.values for p in pendings])
-    monkeypatch.setattr(ladder, "STACK", True)
-    was = portlp.ON[0]
-    got = {}
-    try:
-        for on in (False, True):
-            portlp.set_on(on)
-            kids = [ladder._Child(None, [], [], None, None, None) for _ in pendings]
-            games = portlp.COUNTS["games"]
-            notes: set[str] = set()
-            assert ladder._kids_fill(roster.reg, kids, None, Budget.matrix(), notes) is None
-            if on:
-                assert portlp.COUNTS["games"] - games == len(kids)
-            got[on] = ([(k.prices, k.x, k.y, sorted(k.notes), k.work) for k in kids], sorted(notes))
-    finally:
-        portlp.set_on(was)
-    for off, on in zip(got[False][0], got[True][0], strict=True):
-        assert _close(off[0], on[0]) and _close(off[1], on[1]) and _close(off[2], on[2])
-        assert off[3:] == on[3:]
-    assert got[False][1] == got[True][1]
-    assert len({a[1].tobytes() + a[2].tobytes() for a in got[True][0]}) == len(pendings)
 
 
 def test_a_sub_game_solved_already_or_elsewhere_is_left_alone(roster) -> None:  # noqa: ANN001

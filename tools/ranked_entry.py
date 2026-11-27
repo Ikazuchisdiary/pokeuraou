@@ -116,7 +116,7 @@ def real_solver(reg, args):  # noqa: ANN001, ANN201
     if readers > 1:
         selection_deep.use_reader(selection_deep.LazyPoolReader(
             reg, readers,
-            humanplay.ladder_spec(address=address,
+            humanplay.worker_spec(address=address,
                                   q_path=q_path if fill != ph.NO_Q_FILL else None),
             rank_fill=fill))
     say(f"leaf {name} / menus {fill} {q_files} / selection read {reading} for {seconds:g} s "
