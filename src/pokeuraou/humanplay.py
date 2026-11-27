@@ -512,14 +512,12 @@ PLAY_PONDER_SECONDS = 600.0
 #: leaf's selection by +23.2 Elo [+8.0, +38.6]. A count-clock game or one without a leaf keeps
 #: the leaf's solve. Generation and `timematch` do not read it.
 #:
-#: Each cell is read at depth 1 (`L6@0`), not by the depth-2 stage of `selection_deep`'s
-#: ``default``, so the same seconds read about twice the cells (IKA-440 stage 3, the user's
-#: decision 10/8): at equal cost (148.8 cells against 71.0, 82.7 s against 93.5 s a pair)
-#: this beat the depth-2 reading of 65 cells by +12.7 Elo [-0.1, +25.6] over 900 pairs.
-#: The depth-2 reading the tool played before is ``PLAY_SELECTION_READING_IKA392``, which
-#: `--selection-reading` takes by its name ``default``.
-PLAY_SELECTION_READING = "stage=L6@0,rects=8-11,confirm=2,shift=add"
-PLAY_SELECTION_READING_IKA392 = "default"
+#: Each cell is read at depth 1 (`L6@0`), not by a depth-2 stage of the ladder, so the same
+#: seconds read about twice the cells (IKA-440 stage 3, the user's decision 10/8): at equal
+#: cost (148.8 cells against 71.0, 82.7 s against 93.5 s a pair) this beat the depth-2
+#: reading of 65 cells by +12.7 Elo [-0.1, +25.6] over 900 pairs. IKA-464 removed the ladder
+#: and with it the depth-2 reading; a cell is the depth-1 node (`selection_deep.read_cell`).
+PLAY_SELECTION_READING = "rects=8-11,confirm=2,shift=add"
 PLAY_SELECTION_SECONDS = 90.0
 
 

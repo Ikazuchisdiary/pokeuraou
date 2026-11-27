@@ -50,8 +50,8 @@ PLAY_ONLY_DEFAULTS = (
     "every core, when the game is on the wall clock with a leaf (`--selection-reading none` "
     "turns it off; IKA-392: the reading beat the leaf's selection by +23.2 Elo [+8.0, +38.6] on "
     "the time match's board). Each cell is read at depth 1 (`humanplay.PLAY_SELECTION_READING`, "
-    "IKA-440: +12.7 Elo [-0.1, +25.6] over the depth-2 cells at equal cost; "
-    "`--selection-reading default` plays the depth-2 cells). Generation (`poolplay`, "
+    "IKA-440: +12.7 Elo [-0.1, +25.6] over the depth-2 cells at equal cost; IKA-464 removed "
+    "the depth-2 cells with the ladder). Generation (`poolplay`, "
     "`selfplay`), the time match's conditions and the move's reading do not read it",
 )
 #: Tools that resolve an unnamed fill or Q their own way on purpose, and why.
@@ -63,8 +63,6 @@ OWN_RESOLUTION = {
     "driver's own default runs (IKA-98)",
     "time_match.py": "play_human's agent in both seats: q-nocover by the default Q, and a "
     "match stops without it as a board does (IKA-333)",
-    "selection_sweep.py": "reads selection cells as a person's move reads them, menus q-nocover "
-    "by the Q it names (the default Q); plays no game (IKA-392)",
     "ranked_entry.py": "reads a ranked match's selection with play_human's own set-up "
     "(its install_menus: q-nocover by the Q it names, the default Q; its leaf, its 90 s "
     "default reading); plays no game (IKA-407)",

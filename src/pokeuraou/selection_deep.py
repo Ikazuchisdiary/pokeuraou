@@ -1,9 +1,9 @@
-"""The selection game read deeper than the leaf, in the ladder's terms (IKA-392).
+"""The selection game read deeper than the leaf (IKA-392).
 
 `selection.solve_selection` fills the 90 x 90 matrix of one pair with the value function's
-one estimate of each turn-1 position (about a second). This reads the cells that matter the
-way a person's move reads a turn-1 position (`humanplay.solve_move` with one stage of
-`ladder`, on the count clock), and solves the game again:
+one estimate of each turn-1 position (about a second). This reads the cells that matter as
+the depth-1 node of their turn-1 position (`humanplay.solve_move`: the menus and the matrix
+of the move, not the leaf's one estimate), and solves the game again on the port's LP:
 
 * the prices start as the leaf matrix; a cell read replaces its price with the read's value;
 * a stage takes a rectangle of the current answer -- its support first, then the rows that
@@ -44,19 +44,18 @@ from typing import Any
 
 import numpy as np
 
+from . import portlp
 from .budget import Budget
-from .equilibrium import BayesianEquilibrium, solve_bayesian
+from .equilibrium import BayesianEquilibrium
 from .priors import SampledSet
 from .selection import SelectionAnalysis, SpreadClass, solve_selection
 
 SHIFTS = ("none", "const", "add")
-#: What a cell's read is worth (`read_cell`): ``guarantee``: what the last stage's strategy
-#: guarantees the row against every column (the ladder's own value, one-sided: read from each
-#: side a position sums to 0.90 -- mean -0.1045 on 30 cells), ``rect``: the value of the last
-#: stage's rectangle game, ``priced``: the value of the whole priced matrix (the default:
-#: antisymmetric to 0.0002 +- 0.0013 and, of the four, the nearest to a three-stage read, rmse
-#: 0.0345 against the leaf's 0.1085 and the depth-1 game's 0.0484; records/IKA-392.md §3).
-CELL_VALUES = ("guarantee", "rect", "priced")
+#: How a cell is read: the depth-1 node of its turn-1 position, the only reading left. A spec
+#: may still name it as the ladder's ``L6@0`` (no stage of the ladder: the depth-1 answer),
+#: which is what a person's game played (IKA-440). IKA-464 removed the ladder and the deeper
+#: stages a spec could name (``d2r4b3k8``, the reading ``default`` was before).
+DEPTH1_STAGES = ("L6@0", "d1")
 
 #: The reader a person's game reads its selection on (`humanplay.play`; None: this process,
 #: `SerialReader`). A tool that has worker processes sets it (`use_reader`).
@@ -71,19 +70,17 @@ def use_reader(reader: Any) -> None:  # noqa: ANN401
 
 @dataclass(frozen=True, slots=True)
 class Reading:
-    """How the selection is read deeper: a spec like ``stage=d2r4b3k8,rects=8-16,confirm=2``.
+    """How the selection is read deeper: a spec like ``rects=8-11,confirm=2,shift=add``.
 
-    ``stage``: the ladder stage every cell is read by (one stage, no budget), ``rects``: the
+    Each cell is the depth-1 node of its turn-1 position (`DEPTH1_STAGES`). ``rects``: the
     rectangle's side of each stage, ``confirm``: confirmation passes after each stage,
     ``shift``: how the unread cells are priced (module docstring), ``width``: the menus'
     width at each cell, ``fill``: with a deadline, keep widening (by 8) after ``rects``.
     """
 
-    stage: str = "d2r4b3k8"
-    rects: tuple[int, ...] = (8, 16)
+    rects: tuple[int, ...] = (8, 11)
     confirm: int = 2
     shift: str = "add"
-    value: str = "priced"
     width: int = 64
     fill: bool = True
     #: The ridge weight of the additive shift, in cells.
@@ -91,12 +88,13 @@ class Reading:
 
     @property
     def label(self) -> str:
-        return (f"stage={self.stage},rects={'-'.join(str(r) for r in self.rects)},"
-                f"confirm={self.confirm},shift={self.shift},value={self.value},width={self.width}")
+        return (f"rects={'-'.join(str(r) for r in self.rects)},"
+                f"confirm={self.confirm},shift={self.shift},width={self.width}")
 
 
 def parse_reading(spec: str) -> Reading:
-    """`Reading` from its spec; ``default`` is the plan's first form."""
+    """`Reading` from its spec; ``default`` is the reading a person's game plays
+    (`humanplay.PLAY_SELECTION_READING`)."""
     base = Reading()
     if spec in ("", "default"):
         return base
@@ -106,7 +104,11 @@ def parse_reading(spec: str) -> Reading:
     for part in spec.replace(";", ",").split(","):
         key, _sep, value = part.partition("=")
         if key == "stage":
-            given["stage"] = value
+            if value not in DEPTH1_STAGES:
+                raise ValueError(
+                    f"a selection cell is read at depth 1 ({' or '.join(DEPTH1_STAGES)}); the "
+                    f"ladder's stages are gone (IKA-464), not {value!r}"
+                )
         elif key == "rects":
             given["rects"] = tuple(int(v) for v in value.split("-"))
         elif key in ("confirm", "width"):
@@ -117,10 +119,6 @@ def parse_reading(spec: str) -> Reading:
             if value not in SHIFTS:
                 raise ValueError(f"shift is one of {SHIFTS}, not {value!r}")
             given["shift"] = value
-        elif key == "value":
-            if value not in CELL_VALUES:
-                raise ValueError(f"value is one of {CELL_VALUES}, not {value!r}")
-            given["value"] = value
         elif key == "fill":
             given["fill"] = value not in ("0", "off", "no")
         else:
@@ -129,18 +127,6 @@ def parse_reading(spec: str) -> Reading:
 
 
 # --------------------------------------------------------------------------- one cell
-
-
-def _cell_value(read: Any, which: str) -> float:  # noqa: ANN401 - a `ladder.LadderResult`
-    """A cell's value from its read (`CELL_VALUES`), in side 0's units."""
-    if not read.rungs or which == "guarantee":
-        return float(read.value)
-    if which == "rect":
-        last = read.rungs[-1]
-        return float(last.value + last.optimism)
-    from .equilibrium import solve
-
-    return float(solve(np.asarray(read.prices[0], dtype=np.float64)).value)
 
 
 def read_cell(  # noqa: PLR0913 - a cell and how it is read
@@ -153,34 +139,29 @@ def read_cell(  # noqa: PLR0913 - a cell and how it is read
     rank_fill: str | None = "q-nocover",
     rank_by_leaf: bool = True,
 ) -> tuple[float, dict[str, Any]]:
-    """Side 0's value of the turn-1 position of two ordered fours, read by ``reading.stage``.
+    """Side 0's value of the turn-1 position of two ordered fours: the depth-1 node of that
+    position, both benches open (`humanplay.solve_move`, the port's `beliefNode`).
 
     A draw among the leads' switch-ins (`selfplay.lead_branches_from_sets`) is every outcome
     read at its weight, the value their mean, as `solve_selection` treats it (IKA-352).
     """
     from . import humanplay
-    from .ladder import LADDER_COSTS, parse_ladder
     from .selfplay import _menus, lead_branches_from_sets
 
     branches = lead_branches_from_sets(reg, [(list(our_sets), list(their_sets))])[0]
     total = 0.0
     weight = 0.0
-    rungs = 0
     for w, pos in branches:
         ours, theirs = _menus(reg, pos, (reading.width, reading.width), leaf, Budget.matrix(),
                               rank_by_leaf, None, None, rank_fill=rank_fill)
         if not ours or not theirs:
             raise RuntimeError("a selection cell has no menu")
         solved = humanplay.solve_move(
-            reg, pos, 0, list(ours), list(theirs), None, leaf, budget=Budget.matrix(),
-            exact=True,
-            ladder={"stages": parse_ladder(reading.stage), "budget_ms": None,
-                    "cost": LADDER_COSTS["local", 1], "clock": "count", "start_ms": 0.0},
+            reg, pos, 0, list(ours), list(theirs), None, leaf, budget=Budget.matrix(), exact=True,
         )
-        rungs = min(rungs or len(solved.ladder.rungs), len(solved.ladder.rungs))
-        total += float(w) * _cell_value(solved.ladder, reading.value)
+        total += float(w) * float(solved.value)
         weight += float(w)
-    return total / weight, {"branches": len(branches), "rungs": rungs}
+    return total / weight, {"branches": len(branches)}
 
 
 # --------------------------------------------------------------------------- readers
@@ -256,6 +237,16 @@ def _worker(format_id: str, spec: tuple, rank_fill: str | None, rank_by_leaf: bo
             results.put((generation, i, j, None, traceback.format_exc()))
 
 
+def _worker_args(args: tuple[Any, ...], index: int) -> tuple[Any, ...]:
+    """IKA-390: a served leaf's address may name several inference servers (``a,b``): worker
+    ``index`` asks the ``index mod n``th, its leaf, its Q and its port's direct requests
+    alike (they all read the address the leaf was made with). One address: unchanged."""
+    if len(args) > 1 and args[0] == "served" and isinstance(args[1], str) and "," in args[1]:
+        addresses = [a for a in args[1].split(",") if a]
+        return (args[0], addresses[index % len(addresses)], *args[2:])
+    return args
+
+
 class PoolReader:
     """Reads the cells on ``count`` worker processes (spawned, kept for the reader's life)."""
 
@@ -269,7 +260,6 @@ class PoolReader:
         self.cells = 0
         self.seconds = 0.0
         self.processes = []
-        from .ladder import _worker_args  # a comma list of servers: worker k asks the kth (IKA-390)
 
         for k in range(count):
             process = context.Process(
@@ -373,9 +363,9 @@ class LazyPoolReader:
 class MemoReader:
     """``reader`` with the cells it read kept in ``memo`` (IKA-416): two readings of one pair
     (two conditions of a match) read a cell once. A cell is named by what its read depends on
-    -- ``tag`` (the leaf and the menus, the caller's), the reading's stage, width and value,
-    and the two ordered fours -- so a hit is the value the reader would give again (a cell's
-    read is the node-time ladder of one position: the same every time). The answer keeps the
+    -- ``tag`` (the leaf and the menus, the caller's), the reading's width and the two ordered
+    fours -- so a hit is the value the reader would give again (a cell's read is the depth-1
+    node of one position: the same every time). The answer keeps the
     order of ``cells``, as the reader's does."""
 
     def __init__(self, reader: Any, memo: dict, tag: Any = None) -> None:  # noqa: ANN401
@@ -390,7 +380,7 @@ class MemoReader:
         selections: Sequence[tuple[int, ...]], cells: Sequence[tuple[int, int]],
         deadline: float | None = None,
     ) -> dict[tuple[int, int], float]:
-        head = (self.tag, reading.stage, reading.width, reading.value)
+        head = (self.tag, reading.width)
 
         def name(cell: tuple[int, int]) -> tuple:
             return (head, tuple(selections[cell[0]]), tuple(selections[cell[1]]))
@@ -530,7 +520,11 @@ def solve_selection_deep(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the stages,
 
     def resolve() -> tuple[np.ndarray, BayesianEquilibrium]:
         p = prices(leaf, read, reading.shift, reading.ridge)
-        return p, solve_bayesian([p], np.ones(1))
+        # The port's LP (IKA-464), as the selection's own solve (`selectionSolve`) is.
+        got = portlp.solve_bayesian_many(reg, [([p], np.ones(1))])[0]
+        if isinstance(got, Exception):
+            raise got
+        return p, got
 
     def fetch(cells: list[tuple[int, int]]) -> bool:
         fresh = [c for c in cells if c not in read]

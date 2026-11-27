@@ -82,11 +82,24 @@ def _exploitability(truth: np.ndarray, x: np.ndarray) -> float:
     return float(solve(truth).value - (np.asarray(x) @ truth).min())
 
 
+def _reg():  # noqa: ANN202
+    """A regulation for the port's LP (IKA-464: the selection's game is solved in the port)."""
+    from pokeuraou.regulation import load_regulation
+
+    global _REGULATION  # noqa: PLW0603 - loaded once for the module
+    if _REGULATION is None:
+        _REGULATION = load_regulation("gen9championsvgc2026regmb")
+    return _REGULATION
+
+
+_REGULATION = None
+
+
 def _deep(seed: int, spec: str, **kwargs):  # noqa: ANN001, ANN202
     truth, leaf = _instance(seed)
     reader = TruthReader(truth, **kwargs)
     analysis, report = solve_selection_deep(
-        None, (), (), None, reader, parse_reading(spec), base=_base(leaf))
+        _reg(), (), (), None, reader, parse_reading(spec), base=_base(leaf))
     return truth, leaf, reader, analysis, report
 
 
@@ -94,31 +107,14 @@ SEEDS = range(8)
 
 
 def test_a_reading_is_written_and_refused_as_written() -> None:
-    assert parse_reading("default") == Reading()
-    got = parse_reading("stage=d2r8b3k8;rects=4-8-12,confirm=1,shift=const,width=24,fill=off")
-    assert (got.stage, got.rects, got.confirm, got.shift, got.width, got.fill) == (
-        "d2r8b3k8", (4, 8, 12), 1, "const", 24, False)
-    for bad in ("shift=other", "unknown=1", "rects=x"):
+    assert parse_reading("default") == Reading() == parse_reading(humanplay.PLAY_SELECTION_READING)
+    got = parse_reading("stage=L6@0;rects=4-8-12,confirm=1,shift=const,width=24,fill=off")
+    assert (got.rects, got.confirm, got.shift, got.width, got.fill) == (
+        (4, 8, 12), 1, "const", 24, False)
+    # IKA-464: a cell is the depth-1 node; the ladder's deeper stages and cell values are gone.
+    for bad in ("shift=other", "unknown=1", "rects=x", "stage=d2r4b3k8", "value=priced"):
         with pytest.raises(ValueError):
             parse_reading(bad)
-
-
-def test_a_cells_value_is_the_read_side_symmetric_one_unless_the_guarantee_is_asked() -> None:
-    """The ladder's own value is one side's guarantee: read from each side, a position sums to
-    less than 1 (measured -0.10 on 30 cells). The cell's default is the value of the priced matrix."""
-    from types import SimpleNamespace
-
-    from pokeuraou.selection_deep import _cell_value
-
-    rung = SimpleNamespace(value=0.40, optimism=0.07)
-    read = SimpleNamespace(value=0.40, rungs=[rung], prices=[np.array([[0.6, 0.2], [0.3, 0.5]])])
-    assert _cell_value(read, "guarantee") == 0.40
-    assert abs(_cell_value(read, "rect") - 0.47) < 1e-12
-    assert abs(_cell_value(read, "priced") - solve(read.prices[0]).value) < 1e-12
-    assert parse_reading("default").value == "priced"
-    with pytest.raises(ValueError):
-        parse_reading("value=other")
-    assert _cell_value(SimpleNamespace(value=0.3, rungs=[], prices=[]), "rect") == 0.3
 
 
 def test_the_shift_fits_what_it_says() -> None:
@@ -155,7 +151,7 @@ def test_the_stages_find_what_the_leaf_misses() -> None:
     # the control that the comparison can fail: no reading is the leaf's answer to the bit
     truth, leaf = _instance(0)
     analysis, report = solve_selection_deep(
-        None, (), (), None, TruthReader(truth), parse_reading("rects=8"), base=_base(leaf),
+        _reg(), (), (), None, TruthReader(truth), parse_reading("rects=8"), base=_base(leaf),
         deadline=0.0)
     assert report.completed == "leaf" and report.cells == 0
     assert np.array_equal(analysis.equilibrium.row_strategy, _base(leaf).equilibrium.row_strategy)
@@ -226,7 +222,7 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
     return loaded
 
 
-READING = "stage=d2r4b3n8;rects=2;confirm=0;width=8"
+READING = "rects=6;confirm=1;width=8"
 
 
 def test_a_cell_is_read_as_a_move_reads_a_turn_one_position(pool) -> None:  # noqa: ANN001
@@ -346,40 +342,40 @@ def test_two_readings_of_a_pair_read_a_cell_once() -> None:
         inner = TruthReader(truth)
         long_reader = selection_deep.MemoReader(inner, memo, tag="leaf")
         _a, long_report = solve_selection_deep(
-            None, (), (), None, long_reader, parse_reading("rects=8-16,confirm=2"), base=_base(leaf))
+            _reg(), (), (), None, long_reader, parse_reading("rects=8-16,confirm=2"), base=_base(leaf))
         asked = len(inner.asked)
         short_reader = selection_deep.MemoReader(inner, memo, tag="leaf")
         short, short_report = solve_selection_deep(
-            None, (), (), None, short_reader, parse_reading("rects=8,confirm=2"), base=_base(leaf))
+            _reg(), (), (), None, short_reader, parse_reading("rects=8,confirm=2"), base=_base(leaf))
         # the positive control: every cell of the shorter reading came from the memo
         assert short_report.cells > 0 and short_reader.hits == short_report.cells
         assert len(inner.asked) == asked and long_reader.cells == long_report.cells
         alone, alone_report = solve_selection_deep(
-            None, (), (), None, TruthReader(truth), parse_reading("rects=8,confirm=2"), base=_base(leaf))
+            _reg(), (), (), None, TruthReader(truth), parse_reading("rects=8,confirm=2"), base=_base(leaf))
         assert short_report.read == alone_report.read
         assert list(short_report.read) == list(alone_report.read)  # the order the prices sum in
         assert np.array_equal(short.equilibrium.row_strategy, alone.equilibrium.row_strategy)
         assert np.array_equal(short.matrices[0], alone.matrices[0])
-    # the control that a cell is named by what its read depends on: another stage, another
-    # width, another leaf share nothing
+    # the control that a cell is named by what its read depends on: another width, another
+    # leaf share nothing
     truth, leaf = _instance(0)
     memo = {}
     first = selection_deep.MemoReader(TruthReader(truth), memo, tag="leaf")
-    solve_selection_deep(None, (), (), None, first, parse_reading("rects=8,confirm=2"), base=_base(leaf))
+    solve_selection_deep(_reg(), (), (), None, first, parse_reading("rects=8,confirm=2"), base=_base(leaf))
     again = selection_deep.MemoReader(TruthReader(truth), memo, tag="leaf")
-    solve_selection_deep(None, (), (), None, again, parse_reading("rects=8,confirm=2"), base=_base(leaf))
+    solve_selection_deep(_reg(), (), (), None, again, parse_reading("rects=8,confirm=2"), base=_base(leaf))
     assert again.hits == first.cells > 0 and again.cells == 0
-    for spec, tag in (("stage=d2r8b3k8,rects=8,confirm=2", "leaf"),
-                      ("width=32,rects=8,confirm=2", "leaf"), ("rects=8,confirm=2", "other leaf")):
+    for spec, tag in (("width=32,rects=8,confirm=2", "leaf"), ("rects=8,confirm=2", "other leaf")):
         other = selection_deep.MemoReader(TruthReader(truth), memo, tag=tag)
-        solve_selection_deep(None, (), (), None, other, parse_reading(spec), base=_base(leaf))
+        solve_selection_deep(_reg(), (), (), None, other, parse_reading(spec), base=_base(leaf))
         assert other.hits == 0 and other.cells > 0
 
 
 def test_a_pairs_two_readings_share_their_cells_in_a_match(monkeypatch, pool) -> None:  # noqa: ANN001
     """IKA-416: in `play_pair`, the second condition's reading is answered from the first's cells,
     and its entry is the one it solves alone (in the port, the stub leaf)."""
-    longer = "stage=d2r4b3n8;rects=2-3;confirm=0;width=8"
+    longer = "rects=2-3;confirm=0;width=8"
+    short = "rects=2;confirm=0;width=8"
     made: list = []
     real = selection_deep.MemoReader
 
@@ -389,7 +385,7 @@ def test_a_pairs_two_readings_share_their_cells_in_a_match(monkeypatch, pool) ->
 
     monkeypatch.setattr(selection_deep, "MemoReader", keep)
     deep_long = parse_condition(f"long:seconds=1,clock=count,selection={longer}")
-    deep_short = parse_condition(f"short:seconds=1,clock=count,selection={READING}")
+    deep_short = parse_condition(f"short:seconds=1,clock=count,selection={short}")
     agent, person, kwargs = _calls(monkeypatch, _match(pool, deep_long, deep_short), pool)[0]
     by_seat = {kwargs["agent_side"]: kwargs["entry"], 1 - kwargs["agent_side"]: person.entry}
     short_entry = by_seat[1]
@@ -397,7 +393,7 @@ def test_a_pairs_two_readings_share_their_cells_in_a_match(monkeypatch, pool) ->
     assert [m.hits for m in made] == [0, 4] and made[0].cells > 4 and made[1].cells == 0
     reader = selection_deep.SerialReader(pool.reg, _stub, rank_fill="refs2", rank_by_leaf=False)
     alone = humanplay.solve_entry(pool.reg, (pool.teams[0], pool.teams[1]), _stub, "stub",
-                                  reading=READING, reader=reader)
+                                  reading=short, reader=reader)
     assert reader.cells == 4
     drop = ("seconds", "notes")  # the notes say the seconds the reading took
     assert ({k: v for k, v in short_entry.to_json().items() if k not in drop}
@@ -405,8 +401,8 @@ def test_a_pairs_two_readings_share_their_cells_in_a_match(monkeypatch, pool) ->
 
 
 def test_a_condition_names_its_selection() -> None:
-    got = parse_condition("x:seconds=1,selection=stage=d2r4b3k8;rects=8")
-    assert got.selection == "stage=d2r4b3k8;rects=8" and "selection read" in got.describe()
+    got = parse_condition("x:seconds=1,selection=rects=8;confirm=1")
+    assert got.selection == "rects=8;confirm=1" and "selection read" in got.describe()
     with pytest.raises(ValueError):
         parse_condition("x:seconds=1,selection=shift=bad")
 
@@ -452,49 +448,13 @@ def test_a_persons_game_reads_the_selection_deeper_unless_told_not_to() -> None:
 
 
 def test_a_persons_selection_reads_each_cell_at_depth_one() -> None:
-    """IKA-440: the default reads each cell at depth 1 over a wider rectangle; the depth-2
-    reading played before is still the one ``default`` names."""
+    """IKA-440: the default reads each cell at depth 1 over the 8 then 11 rectangle. IKA-464:
+    the ladder's name for that reading (``stage=L6@0``) still reads as it."""
     new = parse_reading(humanplay.PLAY_SELECTION_READING)
-    assert (new.stage, new.rects, new.confirm, new.shift) == ("L6@0", (8, 11), 2, "add")
+    assert (new.rects, new.confirm, new.shift) == ((8, 11), 2, "add")
     assert new.fill, "with seconds the rectangle keeps widening while time is left"
-    old = parse_reading(humanplay.PLAY_SELECTION_READING_IKA392)
-    assert old == Reading() == parse_reading("stage=d2r4b3k8,rects=8-16,confirm=2,shift=add")
-    assert new != old
-
-
-class _RecordingReader:
-    """Answers every cell from a fixed matrix and keeps the readings it was asked to use."""
-
-    workers = 1
-
-    def __init__(self, truth: np.ndarray) -> None:
-        self.truth, self.readings, self.cells = truth, [], 0
-
-    def read(self, reading, our, their, selections, cells, deadline=None):  # noqa: ANN001, ANN201
-        self.readings.append(reading)
-        self.cells += len(cells)
-        return {c: float(self.truth[c]) for c in cells}
-
-
-def test_naming_the_old_reading_plays_the_old_selection(pool) -> None:  # noqa: ANN001
-    reg, teams = pool.reg, (pool.teams[0], pool.teams[1])
-    truth, _ = _instance(440)
-
-    def entry(reading: str):  # noqa: ANN202
-        reader = _RecordingReader(truth)
-        got = humanplay.solve_entry(reg, teams, _stub, "stub", reading=reading, reader=reader)
-        # The seconds (and a note that prints them) differ run to run; the answer does not.
-        return ({k: v for k, v in got.to_json().items() if k not in ("seconds", "model", "notes")},
-                reader)
-
-    named, named_reader = entry(humanplay.PLAY_SELECTION_READING_IKA392)
-    spelled, spelled_reader = entry("stage=d2r4b3k8,rects=8-16,confirm=2,shift=add")
-    assert named == spelled and named_reader.cells == spelled_reader.cells
-    assert {r.stage for r in named_reader.readings} == {"d2r4b3k8"}
-    # the new default asks for other cells, read another way (the comparison can fail)
-    new, new_reader = entry(humanplay.PLAY_SELECTION_READING)
-    assert {r.stage for r in new_reader.readings} == {"L6@0"}
-    assert new_reader.cells != named_reader.cells or new != named
+    assert parse_reading("stage=L6@0,rects=8-11,confirm=2,shift=add") == new
+    assert parse_reading("rects=8-16,confirm=2,shift=add") != new
 
 
 def _agent(pool, **kwargs):  # noqa: ANN001, ANN003, ANN202
