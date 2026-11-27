@@ -15,7 +15,13 @@ leaves, hp-share and a Q of stand-ins, no GPU):
   `GameRecord.to_json` gains is neither, and this test fails until someone says which it is (a
   per-game key copied from the template would be the same in every record); an arm with
   generation's leaf and Q gets generation's node, budget and turn cap;
-- **a flag the Rust board worker does not play stops the config** (`rustworker.board_unsupported`).
+- **a flag the Rust board worker does not play stops the config** (`rustworker.board_unsupported`);
+- **each arm plays its own settings, read off the games**: its Q (`--q-arm-named`: the tested
+  side's turn-1 menu is the one of a board with one Q, the other side's moves), its store (each
+  side's pick is in the support of its arm's solve), its executable (`--rust-binary`: the worker
+  sends it the arm's nodes), its width (the widest menu of each side) and its leaf (the side of
+  the inverted leaf loses every game). Each was shown to fail with the two arms' setting swapped
+  in the config (records/IKA-458.md section 19).
 
 Until stage 3.7 this file compared the Rust board's records with the Python board's key for key
 (records/IKA-458.md sections 17.3 and 18).
@@ -129,6 +135,17 @@ def test_the_board_s_records_pair_up_with_each_side_s_own_node(pool, served, tmp
     # The positive control: each side's own node (two leaves, or a leaf against hp-share).
     assert re.search(r"move nodes (\d+) \(\1 with each side's own node\)", stderr), stderr
     other = "hp-share" if kind == "hp" else "other"
+    # `tools/profile_stages.py` reads this worker's last line from its log; the control is a line
+    # that is not the worker's.
+    from ._harness import load_tool
+
+    profile = load_tool("profile_stages")
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "worker0.log").write_bytes(stderr.encode("utf-8"))
+    found = profile.rust_workers(tmp_path)
+    assert found["workers"] == 1 and found["moves"] > 0 and found["moves"] == found["split"], found
+    (tmp_path / "logs" / "worker0.log").write_bytes(stderr.replace("pool-match worker", "w").encode())
+    assert profile.rust_workers(tmp_path) == {}
     if kind == "hp":
         assert config["arms"][1]["store"] is None
     for (game, which), record in rust.items():
@@ -216,3 +233,165 @@ def test_a_board_flag_the_rust_worker_does_not_play_is_named() -> None:
     assert rustworker.board_unsupported(Namespace(**{**base, "rank_leaf": False})) == [
         "the damage ranking (no --rank-leaf)"
     ]
+
+
+# ------------------------------------------- each arm's own Q, store, executable, leaf and width
+
+
+class _Counted:
+    """A server leaf that counts the rows it scored."""
+
+    def __init__(self, model) -> None:  # noqa: ANN001
+        self.model = model
+        self.rows = 0
+
+    def __call__(self, arrays: dict, rows: int) -> np.ndarray:
+        self.rows += rows
+        return self.model(arrays, rows)
+
+
+class _AltQ(_ServedStub):
+    """Another made-up Q: ranks the same actions in another order than `_ServedStub`."""
+
+    def __init__(self, fingerprint: str) -> None:
+        super().__init__(fingerprint)
+        self.files = ["alt-q.pt"]
+
+    def __call__(self, arrays):  # noqa: ANN001, ANN204
+        self.calls += 1
+        a0 = arrays["acts0"].reshape(len(arrays["acts0"]), -1).astype(np.float64).sum(1)
+        a1 = arrays["acts1"].reshape(len(arrays["acts1"]), -1).astype(np.float64).sum(1)
+        return 0.5 + 0.4 * np.cos(0.91 * a0[:, None] + 0.29 * a1[None, :])
+
+
+@pytest.fixture(scope="module")
+def split(pool):  # noqa: ANN001, ANN201, F811
+    """Two leaves, each counted: the tested arm's, and the other arm's that reads every position
+    the other way round (one minus it), so the side that plays it plays to lose and its selection
+    equilibrium differs. And two Qs (`q`, `alt`)."""
+    encoder = Encoder(pool.reg)
+    base = _leaf_model(encoder)
+
+    def other(arrays: dict, rows: int) -> np.ndarray:
+        return 1.0 - base(arrays, rows)
+
+    leaves = {"value": _Counted(base), "baseline": _Counted(other)}
+    qs = {"q": _ServedStub(encoder.vocab.fingerprint()), "alt": _AltQ(encoder.vocab.fingerprint())}
+    server, address = serve(leaves, arms={"value": ["stub.pt"], "baseline": ["other.pt"]},
+                            q_models=qs)
+    yield address, leaves, qs
+    server.shutdown()
+    server.server_close()
+
+
+def _first_moves(records: dict) -> dict:
+    """Per (game, seat): the first move decision's menus, (side 0's, side 1's)."""
+    out = {}
+    for key, record in records.items():
+        first = next(d for d in record["decisions"] if d["kind"] == "move")
+        out[key] = (first["ownActions"], first["foeActions"])
+    return out
+
+
+def test_each_arm_ranks_by_its_own_q(pool, split, tmp_path) -> None:  # noqa: ANN001, F811
+    """The other arm ranks by `alt` (`--baseline-rank-fill q-nocover.alt`), the tested arm by `q`.
+    Against the same board with `q` on both arms, the tested side's turn-1 menu is the same and the
+    other side's moves. Swapped Qs would move the tested side's menu instead (the control)."""
+    address, _, qs = split
+    flags = _flags(Path(pool.path), address, tmp_path / "s", "leaves")
+    both_q, _, _ = _rust_board(flags, tmp_path / "s", address)
+    before = qs["alt"].calls
+    flags = _flags(Path(pool.path), address, tmp_path / "a", "leaves") + [
+        "--baseline-rank-fill", "q-nocover.alt", "--q-arm-named", "alt", "alt"]
+    with_alt, config, _ = _rust_board(flags, tmp_path / "a", address)
+    assert qs["alt"].calls > before
+    same, other = _first_moves(both_q), _first_moves(with_alt)
+    moved = 0
+    for (game, which), menus in other.items():
+        assert menus[which] == same[(game, which)][which], (game, which)
+        moved += menus[1 - which] != same[(game, which)][1 - which]
+    assert moved > 0, "the other arm's Q never moved its menu: the comparison could not fail"
+    assert [config["qServers"][arm["q"]]["model"] for arm in config["arms"]] == ["q", "alt"]
+
+
+def test_each_arm_draws_and_believes_from_its_own_store(pool, split, tmp_path) -> None:  # noqa: ANN001, F811
+    """Each arm's store holds its own leaf's solves (the tag), and each side's pick is in the
+    support of its arm's solve (the board plays the equilibrium). Read against the other arm's
+    store, some pick is outside its support (the control)."""
+    from pokeuraou.poolplay import SolvedSelections
+
+    address, _, _ = split
+    flags = _flags(Path(pool.path), address, tmp_path, "leaves")
+    records, _, _ = _rust_board(flags, tmp_path, address)
+    stores = {}
+    for arm, name in (("value", "stub"), ("baseline", "other")):
+        tag = f"{pool.sha256}|value:{name}"
+        files = sorted((tmp_path / f"store-{arm}").glob("*.json"))
+        assert files and all(json.loads(f.read_bytes())["tag"] == tag for f in files), arm
+        stores[arm] = SolvedSelections(pool.reg, pool.teams, None, store=tmp_path / f"store-{arm}",
+                                       tag=tag)
+    ids = [t.id for t in pool.teams]
+    mismatched = 0
+    for (_, which), record in records.items():
+        a, b = (ids.index(t) for t in record["pool"]["teams"])
+        side_arms = ("value", "baseline") if which == 0 else ("baseline", "value")
+        mine = stores[side_arms[0]].entry(a, b)
+        theirs = stores[side_arms[1]].entry(a, b)
+        own = mine.selections.index(tuple(record["ownPick"]))
+        foe = theirs.selections.index(tuple(record["foePick"]))
+        # The board plays the equilibrium (epsilon 0): each pick is in its own arm's support.
+        assert mine.our_strategy[own] > 0, (which, "side 0")
+        assert theirs.their_strategies[0][foe] > 0, (which, "side 1")
+        mismatched += theirs.our_strategy[own] == 0 or mine.their_strategies[0][foe] == 0
+    assert mismatched > 0, "every pick is in both arms' supports: the comparison could not fail"
+
+
+def test_an_arm_on_another_executable_asks_it(pool, split, tmp_path) -> None:  # noqa: ANN001, F811
+    """`--rust-binary` (a copy of this build): the worker starts it and sends the tested arm's
+    move nodes to it; the record names it on the tested side only. Without the flag nothing is
+    sent there (the control)."""
+    import shutil
+
+    from pokeuraou.rustnode import binary_path
+
+    address, _, _ = split
+    copy = tmp_path / "arm-exe" / binary_path().name
+    copy.parent.mkdir()
+    shutil.copy2(binary_path(), copy)
+    flags = _flags(Path(pool.path), address, tmp_path / "x", "leaves") + ["--rust-binary", str(copy)]
+    records, config, stderr = _rust_board(flags, tmp_path / "x", address)
+    asked = re.search(r"requests to other executables (\d+)", stderr)
+    assert asked and int(asked.group(1)) > 0, stderr
+    for (_, which), record in records.items():
+        assert record["rustBinary"][which] is not None and record["rustBinary"][1 - which] is None
+    assert config["arms"][0]["binary"] == str(copy.resolve()) and config["arms"][1]["binary"] is None
+    _, _, plain = _rust_board(_flags(Path(pool.path), address, tmp_path / "p", "leaves"),
+                              tmp_path / "p", address)
+    assert re.search(r"requests to other executables 0\b", plain), plain
+
+
+def test_each_side_plays_its_arm_s_leaf_and_width(pool, split, tmp_path) -> None:  # noqa: ANN001, F811
+    """Read off the games and the server, not the config: the tested side's menus reach width 4
+    and never more, the other side's 3; both leaves were asked, and the side of the inverted leaf
+    lost every game. A board of one leaf asks the second leaf nothing (the control of the count).
+    Arms whose widths or leaves were swapped fail (records/IKA-458.md section 19)."""
+    address, leaves, _ = split
+    before = leaves["baseline"].rows
+    records, _, _ = _rust_board(_flags(Path(pool.path), address, tmp_path / "w", "leaves"),
+                                tmp_path / "w", address)
+    assert leaves["baseline"].rows > before and leaves["value"].rows > 0
+    widest = {0: 0, 1: 0}  # by arm: 0 tested, 1 other
+    for (_, which), record in records.items():
+        for d in record["decisions"]:
+            if d["kind"] != "move":
+                continue
+            for side, menu in ((0, d["ownActions"]), (1, d["foeActions"])):
+                arm = 0 if side == which else 1
+                widest[arm] = max(widest[arm], len(menu))
+    assert widest == {0: 4, 1: 3}
+    # The leaf: the side of the inverted leaf plays to lose, so the tested arm wins its games.
+    won = sum((r["outcome"] > 0.5) == (which == 0) for (_, which), r in records.items())
+    assert won == len(records), f"the tested arm won {won} of {len(records)}"
+    before = leaves["baseline"].rows
+    _rust_board(_flags(Path(pool.path), address, tmp_path / "o", "same"), tmp_path / "o", address)
+    assert leaves["baseline"].rows == before

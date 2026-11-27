@@ -2,10 +2,10 @@
 
 Generation and the board are played by the Rust workers (IKA-458 stage 3.7); their agents are
 the configs `rustworker.build_config` and `rustworker.board_config` write, and `worker_drift`
-holds the two to the same functions. A tool that calls `play_game` must name a leaf, a width, a
-narrowing order, the sheets that hide the bench, the bench prior and the fill. A tool that omits
-one of those is not measuring the agent that ships -- it is measuring a different one and
-labelling the difference as whatever it set out to study.
+builds both from generation's flags and compares them by value. A tool that calls `play_game`
+must name a leaf, a width, a narrowing order, the sheets that hide the bench, the bench prior
+and the fill. A tool that omits one of those is not measuring the agent that ships -- it is
+measuring a different one and labelling the difference as whatever it set out to study.
 
 That is not hypothetical. On 2026-09-19 `selection_check` was found never to pass
 `evaluate`, so every board number it had ever produced came from games the hp-share
@@ -288,120 +288,25 @@ def shipping_args() -> set[str]:
     return set(SHIPPING_ARGS) & set(AGENT_ARGS)
 
 
-#: The keys of a Rust worker's config that decide which agent plays, and the one function in
-#: `rustworker` each must come from (IKA-458 stage 3.7). Generation's config (`build_config`) and
-#: the board's (`board_config`, per arm for the node) both take them from there, so an arm with
-#: generation's leaf, Q and width plays generation's agent.
-WORKER_AGENT = {
-    "node": "agent_node",
-    "exactBudget": "exact_budget",
-    "maxTurns": "max_turns",
-    "notes": "selection_notes",
-}
-#: The config builders held to `WORKER_AGENT`.
-WORKER_BUILDERS = ("build_config", "board_config")
-#: What builds an agent's parts: called only inside the `WORKER_AGENT` functions.
-AGENT_PARTS = ("static_node", "static_request", "dump_budget")
+#: The keys of the Rust workers' configs that decide which agent plays (IKA-458 stage 3.7):
+#: generation's config (`rustworker.build_config`) and every board arm (`rustworker.board_config`)
+#: built from generation's flags must agree on them by value (`tests/_worker_agent.py`).
+WORKER_AGENT = ("node", "exactBudget", "maxTurns", "notes", "width", "leaf and store tag", "Q")
 
 
-def _callees(node: ast.AST) -> set[str]:
-    """The names of the functions called in this expression."""
-    out = set()
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Call):
-            func = sub.func
-            out.add(func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "?"))
-    return out
+def worker_drift(rustworker_source: Path | None = None) -> list[str]:
+    """How a board arm of generation's leaf, Q and width plays another agent than generation.
 
-
-def _agent_sources(function: ast.FunctionDef) -> dict[str, set[str]]:
-    """For each `WORKER_AGENT` key a dict literal in this function sets: the functions its value
-    calls (a name followed to what it was assigned; a value that calls none, as source text)."""
-    assigned: dict[str, list[ast.AST]] = {}
-    for sub in ast.walk(function):
-        if isinstance(sub, ast.Assign):
-            for target in sub.targets:
-                if isinstance(target, ast.Name):
-                    assigned.setdefault(target.id, []).append(sub.value)
-    found: dict[str, set[str]] = {}
-    for sub in ast.walk(function):
-        if not isinstance(sub, ast.Dict):
-            continue
-        for key, value in zip(sub.keys, sub.values, strict=True):
-            if not (isinstance(key, ast.Constant) and key.value in WORKER_AGENT):
-                continue
-            values = assigned.get(value.id, [value]) if isinstance(value, ast.Name) else [value]
-            for each in values:
-                found.setdefault(key.value, set()).update(_callees(each) or {ast.unparse(each)})
-    return found
-
-
-def _node_edits(builder: str, function: ast.FunctionDef) -> list[str]:
-    """How this builder changes an agent's node other than dropping `BOARD_FILLS`."""
-    problems = []
-    for sub in ast.walk(function):
-        targets = sub.targets if isinstance(sub, ast.Assign) else (
-            [sub.target] if isinstance(sub, ast.AugAssign) else [])
-        if any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
-               and t.value.id == "node" for t in targets):
-            problems.append(f"{builder} writes into an agent's node (line {sub.lineno})")
-        if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
-                and isinstance(sub.func.value, ast.Name) and sub.func.value.id == "node"
-                and sub.func.attr != "pop"):
-            problems.append(f"{builder} changes an agent's node with {sub.func.attr} "
-                            f"(line {sub.lineno})")
-        if (isinstance(sub, ast.For) and any(
-                isinstance(stmt, ast.Expr) and "node.pop(" in ast.unparse(stmt)
-                for stmt in sub.body)
-                and ast.unparse(sub.iter) != "BOARD_FILLS"):
-            problems.append(f"{builder} drops {ast.unparse(sub.iter)} from a node, not BOARD_FILLS")
-
-    def pops(tree: ast.AST) -> set[int]:
-        return {id(c) for c in ast.walk(tree) if isinstance(c, ast.Call)
-                and isinstance(c.func, ast.Attribute) and c.func.attr == "pop"
-                and isinstance(c.func.value, ast.Name) and c.func.value.id == "node"}
-
-    allowed: set[int] = set()
-    for sub in ast.walk(function):
-        if isinstance(sub, ast.For) and ast.unparse(sub.iter) == "BOARD_FILLS":
-            allowed |= pops(sub)
-    if pops(function) - allowed:
-        problems.append(f"{builder} drops a key from an agent's node outside BOARD_FILLS")
-    return problems
-
-
-def worker_drift(path: Path | None = None) -> list[str]:
-    """How the Rust workers' configs fail to build generation's agent (IKA-458 stage 3.7).
-
-    Read from `rustworker.py` with `ast`: in `build_config` and `board_config`, every agent key
-    of `WORKER_AGENT` is set from its one function; the agent's parts (`AGENT_PARTS`) are called
-    inside those functions only; the board changes an arm's node only by dropping the keys it
-    fills itself (`BOARD_FILLS`). And the board's default width is generation's. Empty when the
-    two build the same agent.
+    Builds both configs from the same flags on the tests' stand-in inference server and compares
+    them by value (`tests/_worker_agent.agent_differences`), checks the node keys the Rust workers
+    write after reading a config (`rust_node_writes`), and holds the board's default width to
+    generation's. Empty when the two build the same agent.
     """
-    path = path or ROOT / "src/pokeuraou/rustworker.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-    problems: list[str] = []
-    for name, function in functions.items():
-        if name in WORKER_AGENT.values():
-            continue
-        for part in sorted(_callees(function) & set(AGENT_PARTS)):
-            problems.append(f"{name} calls {part}: an agent's part built outside "
-                            f"{', '.join(sorted(set(WORKER_AGENT.values())))}")
-    for builder in WORKER_BUILDERS:
-        function = functions.get(builder)
-        if function is None:
-            problems.append(f"rustworker has no {builder}")
-            continue
-        found = _agent_sources(function)
-        for key, source in WORKER_AGENT.items():
-            if key not in found:
-                problems.append(f"{builder} sets no {key}")
-            elif found[key] != {source}:
-                problems.append(f"{builder}'s {key} comes from {', '.join(sorted(found[key]))}, "
-                                f"not {source}")
-        problems += _node_edits(builder, function)
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from tests import _worker_agent
+
+    problems = _worker_agent.worker_drift(rustworker_source)
     generation = flag_defaults(ROOT / "tools/generate_queue.py").get("--limit")
     board = next((ast.unparse(n.value) for n in ast.parse(
         (ROOT / "tools/pool_match.py").read_text(encoding="utf-8")).body
@@ -427,8 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  DRIFTED   rustworker.py: the board's worker builds another agent than "
               f"generation's: {'; '.join(worker)}")
     else:
-        print("  ok        rustworker.py: generation's config and every board arm take the agent "
-              f"({', '.join(WORKER_AGENT)}) from the same functions (IKA-458 stage 3.7)")
+        print("  ok        rustworker.py: generation's config and every board arm agree on the agent "
+              f"({', '.join(WORKER_AGENT)}) by value (IKA-458 stage 3.7)")
     print(f"  a play_game call must name: {', '.join(sorted(reference))}")
     print("  (depth, policy, solve_sparsely and solve_restricted default to the shipped\n"
           "   setting, so an omission there is not a drift)\n")
@@ -528,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
     if worker:
         print(
             f"\n  WORKER: {'; '.join(worker)}.\n  The board's arms have to play generation's "
-            "agent: take each agent key from its function in rustworker (WORKER_AGENT)."
+            "agent: build each agent key the same way in rustworker (WORKER_AGENT)."
         )
     if play_drift:
         print(

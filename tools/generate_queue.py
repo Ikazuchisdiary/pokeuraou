@@ -258,97 +258,8 @@ def main() -> None:
     env["PYTHONPATH"] = str(ROOT / "src")
 
     servers: list[subprocess.Popen] = []
-    served_at: list[str] = []
-    if args.served:
-        server_log = out_dir / "logs"
-        server_log.mkdir(parents=True, exist_ok=True)
-        for index in range(args.servers):
-            errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
-            if args.device != "cuda":
-                raise SystemExit("the inference server is the Rust one and needs CUDA (IKA-460)")
-            # IKA-461: the value arm and the Q arm both in the Rust server.
-            from pokeuraou.rustnet import server_command
 
-            command = server_command(
-                pool_regulation,
-                {"value": [args.value]},
-                {"q": args.q_model} if args.q_model else {},
-                out_dir,
-            )
-            process = subprocess.Popen(  # noqa: S603
-                command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors, text=True,
-            )
-            servers.append(process)
-            # Read before any worker starts: one that starts first has nothing to connect
-            # to, and that failure reads as the run dying for a reason of its own.
-            assert process.stdout is not None
-            address = process.stdout.readline().strip()
-            if not address:
-                for other in servers:
-                    other.terminate()
-                raise SystemExit(
-                    f"inference server {index} exited before naming an address; see "
-                    f"{server_log / f'inference{index}.log'}"
-                )
-            served_at.append(address)
-        print(f"  inference: {', '.join(served_at)} (workers hold no model)",
-              file=sys.stderr, flush=True)
-
-    # An index is a game. Generation has no seats to keep paired, so this is the simple
-    # case of what `match_queue.py` does.
-    numbers = range(args.first_game, args.first_game + args.games)
-
-    # IKA-458 stage 3.7: the workers are `pokeuraou-damage selfplay-worker`. The flags are read
-    # once, by tools/selfplay.py, into the config every worker reads. Which worker lands on which
-    # server changes no answer: requests are never merged.
-    from pokeuraou import rustworker
-
-    config = out_dir / "worker-config.json"
-    flags = config_command(args, served_at[0], out_dir, extra)
-    made = subprocess.run(  # noqa: S603
-        [*flags, "--rust-config", str(config)], env=env, cwd=str(ROOT),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
-    )
-    if made.returncode != 0:
-        raise SystemExit(f"the Rust worker's config was not written:\n{made.stdout}")
-    print(f"  workers: pokeuraou-damage {rustworker.SUBCOMMAND} (config {config})",
-          file=sys.stderr, flush=True)
-
-    def build(worker: int, address: str) -> list[str]:
-        return rustworker.command(
-            config, served_at[worker % len(served_at)],
-            out_dir / f"games-worker{worker}.jsonl", queue=address,
-        )
-
-    def written() -> int:
-        return sum(
-            1
-            for path in out_dir.glob("games-worker*.jsonl")
-            for line in path.open(encoding="utf-8")
-            if line.strip()
-        )
-
-    print(
-        f"generation: {args.workers} workers sharing {args.games} games "
-        f"({numbers.start}..{numbers.stop - 1}) -> {out_dir}\n"
-        f"  run seed {args.seed}, search {args.limit}, "
-        f"leaf {args.value or 'hp-share'} on {args.device}, "
-        f"{'Q ' + Path(args.q_model).name + ', ' if args.q_model else ''}"
-        "bench hidden"
-        f"\n  worker failures: stop after "
-        f"{'none (never)' if max_failures is None else max_failures} "
-        f"(IKA-336, -> {out_dir / 'workers.json'})",
-        file=sys.stderr,
-        flush=True,
-    )
-    try:
-        status = run_workers(
-            numbers, build,
-            workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
-            label="generation", counts=written, max_failures=max_failures,
-            server_logs=[out_dir / "logs" / f"inference{i}.log" for i in range(len(servers))],
-        )
-    finally:
+    def stop_servers() -> None:
         # However the run ended. A leftover server holds VRAM and answers the next run's
         # questions with the previous run's model, so ending it is not conditional on
         # anything having gone well.
@@ -358,6 +269,100 @@ def main() -> None:
                 process.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 process.kill()
+
+    # From the first server on, every way out ends the servers: a failed config, an import or
+    # an OS error, Ctrl-C, or the run's own end.
+    try:
+        served_at: list[str] = []
+        if args.served:
+            server_log = out_dir / "logs"
+            server_log.mkdir(parents=True, exist_ok=True)
+            for index in range(args.servers):
+                errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
+                if args.device != "cuda":
+                    raise SystemExit("the inference server is the Rust one and needs CUDA (IKA-460)")
+                # IKA-461: the value arm and the Q arm both in the Rust server.
+                from pokeuraou.rustnet import server_command
+
+                command = server_command(
+                    pool_regulation,
+                    {"value": [args.value]},
+                    {"q": args.q_model} if args.q_model else {},
+                    out_dir,
+                )
+                process = subprocess.Popen(  # noqa: S603
+                    command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors, text=True,
+                )
+                servers.append(process)
+                # Read before any worker starts: one that starts first has nothing to connect
+                # to, and that failure reads as the run dying for a reason of its own.
+                assert process.stdout is not None
+                address = process.stdout.readline().strip()
+                if not address:
+                    stop_servers()
+                    raise SystemExit(
+                        f"inference server {index} exited before naming an address; see "
+                        f"{server_log / f'inference{index}.log'}"
+                    )
+                served_at.append(address)
+            print(f"  inference: {', '.join(served_at)} (workers hold no model)",
+                  file=sys.stderr, flush=True)
+
+        # An index is a game. Generation has no seats to keep paired, so this is the simple
+        # case of what `match_queue.py` does.
+        numbers = range(args.first_game, args.first_game + args.games)
+
+        # IKA-458 stage 3.7: the workers are `pokeuraou-damage selfplay-worker`. The flags are read
+        # once, by tools/selfplay.py, into the config every worker reads. Which worker lands on which
+        # server changes no answer: requests are never merged.
+        from pokeuraou import rustworker
+
+        config = out_dir / "worker-config.json"
+        flags = config_command(args, served_at[0], out_dir, extra)
+        made = subprocess.run(  # noqa: S603
+            [*flags, "--rust-config", str(config)], env=env, cwd=str(ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+        )
+        if made.returncode != 0:
+            raise SystemExit(f"the Rust worker's config was not written:\n{made.stdout}")
+        print(f"  workers: pokeuraou-damage {rustworker.SUBCOMMAND} (config {config})",
+              file=sys.stderr, flush=True)
+
+        def build(worker: int, address: str) -> list[str]:
+            return rustworker.command(
+                config, served_at[worker % len(served_at)],
+                out_dir / f"games-worker{worker}.jsonl", queue=address,
+            )
+
+        def written() -> int:
+            return sum(
+                1
+                for path in out_dir.glob("games-worker*.jsonl")
+                for line in path.open(encoding="utf-8")
+                if line.strip()
+            )
+
+        print(
+            f"generation: {args.workers} workers sharing {args.games} games "
+            f"({numbers.start}..{numbers.stop - 1}) -> {out_dir}\n"
+            f"  run seed {args.seed}, search {args.limit}, "
+            f"leaf {args.value or 'hp-share'} on {args.device}, "
+            f"{'Q ' + Path(args.q_model).name + ', ' if args.q_model else ''}"
+            "bench hidden"
+            f"\n  worker failures: stop after "
+            f"{'none (never)' if max_failures is None else max_failures} "
+            f"(IKA-336, -> {out_dir / 'workers.json'})",
+            file=sys.stderr,
+            flush=True,
+        )
+        status = run_workers(
+            numbers, build,
+            workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
+            label="generation", counts=written, max_failures=max_failures,
+            server_logs=[out_dir / "logs" / f"inference{i}.log" for i in range(len(servers))],
+        )
+    finally:
+        stop_servers()
     raise SystemExit(status)
 
 

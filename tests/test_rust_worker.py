@@ -225,3 +225,21 @@ def test_a_flag_the_rust_worker_does_not_play_is_named() -> None:
     assert rustworker.unsupported(_args(None)) == [
         "a leaf not on an inference server (--inference)"
     ]
+
+
+def test_profile_stages_reads_the_worker_s_last_line(pool, served, tmp_path) -> None:  # noqa: ANN001
+    """`tools/profile_stages.py` reads the Rust worker's own last line from its log (the worker
+    writes no timing report): the regular expression is held to what worker.rs prints."""
+    from ._harness import load_tool
+
+    profile = load_tool("profile_stages")
+    config = _config(pool, served, tmp_path, tmp_path / "store")
+    log = _play(config, served, tmp_path / "g.jsonl", 0, 2)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "worker0.log").write_bytes(log.encode("utf-8"))
+    found = profile.rust_workers(tmp_path)
+    assert found["workers"] == 1 and found["moves"] > 0 and found["play"] > 0, found
+    assert {"prepare", "solve", "write", "replacements", "selfswitches", "handoffs"} <= set(found)
+    # The control: a log whose line is not the worker's reads as nothing.
+    (tmp_path / "logs" / "worker0.log").write_bytes(log.replace("rust worker:", "worker:").encode())
+    assert profile.rust_workers(tmp_path) == {}

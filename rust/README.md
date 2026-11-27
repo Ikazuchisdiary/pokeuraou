@@ -281,7 +281,8 @@ exe が無い・ソースより古い・`POKEURAOU_RUST_NODE=0` なら `rustnode
 
 ```bash
 cd rust && cargo build --release
-uv run python tools/selfplay.py --games 100
+uv run python tools/generate_queue.py --pool regmc-matchupweb --served --value <評価モデル> \
+    --games 100 --out <出力> -- --rank-leaf
 ```
 
 （9/12〜9/23 は既定でオフ、使えなくなっていたら気づかないうちに Python に戻る作りでした。）
