@@ -2178,8 +2178,8 @@ class HumanGame:
         recorded_shown: list[list[str]],
     ) -> Position:
         """The replacement phase: the agent's side solved as its Bayesian game over the
-        person's bench (as `selfplay._do_replacement_node` solves each side), the person
-        asked."""
+        person's bench (`_replacement_mixture`, the port's `replacementNode` as the Rust
+        worker asks it), the person asked."""
         reg, me, you, record = self.reg, self.me, self.you, self.record
         options = replacement_options(reg, pos, owed)
         started = time.perf_counter()
@@ -2233,10 +2233,11 @@ class HumanGame:
 
         IKA-463: the node is the port's `replacementNode` (`replacenode.solve`, the request
         the Rust worker asks): the fills, the leaf on the inference server, a phase that
-        draws folded at its weights (IKA-352) and the LP. The other side's game is asked over
-        this side's own bench as it stands (one completion of weight 1) and not read."""
-        from types import SimpleNamespace
-
+        draws folded at its weights (IKA-352) and the LP. Only this side's game is asked.
+        A leaf that is not the inference server's stops the game with
+        `beliefnode.UnservedLeaf`, and a game the LP does not solve (or a matrix it refuses)
+        stops it with `EquilibriumError` (`ValueError`) naming the phase; neither falls back
+        to a uniform mixture."""
         from . import replacenode
 
         reg, record = self.reg, self.record
@@ -2258,16 +2259,21 @@ class HumanGame:
                 items = []
             if items:
                 weights = [item.weight for item in items]
-                spreads = {other: items, side: [SimpleNamespace(position=pos, weight=1.0)]}
                 leaf = self.agent.leaf
                 try:
-                    answers = replacenode.solve(reg, options, spreads, (leaf, leaf))
-                    strategy, own_value, replies = answers[side]
-                    policy = strategy
-                    model = _averaged(replies, weights)
-                    value = own_value if side == 0 else -own_value
-                except EquilibriumError:
-                    policy = [1.0 / len(mine)] * len(mine)
+                    answers = replacenode.solve(
+                        reg, options, {other: items}, (leaf, leaf), sides=(side,)
+                    )
+                except (EquilibriumError, ValueError) as problem:
+                    raise type(problem)(
+                        f"side {side}'s replacement phase at turn {pos.turn} "
+                        f"({len(mine)} x {len(options[other])}, {len(items)} completions of "
+                        f"side {other}'s bench) was not solved: {problem}"
+                    ) from problem
+                strategy, own_value, replies = answers[side]
+                policy = strategy
+                model = _averaged(replies, weights)
+                value = own_value if side == 0 else -own_value
             else:
                 policy = [1.0 / len(mine)] * len(mine)
         return policy, model, value

@@ -1056,9 +1056,10 @@ def _self_switch_request(
 class _HiddenBench:
     """What a mid-turn decision needs to price the opponent's bench it has not seen.
 
-    The same four things `_do_replacement_node` is handed, as `play_game` carries them at
-    the move node the turn started from: `seen` is identities (IKA-117) and is turned into
-    the pause's own slots there, `leads` the turn-1 pair per side (IKA-118).
+    A person's game (`humanplay.HumanGame`) carries them from the move node the turn
+    started from to a mid-turn switch (`_do_self_switch_node`): `seen` is identities
+    (IKA-117) and is turned into the pause's own slots there, `leads` the turn-1 pair per
+    side (IKA-118). The Rust worker's requests (`rustworker`) build an empty one.
     """
 
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]]

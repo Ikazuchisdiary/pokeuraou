@@ -32,20 +32,25 @@ def solve(  # noqa: PLR0913 - the node's pieces
     options: Sequence[Sequence[SideAction]],
     spreads: dict[int, list],
     leaves: Sequence[Any],  # noqa: ANN401 - each side's leaf
+    sides: Sequence[int] = (0, 1),
 ) -> dict[int, tuple[list[float], float, tuple[np.ndarray, ...]]]:
-    """Each side's (strategy, value, replies) for the replacement node: side 0's value in
-    side 0's units, side 1's of its own game (the negated transpose); the replies are the
+    """Each asked side's (strategy, value, replies) for the replacement node: side 0's value
+    in side 0's units, side 1's of its own game (the negated transpose); the replies are the
     other side's strategy in each completion of its bench. ``options`` are each side's
     replacements, ``spreads[s]`` the completions of side ``s``'s bench, ``leaves[s]`` side
-    ``s``'s leaf (an inference server's). The Rust worker asks the same request
-    (`rust/src/replacenode.rs`); a person's game asks it for the agent's side (`humanplay`)."""
+    ``s``'s leaf (an inference server's), ``sides`` the games to solve: side ``s``'s game
+    reads ``spreads[1 - s]`` and ``leaves[s]`` only. The Rust worker asks both games
+    (`rust/src/replacenode.rs`); a person's game asks the agent's side's only (`humanplay`)."""
     from .beliefnode import served_leaf
     from .encode import rules_of
     from .inference import request_failed
 
+    sides = tuple(sorted(set(sides)))
+    if not sides or not set(sides) <= {0, 1}:
+        raise ValueError(f"replacenode.solve asked for the games of sides {sides}")
     owners: list[Any] = []
-    served = [served_leaf(leaves[side], "the replacement node") for side in (0, 1)]
-    for owner in served:
+    served = {side: served_leaf(leaves[side], "the replacement node") for side in sides}
+    for owner in served.values():
         if not any(owner is seen for seen in owners):
             owners.append(owner)
 
@@ -60,7 +65,7 @@ def solve(  # noqa: PLR0913 - the node's pieces
     }
     jobs: list[dict[str, Any]] = []
     positions: list[tuple[int, Position]] = []
-    for side in (0, 1):
+    for side in sides:
         owner = served[side]
         index = next(k for k, seen in enumerate(owners) if seen is owner)
         for item in spreads[1 - side]:
@@ -87,10 +92,10 @@ def solve(  # noqa: PLR0913 - the node's pieces
     request["servers"] = servers
     weights = {
         side: np.asarray([item.weight for item in spreads[1 - side]], dtype=np.float64)
-        for side in (0, 1)
+        for side in sides
     }
     request["solve"] = [{"side": side, "weights": portlp._b64(weights[side])}  # noqa: SLF001
-                        for side in (0, 1)]
+                        for side in sides]
 
     answer = port.ask(reg, lambda node: node.replacement_node(request))
     portlp.COUNTS["crossings"] += 1
@@ -137,7 +142,7 @@ def solve(  # noqa: PLR0913 - the node's pieces
         solved[side] = (games, portlp.bayesian_answer(games, weights[side], one))
     portlp.COUNTS["replaced"] += 1
     out: dict[int, tuple[list[float], float, tuple[np.ndarray, ...]]] = {}
-    for side in (0, 1):
+    for side in sides:
         _games, got = solved[side]
         if isinstance(got, Exception):
             raise got

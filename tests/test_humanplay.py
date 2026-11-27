@@ -96,9 +96,9 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
 def _agent(pool, **kwargs) -> Agent:  # noqa: ANN001
     """hp-share, scored in the port: a stub leaf in Python costs seconds a node here."""
     settings = {"seconds": 0.4, "cores": 1, "clock": "count", "rank_by_leaf": False,
-                "rank_fill": "refs2"}
+                "rank_fill": "refs2", "evaluate": None, "name": "hp-share"}
     settings.update(kwargs)
-    return Agent(reg=pool.reg, evaluate=None, name="hp-share", **settings)
+    return Agent(reg=pool.reg, **settings)
 
 
 def _play(pool, person, *, seed: int, agent: Agent | None = None, side: int = 1,  # noqa: ANN001
@@ -258,35 +258,126 @@ def test_the_record_holds_both_menus_the_agent_mixture_and_the_person_choice(poo
         assert d["humanOffMenu"] == (d["foeChosen"] not in d["foeActions"])
 
 
-def test_the_agent_s_replacement_is_the_port_s_replacement_node(pool, monkeypatch) -> None:  # noqa: ANN001
+def _noisy(arrays, rows):  # noqa: ANN001, ANN202
+    """A served leaf whose replacement games are often mixed: a smooth hash of the encoded
+    arrays (HP share is nearly always pure there)."""
+    from pokeuraou.standin import encoded_of
+
+    del rows
+    e = encoded_of(arrays)
+    n = len(e.species)
+    x = (e.species.reshape(n, -1).sum(1) * 0.37
+         + e.mon.reshape(n, -1).astype(np.float64).sum(1) * 1.3
+         + e.side.reshape(n, -1).astype(np.float64).sum(1) * 0.71)
+    return 0.5 + 0.45 * np.sin(x)
+
+
+@pytest.fixture(scope="module")
+def noisy_leaf(pool):  # noqa: ANN001, ANN201
+    from pokeuraou.encode import Encoder
+    from pokeuraou.inference import RemoteValue
+    from pokeuraou.standin import serve
+
+    server, address = serve({"value": _noisy}, arms={"value": ["noisy.pt"]})
+    leaf = RemoteValue(address, "value", Encoder(pool.reg))
+    yield leaf
+    leaf.close()
+    server.shutdown()
+    server.server_close()
+
+
+def _replacement_before_ika463(game, pos, options, side, shown, leads):  # noqa: ANN001, ANN202, PLR0913
+    """The reference: `HumanGame._replacement_mixture` as it was before IKA-463 (572bbcd),
+    the cells filled by `selfplay.replacement_matrix` and the game solved by Python's
+    `solve_bayesian`. Side ``side``'s mixture, its model of the other side, the value in
+    side 0's units; None where it fell back."""
+    from pokeuraou.equilibrium import solve_bayesian
+    from pokeuraou.hidden import completions
+    from pokeuraou.selfplay import _bench_weights, replacement_matrix
+
+    other = 1 - side
+    items = completions(
+        game.reg, pos, other, game.sheets[other], seen=shown[other],
+        weights=_bench_weights(game.bench_prior, other, pos, shown[other], game.record,
+                               leads[other]),
+    )
+    built = [replacement_matrix(game.reg, item.position, options, game.agent.leaf)
+             for item in items]
+    weights = np.asarray([item.weight for item in items], dtype=np.float64)
+    solved = solve_bayesian([m if side == 0 else -m.T for m in built], weights)
+    model = humanplay._averaged(solved.col_strategies, weights)  # noqa: SLF001
+    value = float(solved.value) if side == 0 else -float(solved.value)
+    return [float(x) for x in solved.row_strategy], model, value, len(items)
+
+
+def test_the_agent_s_replacement_is_the_port_s_replacement_node(  # noqa: ANN001
+    pool, noisy_leaf, monkeypatch
+) -> None:
     """IKA-463: the agent's side at a replacement phase is solved by the port's
-    `replacementNode` (`replacenode.solve`), one request a phase where either side has a
-    choice; its mixture is a distribution over its options and the record holds it."""
+    `replacementNode` (`replacenode.solve`), its own game only, one request a phase where
+    either side has a choice. Its mixture, its model of the person's and its value are the
+    ones the Python solve before it gave (`_replacement_before_ika463`, the reference).
+
+    The games begin at a replacement phase (`GameStart`): both sides lost one of the pair,
+    and each has two Pokemon on a bench the other has not seen (six completions). On the
+    noisy leaf a third of these 2 x 2 Bayesian games are mixed, at both seats, so a seat or
+    a bench taken for the other's moves the answer away from the reference (IKA-463 record,
+    section 10, gives the broken versions this test failed on)."""
     from pokeuraou import portlp, replacenode
+    from pokeuraou.hidden import identity
 
-    asked: list[int] = []
-    real = replacenode.solve
+    asked: list[tuple[int, ...]] = []
+    real_solve = replacenode.solve
 
-    def counting(reg, options, spreads, leaves):  # noqa: ANN001, ANN202
-        asked.append(len(options[0]) * len(options[1]))
-        return real(reg, options, spreads, leaves)
+    def counting(reg, options, spreads, leaves, sides=(0, 1)):  # noqa: ANN001, ANN202
+        asked.append(tuple(sides))
+        return real_solve(reg, options, spreads, leaves, sides=sides)
+
+    compared: list[tuple] = []
+    real_mixture = humanplay.HumanGame._replacement_mixture  # noqa: SLF001
+
+    def checked(game, pos, options, side, shown, leads):  # noqa: ANN001, ANN202, PLR0913
+        got = real_mixture(game, pos, options, side, shown, leads)
+        if len(options[side]) * len(options[1 - side]) > 1:
+            compared.append((side, got, _replacement_before_ika463(
+                game, pos, options, side, shown, leads)))
+        return got
 
     monkeypatch.setattr(replacenode, "solve", counting)
+    monkeypatch.setattr(humanplay.HumanGame, "_replacement_mixture", checked)
     before = portlp.COUNTS["replaced"]
-    phases = []
-    for seed in range(4):
-        record, _, _ = _play(pool, PolicyPerson("first"), seed=seed, side=0, turns=30,
-                             agent=_agent(pool, width_only=True))
-        phases += [d for d in record["decisions"] if d["kind"] == "replacement"
-                   and len(d["ownActions"]) * len(d["foeActions"]) > 1]
-        if phases:
-            break
-    assert phases, "no replacement phase with a choice; the road was not taken"
-    assert len(asked) >= len(phases) and all(cells > 1 for cells in asked)
-    assert portlp.COUNTS["replaced"] - before == len(asked)
-    for d in phases:
-        assert sum(d["ownPolicy"]) == pytest.approx(1.0)
-        assert len(d["ownPolicy"]) == len(d["ownActions"])
+    for seed in range(16):
+        rng = np.random.default_rng(seed)
+        picks = tuple(tuple(int(x) for x in rng.permutation(6)[:4]) for _ in (0, 1))
+        four = [[list(pool.teams[s].sets)[i] for i in picks[s]] for s in (0, 1)]
+        pos = position_from_sets(pool.reg, four[0], four[1], rng=rng)
+        for side in pos.sides:
+            pair = [m for m in side.pokemon if m.active_index is not None]
+            for mon in pair:
+                mon.hp = max(1, int(mon.maxhp * rng.uniform(0.2, 1.0)))
+            down = pair[int(rng.integers(2))]
+            down.hp, down.fainted = 0, True
+        seen = tuple(frozenset(identity(m) for m in side.pokemon if m.active_index is not None)
+                     for side in pos.sides)
+        start = humanplay.GameStart(name=f"s{seed}", teams=(pool.teams[0].id, pool.teams[1].id),
+                                    position=pos, seen=seen, picks=picks)
+        humanplay.play(
+            _agent(pool, evaluate=noisy_leaf, name="noisy", width_only=True),
+            PolicyPerson("first"), (pool.teams[0], pool.teams[1]), agent_side=seed % 2,
+            seed=seed, max_turns=1, start=start, probe=True,
+        )
+    mixed = [c for c in compared if max(c[1][0]) < 1 - 1e-6]
+    assert len(compared) == 16, "a start did not reach its replacement phase"
+    assert {c[0] for c in mixed} == {0, 1}, "no mixed answer at one of the seats"
+    assert all(c[2][3] > 1 for c in compared), "a bench was not hidden at a replacement"
+    for _side, (policy, model, value), (ref_policy, ref_model, ref_value, _n) in compared:
+        assert sum(policy) == pytest.approx(1.0)
+        np.testing.assert_allclose(policy, ref_policy, atol=1e-9)
+        np.testing.assert_allclose(model, ref_model, atol=1e-9)
+        assert value == pytest.approx(ref_value, abs=1e-9)
+    # One request a phase, the agent's own game only.
+    assert len(asked) == len(compared) and portlp.COUNTS["replaced"] - before == len(asked)
+    assert asked == [(c[0],) for c in compared]
 
 
 def test_the_wall_clock_spends_the_budget(pool, tmp_path) -> None:  # noqa: ANN001

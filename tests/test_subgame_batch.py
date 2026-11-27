@@ -133,10 +133,16 @@ def _positions(roster) -> list:  # noqa: ANN001
 
 
 def _hidden(roster, leaf, pos, rect: int = 3) -> list:  # noqa: ANN001
-    """One `_refine_cells` pass, as a hidden-bench read asks it (the ladder; until IKA-463
-    `search._restricted_belief`): the ``rect`` x ``rect`` corner of the menus in every
+    """One `_refine_cells` pass over the ``rect`` x ``rect`` corner of the menus in every
     completion of side 1's bench, each cell with its `TurnShare` across the completions.
-    Each cell's value, its notes and its count of sub-games."""
+    Each cell's value, its notes and its count of sub-games.
+
+    The `TurnShare`s are built as the ladder builds them (`ladder._read_cells`, completion
+    ``k`` included). One argument differs on purpose: the ladder scores with
+    ``stack=ladder.STACK`` (True, one forward pass for the whole stage), and this pass with
+    ``stack=False``, each sub-game a block of its own. The bit-level comparison below is
+    of the blocks, and a stacked pass is the control that it fails
+    (`test_stacking_the_sub_games_into_one_call_is_caught`)."""
     reg = roster.reg
     sheet = list(roster.sets)[:6]
     ours = narrow(reg, pos, 0, limit=6).actions
@@ -144,7 +150,7 @@ def _hidden(roster, leaf, pos, rect: int = 3) -> list:  # noqa: ANN001
     turns: dict = {}
     clean: dict = {}
     cells, shares = [], []
-    for item in completions(reg, pos, 1, sheet):
+    for k, item in enumerate(completions(reg, pos, 1, sheet)):
         for i in range(min(rect, len(ours))):
             for j in range(min(rect, len(theirs))):
                 cells.append((item.position, ours[i], theirs[j]))
@@ -157,6 +163,7 @@ def _hidden(roster, leaf, pos, rect: int = 3) -> list:  # noqa: ANN001
                     )
                 shares.append(search_mod.TurnShare(
                     cache=turns, key=(i, j), side=1, slots=tuple(item.slots), clean=clean[(i, j)],
+                    completion=k,
                 ))
     found = search_mod._refine_cells(
         reg, cells, leaf.__call__, budget=Budget.matrix(), shares=shares,
@@ -181,7 +188,7 @@ def _all_answers(roster, positions) -> tuple[list, int, int]:  # noqa: ANN001
 
 
 def test_the_batched_pass_is_the_per_sub_game_pass_to_the_bit(roster, monkeypatch) -> None:  # noqa: ANN001
-    """A pass over the open position's cells and its completions' cells, on turn 1 and later
+    """A pass over the cells of every completion of side 1's bench, on turn 1 and later
     turns: values, notes and counts are the same as `_refined_value` per cell gives -- with a
     leaf whose answers move with batch size."""
     positions = _positions(roster)

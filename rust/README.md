@@ -856,8 +856,9 @@ LP は 48x48 を 1 回から 2x2〜5x5 を 3〜10 回に変わるので、**む�
 
 ### 入れたもの と 実測
 
-`src/pokeuraou/node_solver.py`、`search(..., solve_sparsely=True)`、
-`tools/bench_generation.py --solve-sparsely`。既定はオフです。
+当時は `src/pokeuraou/node_solver.py`、`search(..., solve_sparsely=True)`、
+`tools/bench_generation.py --solve-sparsely` を入れました。既定はオフでした。
+IKA-463 で `node_solver.py` と `solve_sparsely` を消しました。呼び手が無かったからです。
 
 ```
 生成（幅 48、--rank-leaf、cuda、6 ゲーム）
