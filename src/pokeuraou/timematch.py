@@ -669,6 +669,7 @@ def _top_mixture(actions: Sequence[str], policy: Sequence[float], top: int = 4) 
 
 #: Rows of a mixture a read summary keeps (the heaviest, at least 1%): the rest is one sum.
 SUMMARY_ROWS = 8
+SUMMARY_HARD = 3
 #: A move is one the mixture plays (in its support) from this probability up (`read_summary`,
 #: and what `tools/game_page.py` counts with).
 SUPPORT_MIN = 0.005
@@ -688,16 +689,19 @@ def _played(choices: Sequence[str], p: np.ndarray) -> list[list[Any]]:
 
 
 def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -> dict[str, Any]:
-    """One seat's read of a move decision as a reader sees it (`--transcript`): its mixture over its
-    menu (the heaviest rows, and the sum of the rest), where the move it drew stands, the other
-    side's mixture it modelled (weighted over the completions of the hidden bench).
+    """One seat's read of a move decision as a reader sees it (`--transcript`, and the page of
+    a generated game read again, `tools/reread.py`): its mixture over its menu (the heaviest
+    rows, and the sum of the rest), where the move it drew stands, the other side's mixture it
+    modelled (weighted over the completions of the hidden bench), and -- when the read hands
+    over the matrices at the prices in hand (``kept``: ``prices`` a completion, and ``value``
+    and ``replies`` where it has them) -- the opponent's moves that took most from it against
+    its own mixture, and the one that took most against the move drawn. Values are in the
+    read: the seat's own win rate by the matrices' cells. Not the game's real value.
 
-    The ladder's reads also handed over their matrices, and the summary added the opponent's
-    moves that took most from the mixture and from the drawn move (``hard``, ``guarantee``,
-    ``vs`` ...). IKA-464 removed the ladder and then those keys; `tools/game_page.py` still
-    shows them from a transcript written before."""
-    del weights
-    _me, mine, other, strategy, model = last[:5]
+    `tools/reread.py` hands over the depth-1 node's matrices it solved again. The time match's
+    reads hand over none since IKA-464 removed the ladder (`HumanGame.last_read`'s sixth place
+    is None), so a transcript of a time match carries the mixtures only."""
+    me, mine, other, strategy, model, kept = last[:6]
     x = np.asarray(strategy, dtype=np.float64)
     mine_names = [a.to_choice() for a in mine]
     other_names = [a.to_choice() for a in other]
@@ -711,13 +715,63 @@ def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -
         "rows": rows, "rowsRest": rows_rest, "chosen": chosen,
         "chosenP": None if index is None else round(float(x[index]), 4),
         "chosenRank": None if index is None else int(np.where(order == index)[0][0]) + 1,
-        "opp": opp, "oppRest": opp_rest,
+        "opp": opp, "oppRest": opp_rest, "hard": None, "hardChosen": None,
         # The whole mixtures, in menu order: the page counts the moves it plays from them (the
         # support), whatever threshold it names.
         "p": [round(float(v), 5) for v in x], "q": [round(float(v), 5) for v in y],
         # Every move each mixture plays (probability at least SUPPORT_MIN), heaviest first.
         "supp": _played(mine_names, x), "oppSupp": _played(other_names, y),
     }
+    prices = getattr(kept, "prices", None)
+    if prices:
+        w = np.asarray(weights, dtype=np.float64)
+        w = w / w.sum()
+        offset = 0.0 if me == 0 else 1.0  # the matrices are side 0's, negated and turned for side 1
+        shape = (len(mine_names), len(other_names))
+        if all(np.asarray(p).shape == shape for p in prices) and len(prices) == len(w):
+            by_col = offset + sum(wk * (x @ np.asarray(p)) for wk, p in zip(w, prices, strict=True))
+            worst = np.argsort(by_col, kind="stable")[:SUMMARY_HARD]
+            out["hard"] = [[other_names[j], round(float(by_col[j]), 6)] for j in worst]
+            # What the read guarantees: each completion of the hidden bench has its own hardest
+            # column (the opponent knows its own bench), weighted. `hard` above is by column over
+            # all completions at once (the same move whatever its bench), which is never lower.
+            exact = float(offset + sum(
+                wk * float((x @ np.asarray(p)).min()) for wk, p in zip(w, prices, strict=True)))
+            out["guarantee"] = round(exact, 6)
+            # Against the read's own value for the answer (the same thing, in the seat's units):
+            # the record's check that the matrices kept are the ones the answer was solved on.
+            if hasattr(kept, "value"):
+                out["guaranteeGap"] = abs(exact - (offset + float(kept.value)))
+            replies = getattr(kept, "replies", None)
+            if replies is not None and len(replies) == len(w):
+                # The read's own value from the matrices: the seat's win rate at its answer.
+                out["eq"] = round(float(offset + sum(
+                    wk * float(x @ np.asarray(p) @ np.asarray(r))
+                    for wk, p, r in zip(w, prices, replies, strict=True))), 6)
+            if index is not None:
+                against = offset + sum(wk * np.asarray(p)[index] for wk, p in zip(w, prices, strict=True))
+                j = int(np.argmin(against))
+                out["hardChosen"] = [other_names[j], round(float(against[j]), 6)]
+                # Among the moves the other side plays in this read (its mixture at least
+                # SUPPORT_MIN): the one that is hardest for the drawn move and the one it does best
+                # against (the seat's own win rate, weighted over the completions).
+                played = [k for k in range(len(other_names)) if y[k] >= SUPPORT_MIN] or list(
+                    range(len(other_names))
+                )
+                low = min(played, key=lambda k: against[k])
+                high = max(played, key=lambda k: against[k])
+                # The drawn move's value against every column of the other side's menu, in menu
+                # order (the page reads the value of the move the other side really played from
+                # it), and against the other side's modelled mixture.
+                out["cols"] = other_names
+                out["vs"] = [round(float(v), 6) for v in against]
+                replies = getattr(kept, "replies", None)
+                if replies is not None and len(replies) == len(w):
+                    out["chosenEv"] = round(float(offset + sum(
+                        wk * float(np.asarray(p)[index] @ np.asarray(r))
+                        for wk, p, r in zip(w, prices, replies, strict=True))), 6)
+                out["hardIn"] = [other_names[low], round(float(against[low]), 6)]
+                out["bestIn"] = [other_names[high], round(float(against[high]), 6)]
     return out
 
 

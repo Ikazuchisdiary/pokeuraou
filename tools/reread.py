@@ -121,8 +121,8 @@ def _seat_read(side: int, answer: Any, items: list, chosen: str) -> dict[str, An
     model = sum(
         wk * np.asarray(y, dtype=np.float64) for wk, y in zip(w / w.sum(), answer.replies, strict=True)
     )
-    ladder = SimpleNamespace(prices=prices, replies=list(answer.replies), value=answer.value)
-    got = timematch.read_summary((side, mine, other, answer.strategy, model, ladder), list(w), chosen)
+    kept = SimpleNamespace(prices=prices, replies=list(answer.replies), value=answer.value)
+    got = timematch.read_summary((side, mine, other, answer.strategy, model, kept), list(w), chosen)
     got["reread"] = True
     got["classes"] = len(items)
     return got

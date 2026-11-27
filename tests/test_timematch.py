@@ -435,29 +435,65 @@ def _action(index: int, target: int | None = None):  # noqa: ANN202
     return SideAction(slots=(MoveAction(slot=0, move_index=index, move_id="x", target=target),))
 
 
-def test_a_reads_summary_says_what_the_seat_would_have_played() -> None:
+def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it() -> None:
     """`read_summary`: the mixture's heaviest rows and the sum of the rest, where the drawn move
-    stands, and the other side's modelled mixture. The matrices' keys (``hard``, ``guarantee``,
-    ``eq`` ...) went with the ladder's reads (IKA-464): a read's sixth place is not read."""
+    stands, the other side's modelled mixture, and from the read's matrices the opponent's moves
+    that take most from the mixture (and from the drawn move). Side 1's matrices are side 0's
+    negated, so its own win rate is one more than the entry (the control below breaks that)."""
     from types import SimpleNamespace
 
     mine = [_action(1), _action(2), _action(3)]
     other = [_action(1, 1), _action(2, 1), _action(3, 1)]
     x = np.array([0.6, 0.3, 0.1])
     y = np.array([0.5, 0.5, 0.0])
-    for me in (0, 1):
-        got = timematch.read_summary((me, mine, other, x, y, None, True), [1.0], mine[1].to_choice())
+    payoff = np.array([[0.9, 0.5, 0.2], [0.4, 0.6, 0.7], [0.5, 0.5, 0.5]])
+    for me, offset in ((0, 0.0), (1, 1.0)):
+        matrix = payoff if me == 0 else -payoff
+        kept = SimpleNamespace(prices=[matrix], replies=(y,))
+        got = timematch.read_summary((me, mine, other, x, y, kept, True), [1.0], mine[1].to_choice())
         assert got["rows"][0] == [mine[0].to_choice(), 0.6] and got["chosenRank"] == 2
         assert got["chosenP"] == 0.3 and got["rowsRest"][0] == 0
         assert got["p"] == [0.6, 0.3, 0.1] and got["q"] == [0.5, 0.5, 0.0]
         assert [c for c, _p in got["supp"]] == [m.to_choice() for m in mine]
         assert [c for c, _p in got["oppSupp"]] == [o.to_choice() for o in other[:2]]  # 0.0 is outside
         assert got["opp"][0][1] == 0.5
-        assert not {"hard", "hardChosen", "guarantee", "eq", "vs", "cols"} & set(got)
-    # Matrices handed over are not read: the same summary.
-    kept = SimpleNamespace(prices=[np.eye(3)], replies=(y,))
-    assert timematch.read_summary((0, mine, other, x, y, kept, True), [1.0], "x") == \
-        timematch.read_summary((0, mine, other, x, y, None, True), [1.0], "x")
+        by_col = offset + x @ matrix
+        worst = int(np.argmin(by_col))
+        assert got["hard"][0] == [other[worst].to_choice(), round(float(by_col[worst]), 6)]
+        assert got["hardChosen"][1] == round(float((offset + matrix[1]).min()), 6)
+        assert got["eq"] == round(float(offset + x @ matrix @ y), 6)
+        # One completion: the lowest column is the guarantee.
+        assert got["guarantee"] == got["hard"][0][1]
+        # Among the columns the modelled mixture plays (here the first two; the third has 0):
+        # the hardest and the best reply to the drawn move.
+        against = offset + matrix[1]
+        assert got["vs"] == [round(float(v), 6) for v in against]
+        assert got["cols"] == [o.to_choice() for o in other]
+        assert got["chosenEv"] == round(float(offset + matrix[1] @ y), 6)
+        low, high = int(np.argmin(against[:2])), int(np.argmax(against[:2]))
+        assert got["hardIn"] == [other[low].to_choice(), round(float(against[low]), 6)]
+        assert got["bestIn"] == [other[high].to_choice(), round(float(against[high]), 6)]
+        assert got["hardIn"][1] >= got["hardChosen"][1] and got["bestIn"][1] <= float(against.max())
+    # Two completions of the hidden bench: the opponent that knows its own bench takes its own
+    # hardest column in each, so the guarantee is the weighted sum of the lowest columns, and
+    # the lowest column over both at once (`hard`) is never below it (here above it).
+    second = np.array([[0.2, 0.9, 0.5], [0.6, 0.3, 0.5], [0.5, 0.5, 0.5]])
+    both = timematch.read_summary(
+        (0, mine, other, x, y, SimpleNamespace(prices=[payoff, second], replies=(y, y)), False),
+        [0.5, 0.5], mine[0].to_choice(),
+    )
+    lows = [float((x @ m).min()) for m in (payoff, second)]
+    assert both["guarantee"] == round(0.5 * lows[0] + 0.5 * lows[1], 6)
+    assert both["hard"][0][1] > both["guarantee"]
+    # No matrices (a time match's read since IKA-464): the mixtures only, nothing made up.
+    plain = timematch.read_summary((0, mine, other, x, y, None, True), [1.0], mine[0].to_choice())
+    assert plain["hard"] is None and plain["hardChosen"] is None and "eq" not in plain
+    # The control: with side 1's offset dropped the number differs.
+    wrong = timematch.read_summary(
+        (1, mine, other, x, y, SimpleNamespace(prices=[-payoff], replies=(y,)), True), [1.0],
+        mine[0].to_choice(),
+    )
+    assert wrong["eq"] == round(float(1.0 + x @ -payoff @ y), 6) != round(float(x @ -payoff @ y), 6)
 
 
 # ------------------------------------------------- IKA-398: a condition with a leaf of its own
