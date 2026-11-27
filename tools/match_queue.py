@@ -319,6 +319,17 @@ def main() -> None:
     server_logs: list[Path] = []
     served_at: list[str] = []
 
+    def stop_servers() -> None:
+        # The server outlives every worker and is ours to end, however the run ended --
+        # a leftover one holds 1.5 GB of VRAM and answers the next run's questions with
+        # the previous run's models.
+        for process in servers:
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
     def launch(arms: dict[str, list[str]], qs: dict[str, str], tag: str, count: int,
                hp_arms: tuple[str, ...] = ()) -> list[str]:
         """`count` Rust inference servers holding `arms` and the Qs `qs`; their addresses (each
@@ -418,6 +429,7 @@ def main() -> None:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
         )
         if made.returncode != 0:
+            stop_servers()
             raise SystemExit(f"the Rust board worker's config was not written:\n{made.stdout}")
         print(f"  workers: pokeuraou-damage {rustworker.BOARD_SUBCOMMAND} (config {config})",
               file=sys.stderr, flush=True)
@@ -480,15 +492,7 @@ def main() -> None:
                 flush=True,
             )
     finally:
-        # The server outlives every worker and is ours to end, however the run ended --
-        # a leftover one holds 1.5 GB of VRAM and answers the next run's questions with
-        # the previous run's models.
-        for process in servers:
-            process.terminate()
-            try:
-                process.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        stop_servers()
     raise SystemExit(status)
 
 

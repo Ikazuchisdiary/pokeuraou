@@ -168,3 +168,45 @@ def test_the_driver_refuses_a_contradiction(tmp_path, monkeypatch, pool_file, ar
                             ["--pool", pool_file, "--hide-bench", *argv])
     assert command is None
     assert isinstance(code, str) and "contradicts" in code
+
+
+def test_a_failed_worker_config_ends_the_servers(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
+    """The Rust board worker's config is written after the servers are up; when that child fails
+    the driver stops, and the servers it started must not stay behind holding the GPU."""
+    import subprocess
+
+    from pokeuraou import rustnet
+
+    match_queue = load_tool("match_queue")
+    started: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        process = real_popen(*args, **kwargs)
+        started.append(process)
+        return process
+
+    def fake_server_command(regulation, arms, qs, out_dir, hp_arms=()):  # noqa: ANN001, ANN202
+        # Names an address, then stays alive like a real server until it is terminated.
+        return [sys.executable, "-c",
+                "import time; print('127.0.0.1:1', flush=True); time.sleep(120)"]
+
+    def failing_config(command, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        return subprocess.CompletedProcess(command, 1, stdout="refused: nothing to play\n")
+
+    monkeypatch.setattr(rustnet, "server_command", fake_server_command)
+    monkeypatch.setattr(match_queue.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(match_queue.subprocess, "run", failing_config)
+    monkeypatch.setattr(sys, "argv", [
+        "match_queue.py", "--out", str(tmp_path / "out"), "--games", "1", "--value", "a.pt",
+        "--pool", pool_file, "--hide-bench", "--baseline", "b.pt", "--served", "--servers", "1"])
+    try:
+        with pytest.raises(SystemExit) as ended:
+            match_queue.main()
+        assert isinstance(ended.value.code, str) and "config was not written" in ended.value.code
+        assert len(started) == 1, "the fake server was not the one started"
+        assert started[0].poll() is not None, "the server was left running"
+    finally:
+        for process in started:
+            if process.poll() is None:
+                process.kill()
