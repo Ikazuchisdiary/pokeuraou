@@ -331,24 +331,3 @@ def test_a_cost_prices_the_q_and_the_probe_apart() -> None:
     assert meter.probed == 40 and meter.cells == 100 and meter.qs == 2
     assert meter.spent == pytest.approx(priced.ms(2, 0, 100, 40, 2) / 0.1)
 
-
-# --------------------------------------------------------------------------------------
-# In a game
-
-
-class _HashQ:
-    """A deterministic stand-in Q: a matrix from the actions' choices and the position."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def matrix(self, reg, pos, pools):  # noqa: ANN001, ANN201
-        import hashlib
-
-        self.calls += 1
-        seed = hashlib.sha256(
-            repr(pos.to_json()).encode() + b"|".join(a.to_choice().encode() for a in pools[0])
-            + b"#" + b"|".join(b.to_choice().encode() for b in pools[1])
-        ).digest()
-        rng = np.random.default_rng(int.from_bytes(seed[:8], "little"))
-        return rng.random((len(pools[0]), len(pools[1])))

@@ -41,8 +41,6 @@ from pokeuraou.hidden import (
     parse_bench_drop,
 )
 from pokeuraou.narrow import narrow
-from pokeuraou.pool import load_pool
-from pokeuraou.poolplay import PoolArm
 from pokeuraou.provenance import LEGACY_BENCH_DROP, agent_name, provenance
 from pokeuraou.regulation import load_regulation
 from pokeuraou.search import belief_solve
@@ -50,7 +48,7 @@ from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
 from .test_beliefnode import _Leaf
-from .test_poolplay import _served_stub, _stub, _variants, _write_pool
+from .test_poolplay import _stub
 
 
 @pytest.fixture(scope="module")
@@ -238,32 +236,6 @@ def test_the_menu_ranks_from_the_same_completion(setup, monkeypatch) -> None:  #
         views.append((list(asked), {s: used[s][1] for s in used}))
     assert menus[0] == menus[1]
     assert views[0] == views[1]
-
-
-@pytest.fixture(scope="module")
-def pool(tmp_path_factory):  # noqa: ANN001, ANN201
-    path = _write_pool(tmp_path_factory.mktemp("pool") / "p.json", _variants())
-    loaded = load_pool(path)
-    register_mega_stones(loaded.reg)
-    return loaded
-
-
-def _arm(drop: str, solver) -> PoolArm:  # noqa: ANN001
-    return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=2, rank_by_leaf=False,
-                   bench_drop=drop)
-
-
-def _counting(monkeypatch):  # noqa: ANN001, ANN202
-    """Records the completions each `belief_solve` was handed, per side."""
-    seen: list[tuple[int, int]] = []
-    real = selfplay.belief_solve
-
-    def spy(reg, pos, ours, theirs, spreads, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
-        seen.append((len(spreads[0]), len(spreads[1])))
-        return real(reg, pos, ours, theirs, spreads, *args, **kwargs)
-
-    monkeypatch.setattr(selfplay, "belief_solve", spy)
-    return seen
 
 
 def test_the_drop_is_recorded_only_when_it_differs() -> None:

@@ -214,6 +214,80 @@ def test_mirror_games_draw_both_seats_from_one_mixture(mirror_pool, tmp_path) ->
         assert record["ownSelectionPolicy"] == record["foeSelectionPolicy"]
 
 
+def test_a_game_the_turn_cap_stops_is_not_written(pool, served, tmp_path) -> None:  # noqa: ANN001
+    """The worker writes finished games only: at ``max_turns=1`` no game ends, the worker plays
+    the turns and writes nothing, and its last lines count every game as discarded
+    (worker.rs, the `outcome` that is None)."""
+    config = _config(pool, served, tmp_path, tmp_path / "store", max_turns=1)
+    log = _play(config, served, tmp_path / "g.jsonl", 0, GAMES)
+    assert _records(tmp_path / "g.jsonl") == {}
+    assert f"finished 0, discarded unfinished {GAMES}" in log, log
+    # The games were played (the run is not one that wrote nothing for want of a move).
+    moves = re.search(r"rust worker: move nodes (\d+)", log)
+    assert moves and int(moves.group(1)) >= GAMES, log
+
+
+class _MirroredQ(_ServedStub):
+    """A stand-in Q that is the same game from either seat: ``Q(i, j) = 1 - Q'(j, i)`` where
+    ``Q'`` is the matrix with the seats swapped. `_stub_matrix` is not, so in a mirror it gives
+    the two seats different menus and their values do not mirror."""
+
+    def __call__(self, arrays):  # noqa: ANN001, ANN204
+        self.calls += 1
+        a0 = arrays["acts0"].reshape(len(arrays["acts0"]), -1).astype(np.float64).sum(1)
+        a1 = arrays["acts1"].reshape(len(arrays["acts1"]), -1).astype(np.float64).sum(1)
+        f0 = arrays["feats0"].astype(np.float64).sum(1)
+        f1 = arrays["feats1"].astype(np.float64).sum(1)
+        x = 0.37 * (a0[:, None] - a1[None, :]) + 0.11 * (f0[:, None] - f1[None, :])
+        return 0.5 + 0.4 * np.sin(x)
+
+
+@pytest.fixture(scope="module")
+def mirrored_games(mirror_pool, tmp_path_factory):  # noqa: ANN001, ANN201
+    """Six games of one team in both seats, on `_MirroredQ`."""
+    tmp = tmp_path_factory.mktemp("mirrored")
+    encoder = Encoder(mirror_pool.reg)
+    server, address = serve(
+        {"value": _leaf_model(encoder)}, arms={"value": ["stub.pt"]},
+        q_models={"q": _MirroredQ(encoder.vocab.fingerprint())},
+    )
+    try:
+        config = _config(mirror_pool, address, tmp, tmp / "store")
+        _play(config, address, tmp / "g.jsonl", 0, 6)
+    finally:
+        server.shutdown()
+        server.server_close()
+    rows = [json.loads(line) for line in (tmp / "g.jsonl").read_bytes().decode().splitlines()]
+    assert len(rows) == 6
+    return rows
+
+
+def test_a_mirror_s_two_values_sum_to_one(mirrored_games) -> None:  # noqa: ANN001
+    """Where both seats picked the same four and the same leads, side 1's game at turn 1 is side
+    0's with the seats swapped, so side 1's value of its own game equals side 0's, and in side 0's
+    units the two recorded values sum to one (`foeSearchValue` is ``-foe_value``, playgame.rs). A
+    sign or units error breaks the sum; so does writing side 0's value twice, unless it is one
+    half, which this hidden game does not give."""
+    same = [r for r in mirrored_games
+            if r["ownTeam"] == r["foeTeam"] and r["leads"][0] == r["leads"][1]]
+    assert same, "no game put the same four and leads in both seats; the sum would be vacuous"
+    for record in same:
+        first = record["decisions"][0]
+        assert first["kind"] == "move" and first["turn"] == 1
+        assert first["searchValue"] + first["foeSearchValue"] == pytest.approx(1.0, abs=1e-9)
+        assert abs(first["searchValue"] - 0.5) > 1e-4, (
+            "the value is one half, so this cannot tell side 1's answer from side 0's"
+        )
+
+
+def test_search_seconds_split_in_half(mirrored_games) -> None:  # noqa: ANN001
+    """Both seats' search is one node a move, so the worker books half of each move's seconds to
+    each seat (worker.rs): ``searchSeconds`` is two equal shares."""
+    for record in mirrored_games:
+        own, foe = record["searchSeconds"]
+        assert own == foe and own > 0.0, record["searchSeconds"]
+
+
 def test_a_flag_the_rust_worker_does_not_play_is_named() -> None:
     assert rustworker.unsupported(_args("h:1")) == []
     assert rustworker.unsupported(_args("h:1", rank_fill="refs2")) == [

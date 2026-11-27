@@ -360,24 +360,19 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     reg: Regulation,
     leaf,  # noqa: ANN001 - inference.RemoteValue
     position: Position,
-    row: list[SideAction] | None,
-    col: list[SideAction] | None,
+    row: list[SideAction],
+    col: list[SideAction],
     budget: Budget,
     rules,  # noqa: ANN001 - EncodingRules
     hidden: dict[int, tuple[int, ...]],
     spreads: dict[int, list],
     solve: Sequence[int],
     encoder,  # noqa: ANN001 - Encoder
-    fused=None,  # noqa: ANN001 - `rootmenus.Fused`
 ):  # noqa: ANN202 - a BeliefNode, or `_NOT_ON_THIS_BINARY`
     """The whole node in the port (`beliefNode`, IKA-455 stage 1.4): the reference fill, the plan,
     each completion's own fill, the stack, the server's values, the fold and the games, in one
     crossing. Python sends the positions, the actions and what it alone reads off them; the
-    answer is the node.
-
-    With ``fused`` (IKA-457 stage 2.4) the actions are not Python's: the request is `moveNode`,
-    which builds both menus first (`fused.request` is `rootMenus`' half) and solves the node over
-    them, `row` and `col` are None, and `fused.finish` takes the menus' half of the answer."""
+    answer is the node."""
     from types import SimpleNamespace
 
     from . import portlp
@@ -407,18 +402,14 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
         "carded": [_red_card_on_field(position, 0), _red_card_on_field(position, 1)],
         "jobs": jobs,
     })
-    if fused is None:
-        request.update({
-            "ours": _candidates(row),
-            "theirs": _candidates(col),
-            "rows": len(row),
-            "cols": len(col),
-            "rowFeat": _action_features(reg, row),
-            "colFeat": _action_features(reg, col),
-        })
-    else:
-        request["kind"] = "moveNode"
-        request.update(fused.request)
+    request.update({
+        "ours": _candidates(row),
+        "theirs": _candidates(col),
+        "rows": len(row),
+        "cols": len(col),
+        "rowFeat": _action_features(reg, row),
+        "colFeat": _action_features(reg, col),
+    })
     if rules.mega_from_slots:
         request["encoding"] = rules.to_request()
     asks = []
@@ -450,9 +441,7 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
         "hp_scale": float(HP_SCALE),
     }
     started = timing.clock()
-    answer = port.ask(
-        reg, lambda node: node.move_node(request) if fused is not None else node.belief_node(request)
-    )
+    answer = port.ask(reg, lambda node: node.belief_node(request))
     wall = timing.clock() - started
     portlp.COUNTS["crossings"] += 1
     portlp.COUNTS["lps"] += int(answer.get("lps", 0))
@@ -463,9 +452,6 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
                               "capGb": answer.get("capGb")}, "inference failed")
     if "fills" not in answer:
         raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
-    if fused is not None:
-        # The menus' half of the answer: their counts and clocks, as `rootmenus.menus` books them.
-        fused.finish(answer["rootMenus"])
     book_node(answer, leaf, encoder, wall)
     if "refused" in answer:
         port.raise_refused([(int(i), int(j), str(why)) for i, j, why in answer["refused"]])
@@ -477,8 +463,6 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     book_served(answer, leaf, encoder, any(hidden.values()))
     unmodelled = set(answer["unmodelled"])
     ordered = [SimpleNamespace(side=job["side"]) for job in jobs]
-    if fused is not None:
-        row, col = fused.menus
     payoffs, solved = _fold_answer(answer, ordered, len(row), len(col), asks)
     matrices: dict[int, list[np.ndarray]] = {}
     for job, payoff in zip(ordered, payoffs, strict=True):

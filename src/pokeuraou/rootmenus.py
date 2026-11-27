@@ -16,8 +16,8 @@ menus to Python (`selfplay._menus`'s own ranking: the damage order, the leaf's, 
 A fault from the port is `portlp.PortFault`. A binary that predates the request stops, as the
 other requests do.
 
-Stage 2.4 (`beliefnode.fused_node`) asks the same of the same request as the first half of
-`moveNode`, whose second half is the node over those menus: `Plan` is the half both use.
+`Plan` holds the request and reads the answer. The Rust worker sends the same request as the
+first half of `moveNode` (`rust/src/playgame.rs`).
 """
 
 from __future__ import annotations

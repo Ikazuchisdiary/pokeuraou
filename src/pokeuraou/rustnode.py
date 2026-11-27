@@ -995,12 +995,6 @@ class RustNode:
         as a node asked of the child (`rust.fill`), as the fills it replaces were."""
         return self._exchange(request)
 
-    @timing.timed("rust.fill")
-    def move_node(self, request: dict[str, Any]) -> dict[str, Any]:
-        """IKA-457 stage 2.4: a move node's menus and the node over them (`moveNode`) in one
-        crossing. Timed as the node asked of the child (`rust.fill`), as `belief_node` is."""
-        return self._exchange(request)
-
     @timing.timed("rust.menus")
     def root_menus(self, request: dict[str, Any]) -> dict[str, Any]:
         """IKA-457 stage 2.3: a move node's two menus by the Q (`rootMenus`) in one crossing,
