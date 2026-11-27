@@ -455,6 +455,87 @@ class RowStub:
         return np.asarray(self.score(Rows(self.encoder, encoded, self._names)), dtype=np.float64)
 
 
+class QStub:
+    """A Q in the server: each request's arrays kept (with its batch's size), and a matrix of
+    a smooth pair score of the two actions' rows that moves with the batch's size."""
+
+    files = ["q-stub"]
+    digests = ["0" * 64]
+    properties = True
+
+    def __init__(self, fingerprint: str) -> None:
+        self.fingerprint = fingerprint
+        self.log: list[tuple[int, str]] = []
+
+    def _one(self, arrays: dict[str, np.ndarray], size: int) -> np.ndarray:
+        import hashlib
+
+        from . import qhead
+
+        digest = hashlib.sha256()
+        for name in (*qhead.POSITION_ARRAYS, "acts0", "acts1", "feats0", "feats1"):
+            array = arrays[name]
+            digest.update(f"{name}{array.dtype.str}{array.shape}".encode())
+            digest.update(np.ascontiguousarray(array).tobytes())
+        self.log.append((size, digest.hexdigest()))
+        base = float(arrays["mon"].astype(np.float64).sum()) * 1e-4
+        w = np.arange(1, 15, dtype=np.float64)
+
+        def vec(side: int) -> np.ndarray:
+            acts = arrays[f"acts{side}"].reshape(len(arrays[f"acts{side}"]), -1).astype(np.float64)
+            feats = arrays[f"feats{side}"].astype(np.float64)
+            return np.tanh(acts @ w * 0.01 + feats.sum(axis=1) * 0.05 + base)
+
+        u, v = vec(0), vec(1)
+        # Cyclic in the difference, so the games mix (as a Q's do).
+        d = u[:, None] - v[None, :]
+        logit = np.sin(9.0 * d) + 0.2 * d
+        return 1.0 / (1.0 + np.exp(-logit)) + size * 1e-12
+
+    def __call__(self, arrays: dict[str, np.ndarray]) -> np.ndarray:
+        return self._one(arrays, 1)
+
+    def batch(self, requests: list[dict[str, np.ndarray]]) -> list[np.ndarray]:
+        return [self._one(r, len(requests)) for r in requests]
+
+
+_STUB_Q: dict[str, Any] = {}
+
+
+def stub_q(reg: Any) -> Any:  # noqa: ANN401 - a Regulation; a qrank.RemoteQ
+    """One `qrank.RemoteQ` of this process on a server of `QStub` for ``reg``'s vocabulary: the
+    stand-in, in the tests, for the Rust inference server's Q arm where a test installed no Q
+    and the port asks one (the deepening's children, IKA-464). Made on first use and closed
+    when the process ends."""
+    key = reg.meta.format_id
+    if key not in _STUB_Q:
+        import atexit
+
+        from .qrank import RemoteQ
+
+        encoder = Encoder(reg)
+        stub = QStub(encoder.vocab.fingerprint())
+        stub.log = _NoLog()
+        shut, address = serve({}, q_models={"qstub": stub})
+        model = RemoteQ(address, "qstub", encoder)
+
+        def close() -> None:
+            model.close()
+            shut.shutdown()
+            shut.server_close()
+
+        atexit.register(close)
+        _STUB_Q[key] = model
+    return _STUB_Q[key]
+
+
+class _NoLog(list):
+    """A request log that keeps nothing (a stub that lives as long as the process)."""
+
+    def append(self, item: Any) -> None:  # noqa: ANN401
+        del item
+
+
 def subset(encoded: Encoded, rows: list[int]) -> Encoded:
     """Rows ``rows`` of an `Encoded`, in that order (what the Python road cut a lent fill with)."""
     return Encoded(

@@ -80,6 +80,30 @@ def _hp_share_is_served() -> Iterator[None]:
     beliefnode.served_leaf = real
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _q_is_served() -> Iterator[None]:
+    """The port's deepening ranks its children's menus by the Q on the inference server
+    (`portdeepen._q_server`, IKA-464). Where a test installed no served Q (the agents that rank
+    their root by ``refs2``), the deepening asks the stand-in Q of `tests/_served.stub_q`, as a
+    left-out leaf asks the hp-share stand-in. A test marked ``@pytest.mark.unserved`` sees the
+    installed Q as it is."""
+    from pokeuraou import portdeepen, qrank
+
+    from ._served import stub_q
+
+    real = portdeepen._installed_q  # noqa: SLF001
+
+    def installed(reg: Regulation) -> object:
+        model = real(reg)
+        if _REFUSE_UNSERVED[0] or type(model) is qrank.RemoteQ:
+            return model
+        return stub_q(reg)
+
+    portdeepen._installed_q = installed  # noqa: SLF001
+    yield
+    portdeepen._installed_q = real  # noqa: SLF001
+
+
 @pytest.fixture(autouse=True)
 def _unserved_marker(request: pytest.FixtureRequest) -> Iterator[None]:
     _REFUSE_UNSERVED[0] = request.node.get_closest_marker("unserved") is not None

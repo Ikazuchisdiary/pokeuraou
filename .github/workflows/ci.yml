@@ -340,11 +340,13 @@ jobs:
       #              did the CPU-batch skip of its test. Step 4 added two tests of the Rust
       #              server's hp-share arm to that module: 23. IKA-464 removed the ladder and
       #              tests/test_ladder_leaf.py, which skipped as a module for torch: 29.
+      #              IKA-464 stage A3 removed Python's deepening and its tests, among them
+      #              tests/test_deepen_guard.py and its batched Q pass with torch: 28.
       - name: what the suite skipped, and whether it was allowed to
         if: always()
         run: >
           uv run python tools/ci_skip_audit.py --junit reports/pytest.xml
-          --absent standings=9 --absent torch=29 --absent cuda=0
+          --absent standings=9 --absent torch=28 --absent cuda=0
 
       # `learn` runs only the files that name torch (IKA-465). This is what makes that
       # enough: every test that skipped here for torch has to be in one of them.

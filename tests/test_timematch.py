@@ -99,7 +99,7 @@ def test_a_condition_left_alone_is_the_human_play_agent() -> None:
     assert got.threads == humanplay.default_threads()
     assert got.oracle == humanplay.PLAY_ORACLE
     assert got.max_levels == humanplay.PLAY_MAX_LEVELS
-    assert not got.width_only and got.child_q is None
+    assert not got.width_only
     assert got.price_cores == got.threads
     old = parse_condition("old:seconds=1,threads=1,oracle=none,levels=16,width_only=on")
     assert (old.threads, old.oracle, old.max_levels, old.width_only) == (1, None, 16, True)
@@ -114,13 +114,12 @@ def test_a_condition_left_alone_is_the_human_play_agent() -> None:
             parse_condition(bad)
 
 
-def test_a_condition_names_where_its_moves_are_deepened() -> None:
-    """IKA-464: ``road`` reaches the agent; left out, the module's. IKA-464 also removed the
-    ladder's keys (``ladder``, ``hidden_ladder``, ``root_widths``, ``child``)."""
-    assert parse_condition("a:seconds=4").road is None
-    got = parse_condition("a:seconds=4,road=port")
-    assert got.road == "port" and got.to_json()["road"] == "port"
-    for bad in ("road=gpu", "ladder=L6", "child=seat", "root_widths=12-24"):
+def test_the_removed_keys_stop_a_condition() -> None:
+    """IKA-464 removed the ladder's keys (``ladder``, ``hidden_ladder``, ``root_widths``,
+    ``child``) and, with Python's deepening, the deepening's road (``road``) and its children's
+    Q width (``child_q``): a condition that names one stops."""
+    assert "road" not in parse_condition("a:seconds=4").to_json()
+    for bad in ("road=port", "child_q=8", "ladder=L6", "child=seat", "root_widths=12-24"):
         with pytest.raises(ValueError):
             parse_condition(f"a:seconds=4,{bad}")
 

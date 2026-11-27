@@ -103,8 +103,9 @@ def real_solver(reg, args):  # noqa: ANN001, ANN201
     evaluate, encoder = humanplay.served_leaf(reg, address, values)
     name = ph.leaf_name(list(values))
     fill, q_files = ph.install_menus(None, q_path, encoder, address, say)
+    ph.install_deepening_q(q_path, encoder, address, say)
     threads = args.threads or humanplay.default_threads()
-    humanplay.use_threads(threads, reg, (address, "value"))
+    humanplay.use_threads(threads)
     settings = analysis.Settings(
         width=analysis.DEFAULT_WIDTH, oracle=ph._oracle_width("sall"),
         levels=humanplay.PLAY_MAX_LEVELS or analysis.MAX_LEVELS, rank_fill=fill)

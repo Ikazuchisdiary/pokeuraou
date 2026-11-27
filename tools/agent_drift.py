@@ -129,7 +129,6 @@ def play_agent_drift() -> list[str]:
         ),
         "--threads": (humanplay.default_threads() if flags.get("--threads") == "None"
                       else flags.get("--threads"), base.threads),
-        "--child-q": (eval(flags.get("--child-q", "0")), base.child_q),  # noqa: S307
         "--width-only": (eval(flags.get("--width-only", "None")), base.width_only),  # noqa: S307
     }
     for flag, (theirs, ours) in wanted.items():

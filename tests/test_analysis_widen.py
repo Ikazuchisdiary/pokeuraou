@@ -53,7 +53,7 @@ def test_a_wider_width_mid_read_goes_on_from_the_tree(pool, record) -> None:  # 
     assert wide.ours[: len(narrow.ours)] == narrow.ours
     assert wide.theirs[: len(narrow.theirs)] == narrow.theirs
     assert len(wide.ours) > len(narrow.ours) or len(wide.theirs) > len(narrow.theirs)
-    # The same request at the same step: the same answer, alone and on helper threads.
+    # The same request at the same step: the same answer, on one and on two cell threads.
     again = analyzer.run(game, point, settings=settings, max_steps=40, on_session=_widen_at(12, 9))
     humanplay.use_threads(2)
     try:

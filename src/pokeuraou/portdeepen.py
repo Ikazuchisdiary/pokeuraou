@@ -1,25 +1,22 @@
-"""IKA-464: a move's best-first deepening read in the port (`rust/src/deepen.rs`).
+"""IKA-464: a move's best-first deepening, read in the port (`rust/src/deepen.rs`).
 
-`deepen.deepen_belief` / `deepen.deepen_root` held the tree, the priorities, the swap oracle
-and every re-solve in Python (scipy's LP), with the turns and fills in the port. Here the
-port holds the read: `deepenStart` takes the `beliefNode` request of the root
-(`beliefnode.node_request`) with the deepening's settings, `deepenRun` steps it for a slice
-of wall time or of counted cells, `deepenEnd` lets it go. This module runs the slices,
-reads the move's budget between them as `deepen._Meter` read it (a `deepen.Cost`,
-`humanplay.WallCost`, `HaltingCost`, `PonderCost`), reports each slice to a `progress`
-callback as a `deepen.Step`, and returns what `search.belief_solve` returned for a deepened
-side.
+The only deepening there is (IKA-464 stage A3 removed Python's). The port holds the read:
+`deepenStart` takes the `beliefNode` request of the root (`beliefnode.node_request`) with the
+deepening's settings, `deepenRun` steps it for a slice of wall time or of counted cells,
+`deepenEnd` lets it go. This module runs the slices, reads the move's budget between them
+with `deepen._Meter` (a `deepen.Cost`, `humanplay.WallCost`, `HaltingCost`, `PonderCost`,
+`analysis.StopCost`), reports each slice to a `progress` callback as a `deepen.Step`, and
+returns what `search.belief_solve` returns for a side that is not deepened.
 
 The children's menus are each side's `CHILD_WIDTH` best by the Q (the root's `q-nocover`
-without the cover, `deepen.py`'s ``c<k>``), not `narrow`'s damage order: the port has no
-`narrow`. So the Q must be the inference server's (`qrank.RemoteQ`).
+without the cover), not `narrow`'s damage order: the port has no `narrow`. So the Q must be
+the inference server's (`qrank.RemoteQ`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -27,7 +24,7 @@ import numpy as np
 from . import port, portlp
 from .actions import MoveAction, PassAction, SideAction, SwitchAction
 from .budget import Budget
-from .deepen import Deepened, Step, _lost_options
+from .deepen import Deepened, Root, Step, _lost_options, _Meter
 from .equilibrium import BayesianEquilibrium
 from .position import Position
 from .regulation import Regulation
@@ -66,11 +63,19 @@ def _codes(actions: Sequence[SideAction]) -> list:
     return [_code(a) for a in actions]
 
 
-def _q_server() -> dict[str, Any]:
+def _installed_q(reg: Regulation) -> Any:  # noqa: ANN401 - the installed Q
+    """The installed Q (the tests give a stand-in where none is installed)."""
+    from . import qrank
+
+    del reg
+    return qrank._INSTALLED.get("")  # noqa: SLF001
+
+
+def _q_server(reg: Regulation) -> dict[str, Any]:
     """The installed Q's server, as `qMenus` reads it."""
     from . import qrank
 
-    model = qrank._INSTALLED.get("")  # noqa: SLF001
+    model = _installed_q(reg)
     if type(model) is not qrank.RemoteQ:
         raise ValueError(
             "the port's deepening ranks the children's menus by the Q on the inference server "
@@ -120,7 +125,8 @@ class Answer:
 def _equilibrium(
     snap: dict[str, Any], weights: np.ndarray, m: int, n: int,
 ) -> tuple[BayesianEquilibrium, list[np.ndarray]]:
-    """The snapshot's root as `deepen._BeliefRoot` held it: its equilibrium and its prices."""
+    """The snapshot's root: its Bayesian equilibrium and its prices (one matrix a completion,
+    in the side's own orientation)."""
     import base64
 
     flat = np.frombuffer(base64.b64decode(snap["prices"]), dtype="<f8")
@@ -185,7 +191,7 @@ def deepen_move(  # noqa: PLR0913, PLR0915, C901 - the node, the budget and the 
         "weights": [float(w) for w in weights],
         "outside": None if outside is None else [_codes(outside[0]), _codes(outside[1])],
         "levels": guard, "discount": discount, "branches": BRANCHES, "childWidth": CHILD_WIDTH,
-        **_q_server(),
+        **_q_server(reg),
     }
     answer = port.ask(reg, lambda node: node._exchange(start))  # noqa: SLF001
     if "fault" in answer or "serverError" in answer or "tooBig" in answer:
@@ -210,23 +216,17 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
     from .portmenus import _action  # noqa: PLC2701
 
     def meter(snap: dict[str, Any]) -> float:
-        """`deepen._Meter.spent`: the counted cells, or the cost's units of the work so far
-        (fills, refinements, cells and probed cells, and the levels and the root's cells at
-        each refinement; the port's probe asks no Q, so its ``qs`` is 0)."""
-        refines = int(snap["refines"])
-        counted = int(snap["cells"]) - refines
-        if cost is None:
-            return float(refines + counted)
-        ms = cost.ms(int(snap["fills"]), refines, counted, int(snap["probed"]), 0)
-        per_level = getattr(cost, "level", 0.0)
-        if per_level and int(snap["levelSum"]):
-            ms += per_level * int(snap["levelSum"])
-        per_root = getattr(cost, "root", 0.0)
-        if per_root and int(snap["rootSum"]):
-            ms += per_root * int(snap["rootSum"])
-        units = ms / cost.cell
-        gate = getattr(cost, "gate", None)
-        return units if gate is None else gate(units, int(snap["fills"]) + refines + counted)
+        """`deepen._Meter.spent` of the port's counts: the counted cells, or the cost's units
+        of the work so far (fills, refinements, cells and probed cells, and the levels and
+        the root's cells at each refinement; the port's probe asks no Q, so ``qs`` is 0)."""
+        read = _Meter(cost)
+        read.refines = int(snap["refines"])
+        read.cells = int(snap["cells"]) - read.refines
+        read.fills = int(snap["fills"])
+        read.probed = int(snap["probed"])
+        read.levels = int(snap["levelSum"])
+        read.roots = int(snap["rootSum"])
+        return float(read.spent)
 
     weights_n = weights / weights.sum()
     index = [0]
@@ -237,8 +237,11 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
         own = [_action(a) for a in snap["own"]]
         other = [_action(a) for a in snap["other"]]
         eq, prices = _equilibrium(snap, weights_n, len(own), len(other))
-        root = SimpleNamespace(side=me, own=own, other=other, prices=prices, w=weights_n,
-                               equilibrium=eq, children={}, refused=set(), level=0, port=snap)
+        root = Root(side=me, own=own, other=other, items=list(items), w=weights_n,
+                    prices=prices, equilibrium=eq,
+                    deep={tuple(int(v) for v in c) for c in snap.get("deep", ())},
+                    refused={tuple(int(v) for v in c) for c in snap.get("refusedCells", ())},
+                    port=snap)
         if kind not in ("start", "done"):
             index[0] += 1
         progress(Step(
@@ -246,6 +249,7 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
             cells=int(snap["cells"]), fills=int(snap["fills"]), refines=int(snap["refines"]),
             expanded=int(snap["expanded"]), depth=int(snap["depth"]), refused=int(snap["refused"]),
             probed=int(snap["probed"]), widened=int(snap["widened"]), swapped=int(snap["swapped"]),
+            grown=int(snap["grown"]),
         ))
 
     wall = _is_wall(cost)

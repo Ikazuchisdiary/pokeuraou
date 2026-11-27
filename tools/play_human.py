@@ -18,8 +18,11 @@ person is shown and how the agent spends its seconds). This file loads the piece
   board, which stop without the Q (IKA-338), a person's game falls back and says so, as it
   does for a missing leaf: the note is printed at the start and the record names the fill;
 * the cores: ``--cores`` prices the budget rule and spreads a move over that many threads
-  (`humanplay.use_threads`: the port's cells, the deepening's cells expanded ahead, a big
-  game's two LPs at once -- IKA-32); ``--threads`` sets the threads alone.
+  (`humanplay.use_threads`: the port's cell threads, IKA-32); ``--threads`` sets the
+  threads alone;
+* the deepening: the port's (IKA-464), its children's menus by the Q on the inference
+  server, so a game that deepens needs the Q (`install_deepening_q`; ``--width-only`` plays
+  without deepening).
 
 The person: ``terminal`` (you), ``first`` / ``random`` (stand-ins, for smoke runs),
 ``script:<file>`` (one answer per line: the selection as party numbers, then each choice
@@ -131,6 +134,27 @@ def install_menus(
         return NO_Q_FILL, []
     qrank.install(model)
     return fill, model.describe()
+
+
+def install_deepening_q(
+    q_path: Path, encoder, address: str | None, say: Callable[[str], None],  # noqa: ANN001
+) -> None:
+    """The Q the deepening ranks its children's menus by (IKA-464: the port's deepening, the
+    only one, reads the Q on the inference server, `portdeepen._q_server`). The menus' Q when
+    `install_menus` installed the server's; else the server's Q arm at ``q_path``, installed
+    for the children alone (a ``refs2`` root reads no Q, so its menus do not change). Stops
+    where there is none: a move would stop at its first deepening."""
+    installed = qrank._INSTALLED.get("")  # noqa: SLF001
+    if type(installed) is qrank.RemoteQ:
+        return
+    if address is None or encoder is None or not q_path.exists():
+        raise SystemExit(
+            f"the deepening ranks its children's menus by the Q on the inference server, and "
+            f"there is none at {q_path} (--q-model names one; --width-only plays without "
+            "deepening)"
+        )
+    qrank.install(humanplay.served_q(address, q_path, encoder))
+    say(f"note: the deepening's children are ranked by the Q {q_path.name}")
 
 
 def leaf_name(files: list[Path]) -> str:
@@ -324,10 +348,6 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--oracle", default="sall",
                     help="the root's swap oracle while deepening: sall (every legal action, the "
                     "default: IKA-307's allocation), s<W> (the rest of a width-W menu) or none")
-    ap.add_argument("--road", default=None, choices=humanplay.DEEPEN_ROADS,
-                    help="where a move is deepened (IKA-464): python (deepen.py, narrow's "
-                    "children) or port (the port's deepening, the Q's children). Default: "
-                    "humanplay.DEEPEN_ROAD")
     ap.add_argument("--selection-reading", default=None,
                     help="how the AI reads the selection (IKA-392, selection_deep): `none` (the "
                     "value function's one estimate of each cell), `default` (the spec below), "
@@ -343,9 +363,6 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--selection-workers", type=int, default=None,
                     help="worker processes reading the selection's cells (default: every logical "
                     "core)")
-    ap.add_argument("--child-q", type=int, default=None,
-                    help="the deepening's child menus: each side's k best by the Q (IKA-307), "
-                    "instead of narrow's damage-ranked 8")
     ap.add_argument("--ponder", default="on" if humanplay.PLAY_PONDER else "off", choices=("on", "off"),
                     help="on: the agent reads on while you choose (IKA-344) -- you are asked as "
                     "its move starts, and it deepens until you have chosen (its budget at least, "
@@ -439,7 +456,7 @@ def main(argv: list[str] | None = None) -> None:
     fill, q_files = install_menus(args.rank_fill, q_path, encoder, address, say)
 
     threads, cores = resolve_cores(args.threads, args.cores, args.clock)
-    humanplay.use_threads(threads, reg, (address, "value"))
+    humanplay.use_threads(threads)
     selection_reading, selection_seconds = resolve_selection(args, evaluate)
     if selection_reading is not None:
         from pokeuraou import selection_deep
@@ -461,13 +478,13 @@ def main(argv: list[str] | None = None) -> None:
     agent = humanplay.Agent(
         reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=cores,
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,
-        width_only=args.width_only, max_levels=args.max_levels or None, child_q=args.child_q,
+        width_only=args.width_only, max_levels=args.max_levels or None,
         oracle=_oracle_width(args.oracle), halt=halt,
-        ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds, road=args.road,
+        ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds,
         selection_reading=selection_reading, selection_seconds=selection_seconds,
     )
-    if args.child_q is not None and not qrank.is_q(fill):
-        raise SystemExit("--child-q ranks the children by the Q: it needs a Q (a q rank fill)")
+    if not args.width_only:
+        install_deepening_q(q_path, encoder, address, say)
     say(f"agent: leaf {name} / menus {fill}" + (f" ({', '.join(q_files)})" if q_files else "")
         + f" / {args.seconds:g} s a move on {cores} core(s), {args.clock} clock, {threads} thread(s)"
         + f" / oracle {args.oracle} / guard {args.max_levels or MAX_LEVELS}"

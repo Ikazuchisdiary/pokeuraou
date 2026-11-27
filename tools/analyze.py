@@ -49,6 +49,7 @@ from play_human import (  # noqa: E402
     NO_Q_FILL,
     Q_FILL,
     _oracle_width,
+    install_deepening_q,
     install_menus,
     leaf_name,
 )
@@ -161,7 +162,8 @@ def main(argv: list[str] | None = None) -> None:
     # The menus, as play_human picks them (IKA-341: the same fallback, one function).
     q_path = args.q_model or (repo_root() / DEFAULT_Q)
     fill, q_files = install_menus(args.rank_fill, q_path, encoder, address, say)
-    humanplay.use_threads(args.threads, reg, (address, "value"))
+    install_deepening_q(q_path, encoder, address, say)
+    humanplay.use_threads(args.threads)
 
     settings = analysis.Settings(
         width=args.width, oracle=_oracle_width(args.oracle), levels=args.max_levels,

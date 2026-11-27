@@ -475,6 +475,11 @@ class NodeResult:
 #: this is one Rust process per worker, which is what the parallelism wants.
 _NODES: dict[str, RustNode | None] = {}
 
+#: The process ids of this process's port processes (`RustNode`), from start to `close`:
+#: the memory watch reads them with this process (`analysis.tree_rss_gb`), since the port's
+#: deepening keeps its tree there (IKA-464).
+PORT_PIDS: set[int] = set()
+
 #: The environment variable the port reads its cell-thread count from (IKA-32).
 ENV_THREADS = "POKEURAOU_PORT_THREADS"
 
@@ -761,6 +766,8 @@ class RustNode:
             stderr=self._errors,
         )
         timing.child_process(self._process.pid)  # IKA-32: a no-op unless parts are kept
+        # IKA-464: a deepening's tree lives here, so the memory watch reads this process too.
+        PORT_PIDS.add(self._process.pid)
         # One thread, so a read that never returns can be abandoned. Killing the child
         # closes the pipe, which is what actually unblocks it.
         self._reader = ThreadPoolExecutor(max_workers=1)
@@ -780,6 +787,7 @@ class RustNode:
         if self._process.poll() is None:
             self._process.stdin.close()
             self._process.wait(timeout=5)
+        PORT_PIDS.discard(self._process.pid)
         self._reader.shutdown(wait=False)
         self._errors.close()
         # After the child is gone, so nothing is reading it when the pages go away.

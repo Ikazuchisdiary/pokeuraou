@@ -3,12 +3,12 @@
 What these hold:
 
 - **watching changes nothing**: a game on the count clock with a listener is the same game,
-  byte for byte, as without one; a deepened `search` with a progress callback returns the
-  same arrays as without (and the callback was called: the positive control);
+  byte for byte, as without one; a move deepened in the port with a progress callback returns
+  the same answer as without (and the callback was called: the positive control);
 - **the last step is the answer**: each move's last snapshot is ``done`` and its mixture and
   value are the recorded ones, bit for bit;
-- **the principal variation** is read off the tree: deepened pairs open their chance
-  branches (weights summing to one), others are the leaf's value;
+- **the principal variation** marks the root's pairs the port read deeper (``deep``); since
+  IKA-464 a pair opens no chance branches (the port keeps the tree below the root);
 - **the wire** gives back what was packed (the mixture as f64, so exactly);
 - **the server** serves the page and streams the game to a scripted person at the socket,
   whose answers make the same game as the same answers read from a script.
@@ -36,7 +36,6 @@ from pokeuraou.payoff import HP_SHARE
 from pokeuraou.pool import load_pool
 from pokeuraou.progress import Reader, Recorder, Snapshot
 from pokeuraou.regulation import repo_root
-from pokeuraou.search import search
 from pokeuraou.selfplay import position_from_sets
 
 PRICES = {("local", 1): NodeTime(fixed_ms=10.0, cell_ms=0.05)}
@@ -129,7 +128,7 @@ def test_a_listener_changes_no_game_and_each_move_ends_on_its_answer(pool) -> No
     assert kinds.index("prompt") > kinds.index("answer")
 
 
-def test_the_principal_variation_reads_the_tree(pool) -> None:  # noqa: ANN001
+def test_the_principal_variation_marks_the_pairs_read_deeper(pool) -> None:  # noqa: ANN001
     heard = Heard()
     _play(pool, PolicyPerson("random", 7), seed=7, listener=heard)
     done = [s for s in heard.of("step") if s.kind == "done"]
@@ -138,71 +137,60 @@ def test_the_principal_variation_reads_the_tree(pool) -> None:  # noqa: ANN001
     for s in done:
         assert s.pv and sum(p.p for p in s.pv) <= 1.0 + 1e-9
         assert [p.p for p in s.pv] == sorted((p.p for p in s.pv), reverse=True)
-    opened = 0
-    for pair in deep:
-        assert pair.branches
-        assert sum(b.weight for b in pair.branches) == pytest.approx(1.0)
-        for branch in pair.branches:
-            assert branch.what
-            if branch.node is not None:
-                opened += 1
-                assert 0.0 <= branch.node.value <= 1.0
-    assert opened, "no branch opened a node"
-    leafs = [pair for s in done for pair in s.pv if pair.read == "leaf"]
-    assert all(not pair.branches for pair in leafs)
+    # IKA-464: the port keeps the tree below the root, so no pair opens its branches.
+    assert all(not pair.branches for s in done for pair in s.pv)
+    assert any(pair.read == "leaf" for s in done for pair in s.pv)
 
 
-def test_a_deepened_search_is_the_same_with_a_callback(pool) -> None:  # noqa: ANN001
+def _move(reg, pos, me, rows, cols, cells, progress=None):  # noqa: ANN001, ANN202
+    return humanplay.solve_move(reg, pos, me, list(rows), list(cols), None, HP_SHARE.batch,
+                                budget=Budget.matrix(), exact=True, cells=cells, levels=4,
+                                progress=progress)
+
+
+def test_a_deepened_move_is_the_same_with_a_callback(pool) -> None:  # noqa: ANN001
     reg = pool.reg
     pos = position_from_sets(reg, list(pool.teams[0].sets[:4]), list(pool.teams[1].sets[:4]))
     rows = narrow(reg, pos, 0, limit=6).actions
     # Reversed, so the two sides' strategies do not sit at the same indices.
     cols = narrow(reg, pos, 1, limit=6).actions[::-1]
-    plain = search(reg, pos, rows, cols, HP_SHARE.batch, budget=Budget.matrix(), deepen=300)
+    plain = _move(reg, pos, 0, rows, cols, 300)
     seen: list[Snapshot] = []
-    reader = Reader(reg, pos, 0)
-    recorder = Recorder(reader, seen.append, decision=0, turn=pos.turn, started=0.0,
+    recorder = Recorder(Reader(reg, pos, 0), seen.append, decision=0, turn=pos.turn, started=0.0,
                         interval_ms=0.0, clock=lambda: 0.0)
-    tree: dict = {}
-    other: list[Snapshot] = []
-    side1 = Reader(reg, pos, 1)
+    deep_cells: set = set()
 
     def watch(step) -> None:  # noqa: ANN001
         recorder(step)
         if step.kind == "done":
-            other.append(side1.read(step))
-            tree.update({cell: [w for w, _ in kids] for cell, kids in step.root.children.items()})
+            deep_cells.update(step.root.deep)
 
-    watched = search(reg, pos, rows, cols, HP_SHARE.batch, budget=Budget.matrix(), deepen=300,
-                     progress=watch)
-    for name in ("row_strategy", "col_strategy", "row_ev_loss"):
-        assert getattr(watched.equilibrium, name).tobytes() == getattr(plain.equilibrium, name).tobytes()
-    assert watched.payoff.tobytes() == plain.payoff.tobytes()
-    assert watched.deepened == plain.deepened
-    assert recorder.calls == plain.deepened.expanded + plain.deepened.refused + 2
-    assert seen[-1].kind == "done" and seen[-1].our_p.tolist() == plain.equilibrium.row_strategy.tolist()
+    watched = _move(reg, pos, 0, rows, cols, 300, progress=watch)
+    assert watched.strategy.tobytes() == plain.strategy.tobytes()
+    assert watched.value == plain.value and watched.deepened == plain.deepened
+    assert plain.deepened.expanded > 0
+    assert recorder.calls >= 3 and seen[0].kind == "start" and seen[-1].kind == "done"
+    assert seen[-1].our_p.tolist() == plain.strategy.tolist()
     assert seen[-1].cells == plain.deepened.cells and seen[-1].depth == plain.deepened.depth
-    # Side 1 reads the column strategy (the two differ here, so a swap would show).
-    x, y = plain.equilibrium.row_strategy, plain.equilibrium.col_strategy
-    assert x.tolist() != y.tolist()
-    assert other[-1].our_p.tolist() == y.tolist() and other[-1].their_p.tolist() == x.tolist()
-    assert other[-1].value == 1.0 - seen[-1].value0
-    # The principal variation's branches are the tree's, weight for weight.
-    deep = [pair for pair in seen[-1].pv if pair.read == "deep"]
-    assert deep and any(len(tree[pair.cell]) > 1 for pair in deep)
+    # Side 1's read of the same position: its own mixture, the value its own.
+    side1: list[Snapshot] = []
+    other = _move(reg, pos, 1, rows, cols, 300, progress=Recorder(
+        Reader(reg, pos, 1), side1.append, decision=0, turn=pos.turn, started=0.0,
+        interval_ms=0.0, clock=lambda: 0.0))
+    assert side1[-1].our_p.tolist() == other.strategy.tolist()
+    assert side1[-1].value0 == other.value and side1[-1].value == 1.0 - other.value
+    # The principal variation marks the cells the port read deeper, and only those.
+    assert deep_cells
     for pair in seen[-1].pv:
-        assert (pair.read == "deep") == (pair.cell in tree)
-        if pair.read == "deep":
-            assert [b.weight for b in pair.branches] == tree[pair.cell]
+        assert (pair.read == "deep") == (pair.cell in deep_cells)
     # Not deepened: the depth-1 answer, reported as start and done.
     seen.clear()
-    depth1 = search(reg, pos, rows, cols, HP_SHARE.batch, budget=Budget.matrix(),
-                    progress=Recorder(Reader(reg, pos, 1), seen.append, decision=0, turn=1,
-                                      started=0.0, interval_ms=0.0, clock=lambda: 0.0))
+    depth1 = _move(reg, pos, 1, rows, cols, 0, progress=Recorder(
+        Reader(reg, pos, 1), seen.append, decision=0, turn=1, started=0.0, interval_ms=0.0,
+        clock=lambda: 0.0))
     assert [s.kind for s in seen] == ["start", "done"]
-    # Side 1's view: the column strategy is its mixture, the value its own.
-    assert seen[-1].our_p.tolist() == depth1.equilibrium.col_strategy.tolist()
-    assert seen[-1].value == 1.0 - float(depth1.equilibrium.value)
+    assert seen[-1].our_p.tolist() == depth1.strategy.tolist()
+    assert seen[-1].value == 1.0 - depth1.value
     assert all(p.read == "leaf" for p in seen[-1].pv)
 
 
@@ -214,8 +202,7 @@ def test_the_recorder_sends_the_first_and_the_last_and_throttles_between(pool) -
     seen: list[Snapshot] = []
     recorder = Recorder(Reader(reg, pos, 0), seen.append, decision=0, turn=1, started=0.0,
                         interval_ms=1e9, clock=lambda: 1.0)
-    search(reg, pos, rows, cols, HP_SHARE.batch, budget=Budget.matrix(), deepen=200,
-           progress=recorder)
+    _move(reg, pos, 0, rows, cols, 200, progress=recorder)
     assert recorder.calls > 2
     assert [s.kind for s in seen] == ["start", "done"] and recorder.sent == 2
 
@@ -223,45 +210,20 @@ def test_the_recorder_sends_the_first_and_the_last_and_throttles_between(pool) -
 # ------------------------------------------------------------------------ the wire
 
 
-def test_the_branches_say_their_draws_and_the_nodes_their_field(pool) -> None:  # noqa: ANN001
-    """IKA-345: a deepened pair's branches are named by the draws that split them (the
-    port's chance tags) -- siblings never read the same, draws and results together -- and
-    each branch's node carries each side's actives; labels come with their slots."""
+def test_the_labels_come_with_their_slots_and_targets(pool) -> None:  # noqa: ANN001
+    """IKA-345: labels come with their slots, and each move's target as a Pokemon of a side.
+    (Its branches named by their draws and its nodes' fields went with Python's deepening's
+    tree, IKA-464.)"""
     heard = Heard()
     _play(pool, PolicyPerson("random", 7), seed=7, listener=heard)
     done = [s for s in heard.of("step") if s.kind == "done"]
-    split = named = 0
     for s in done:
         for label, action in zip(s.our_labels, s.ours, strict=True):
             assert [slot for slot, _t in label.parts] == [a.slot for a in action.slots]
-        stack = list(s.pv)
-        while stack:
-            pair = stack.pop()
-            if len(pair.branches) > 1:
-                split += 1
-                texts = []
-                for b in pair.branches:
-                    named += bool(b.causes)
-                    texts.append((
-                        tuple((c.head, c.body) for c in b.causes),
-                        tuple(tuple((c.name, c.hp_from, c.hp_to, c.entered, c.fainted, c.status)
-                                    for c in side) for side in b.changes),
-                    ))
-                # The draws, with the results, tell every sibling apart.
-                assert len(set(texts)) == len(texts), texts
-            for b in pair.branches:
-                if b.node is not None:
-                    assert len(b.node.field) == 2
-                    assert all(len(side) >= 1 for side in b.node.field)
-                    assert any(m is not None for side in b.node.field for m in side)
-                    stack.extend(b.node.pairs)
     # The parts carry each move's target as a Pokemon of a side (drawn as its icon).
     aimed = [p for s in done for label in s.our_labels for p in label.rich if p.target_side >= 0]
     assert aimed and all(p.target_name and p.target_sprite and p.verb for p in aimed)
     assert all(p.target_name not in p.verb for p in aimed)
-    # Positive controls: the tree split somewhere, and the port named the draws.
-    assert split, "no pair with more than one branch; the check would be vacuous"
-    assert named, "no branch named by its draws"
 
 
 def test_the_wire_gives_back_what_it_packed(pool) -> None:  # noqa: ANN001

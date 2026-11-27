@@ -533,35 +533,28 @@ def tail_wants_default_q(tail: Sequence[str]) -> bool:
     The launchers (`generate_queue.py`, `match_queue.py`) pass everything after ``--`` to the
     workers untouched. Read here for what decides the Q: each arm's ``--rank-leaf`` and
     ``--rank-fill`` (``--baseline-*`` for a board's other arm), resolved as the worker
-    resolves them (`search.resolve_rank_fill`), and a ``--deepen`` whose oracle or children
-    rank by the default Q. A tail that names its own Q (``--q-arm`` / ``--q-model``) wants
-    none from the launcher.
+    resolves them (`search.resolve_rank_fill`). A tail that names its own Q (``--q-arm`` /
+    ``--q-model``) wants none from the launcher. (A worker's ``--deepen`` went with the
+    workers' deepening; IKA-464 removed the last of Python's deepening.)
     """
     import argparse
 
-    from .deepen import deepen_spec
     from .search import resolve_rank_fill
 
     ap = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     for arm in ("", "baseline-"):
         ap.add_argument(f"--{arm}rank-leaf", action="store_true")
         ap.add_argument(f"--{arm}rank-fill", default=None)
-        ap.add_argument(f"--{arm}deepen", default=None)
     ap.add_argument("--q-arm", default=None)
     ap.add_argument("--q-model", default=None)
     got, _ = ap.parse_known_args(list(tail))
     if got.q_arm is not None or got.q_model is not None:
         return False
-    for leafy, fill, deepen in ((got.rank_leaf, got.rank_fill, got.deepen),
-                                (got.baseline_rank_leaf, got.baseline_rank_fill,
-                                 got.baseline_deepen)):
+    for leafy, fill in ((got.rank_leaf, got.rank_fill),
+                        (got.baseline_rank_leaf, got.baseline_rank_fill)):
         label = resolve_rank_fill(fill, leafy)
         if leafy and is_q(label) and not q_name(label):
             return True
-        if deepen is not None:
-            spec = deepen_spec(deepen)
-            if spec.q_probe is not None or spec.child_q is not None:
-                return True
     return False
 
 

@@ -10,7 +10,7 @@ seats read, what is outside the clock and what a pair is). A condition is
 ``name:key=value,...`` with the keys ``seconds`` (required), ``threads``, ``cores``,
 ``clock`` (wall|count), ``oracle`` (sall|none|s<W>), ``levels`` (the deepening's guard; 0:
 `deepen.MAX_LEVELS` unrecorded), ``width_only``, ``width`` (fixed, in place of the rule) and
-``child_q``. A key left out is the human-play default -- what ``tools/play_human.py``
+``selection``. A key left out is the human-play default -- what ``tools/play_human.py``
 plays with no flag (IKA-343) -- and so are the leaf
 (`play_human.DEFAULT_VALUE`), the menus (``q-nocover`` by `qrank.DEFAULT_Q`; a match stops
 without the Q, as a board does, IKA-338) and the bench belief. **The first --arm is the
@@ -26,8 +26,8 @@ The pairs are handed out by `workqueue.run_workers` to ``--parallel`` processes,
 a time in each. Each process is held to its own share of the logical cores (``--cpu-sets``;
 by default the machine split evenly, so ``--parallel 2`` gives each game four physical
 cores, what a person's game uses), and the processes it starts inherit it. A process that
-fails stops the run (``workers.json``, IKA-336), and so does a process whose deepening
-workers died or whose memory watch stopped a move's deepening (``--allow-memory-stops``).
+fails stops the run (``workers.json``, IKA-336), and so does a process whose memory watch
+stopped a move's deepening (``--allow-memory-stops``).
 The SPRT reads the pairs in index order, once the queue has resolved them.
 
 A run longer than one sitting is played in pieces: ``--resume`` with the next ``--start``
@@ -293,7 +293,6 @@ def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  
 def worker(args: argparse.Namespace) -> None:
     import numpy as np
 
-    from pokeuraou import deepen
     from pokeuraou.damage import register_mega_stones
     from pokeuraou.pool import draw_pair, load_pool
 
@@ -304,8 +303,6 @@ def worker(args: argparse.Namespace) -> None:
     tested, other = conditions(args)
     values, q_path = files(args)
     other_values = other_files(args)
-    if other_values is not None and (tested.threads != 1 or other.threads != 1):
-        raise SystemExit("--other-value: the deepening workers hold one leaf, so threads=1 in both")
     parse_bench_drop(args.bench_drop)
     pool = load_pool(args.pool)
     reg = pool.reg
@@ -321,7 +318,7 @@ def worker(args: argparse.Namespace) -> None:
         qrank.install(humanplay.served_q(args.q_inference, q_path, encoder))
     device = f"server {args.inference}"
     q = qrank.installed()
-    humanplay.use_threads(threads, reg, (args.inference, "value"))
+    humanplay.use_threads(threads)
     if args.selection_pool and (tested.selection is not None or other.selection is not None):
         from pokeuraou import selection_deep
 
@@ -330,7 +327,6 @@ def worker(args: argparse.Namespace) -> None:
             reg, readers, humanplay.worker_spec(address=args.inference, q_path=q_path),
             rank_fill=Q_FILL))
         print(f"selection pool: {readers} worker process(es)", file=sys.stderr, flush=True)
-    started_workers = deepen.workers(reg)
     halt = humanplay.MemoryBrake()  # the move's own growth, IKA-355
     watch = memory_watch(
         analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb),
@@ -361,7 +357,7 @@ def worker(args: argparse.Namespace) -> None:
         f"{other_note}"
         f"  leaf {match.leaf_name} ({', '.join(str(v) for v in values)}) on {device}, "
         f"menus {Q_FILL} ({', '.join(q.describe())}), bench drop {args.bench_drop}\n"
-        f"  deepening workers {started_workers}, threads {threads}, "
+        f"  threads {threads}, "
         f"port threads {args.port_threads or threads}, "
         f"seed {args.seed}, max turns {args.max_turns}",
         file=sys.stderr, flush=True,
@@ -393,10 +389,8 @@ def worker(args: argparse.Namespace) -> None:
                 lines = timematch.play_pair(match, pair, teams,
                                             games=(0,) if args.single_game else (0, 1))
             accounts = [line.pop("transcript") for line in lines] if args.transcript else []
-            alive = deepen.workers_alive(reg)
             peak = watch.peak
             for line in lines:
-                line["deepenWorkers"] = [started_workers, alive]
                 line["worker"] = args.worker
                 # The memory watch's worst so far in this process: its own and its workers'
                 # resident memory, the host's least free, the card's most held (all
@@ -418,11 +412,6 @@ def worker(args: argparse.Namespace) -> None:
                             head["adjudicated"] = line["adjudicated"]
                         handle.write((json.dumps({**head, "transcript": account},
                                                  ensure_ascii=False) + "\n").encode("utf-8"))
-            if alive < started_workers:
-                raise SystemExit(
-                    f"a deepening worker died during pair {pair} ({alive} of {started_workers} "
-                    "alive): the reads after it were slower than the configured agent's"
-                )
             braked = sum(line["memoryStops"] for line in lines)
             if braked and not args.allow_memory_stops:
                 # A move the memory watch stopped did not read what its condition says: the
@@ -634,8 +623,6 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
     other_inference = args.other_inference
     q_inference = args.q_inference
     other_values = other_files(args)
-    if other_values is not None and (tested.threads != 1 or other.threads != 1):
-        raise SystemExit("--other-value: the deepening workers hold one leaf, so threads=1 in both")
     if args.served:
         from pokeuraou.inference import start_server
         from pokeuraou.pool import load_pool

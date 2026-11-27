@@ -5,7 +5,7 @@ What these hold:
 
 - **the same number of steps is the same answer**: a read stopped after N steps of the
   deepening gives the mixture and the value bit for bit again -- with the page listening,
-  and with the cells expanded ahead on helper threads -- and the deepening did move the
+  and with the port on two cell threads -- and the deepening did move the
   answer on the way (the control: N steps is not the depth-1 answer);
 - **a stop from elsewhere ends the read** at the top of the next step, and the read says
   why it stopped; the memory watch stops it before a limit and says which;
@@ -29,7 +29,7 @@ import time
 import numpy as np
 import pytest
 
-from pokeuraou import analysis, deepen, humanplay, liveview
+from pokeuraou import analysis, humanplay, liveview, rustnode
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.humanplay import Agent, NodeTime, PolicyPerson
 from pokeuraou.pool import load_pool
@@ -160,11 +160,10 @@ def test_the_same_steps_give_the_same_answer_bit_for_bit(pool, record) -> None: 
     again = analyzer.run(game, point, max_steps=steps)
     heard = []
     watched = analyzer.run(game, point, max_steps=steps, listener=lambda k, p: heard.append((k, p)))
-    before = deepen.ahead_counts()["expanded"]
-    humanplay.use_threads(2)  # the cells expanded ahead by helper threads (IKA-32 stage 2)
+    humanplay.use_threads(2)  # the port's cell threads (IKA-32 stage 1)
     try:
+        threads = rustnode.port_threads()
         spread = analyzer.run(game, point, max_steps=steps)
-        helped = deepen.ahead_counts()["expanded"] - before
     finally:
         humanplay.use_threads(1)
     for other in (again, watched, spread):
@@ -173,7 +172,7 @@ def test_the_same_steps_give_the_same_answer_bit_for_bit(pool, record) -> None: 
         assert other.ours == first.ours and other.theirs == first.theirs
         assert other.model == first.model
         assert other.deepened == first.deepened
-    assert helped > 0, "the helpers expanded nothing: the threads' road was not taken"
+    assert threads == 2, "the port did not read on two cell threads"
     # The control: the steps moved the answer (else the comparison could not fail).
     start = analyzer.run(game, point, max_steps=0)
     assert start.steps == 0

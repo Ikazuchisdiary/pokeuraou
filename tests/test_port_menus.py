@@ -1,7 +1,7 @@
-"""IKA-389 (`portmenus`): a read's children's Q menus built in the port are `_q_menus`' to
-the bit -- the legal pools action for action and in order, the Q's arrays byte for byte, the
-Q's requests to the inference server one for one, the scores (numpy's BLAS, the mean where
-the game has no answer) and the menus.
+"""IKA-389 (`portmenus`): a depth-2 read's children's Q menus built in the port are those of
+`child_menus`' Python road to the bit -- the legal pools action for action and in order, the
+Q's arrays byte for byte, the Q's requests to the inference server one for one, the scores
+(numpy's BLAS, the mean where the game has no answer) and the menus.
 
 The server is `inference.serve` with a numpy stand-in Q that records every request (each
 array's name, dtype, shape and bytes, and the batch it came in) and whose matrix moves with
@@ -14,12 +14,11 @@ from __future__ import annotations
 
 import base64
 import dataclasses
-import hashlib
 
 import numpy as np
 import pytest
 
-from pokeuraou import deepen, portlp, portmenus, portserved, qhead, qrank, rustnode
+from pokeuraou import portlp, portmenus, portserved, qhead, qrank, rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
@@ -29,47 +28,7 @@ from pokeuraou.teams import load_roster
 
 from ._positions import chomp_gambit as _chomp_gambit
 from ._positions import played as _played
-from ._served import serve
-
-
-class QStub:
-    """A Q in the server: each request's arrays kept (with its batch's size), and a matrix of
-    a smooth pair score of the two actions' rows that moves with the batch's size."""
-
-    files = ["q-stub"]
-    digests = ["0" * 64]
-    properties = True
-
-    def __init__(self, fingerprint: str) -> None:
-        self.fingerprint = fingerprint
-        self.log: list[tuple[int, str]] = []
-
-    def _one(self, arrays: dict[str, np.ndarray], size: int) -> np.ndarray:
-        digest = hashlib.sha256()
-        for name in (*qhead.POSITION_ARRAYS, "acts0", "acts1", "feats0", "feats1"):
-            array = arrays[name]
-            digest.update(f"{name}{array.dtype.str}{array.shape}".encode())
-            digest.update(np.ascontiguousarray(array).tobytes())
-        self.log.append((size, digest.hexdigest()))
-        base = float(arrays["mon"].astype(np.float64).sum()) * 1e-4
-        w = np.arange(1, 15, dtype=np.float64)
-
-        def vec(side: int) -> np.ndarray:
-            acts = arrays[f"acts{side}"].reshape(len(arrays[f"acts{side}"]), -1).astype(np.float64)
-            feats = arrays[f"feats{side}"].astype(np.float64)
-            return np.tanh(acts @ w * 0.01 + feats.sum(axis=1) * 0.05 + base)
-
-        u, v = vec(0), vec(1)
-        # Cyclic in the difference, so the games mix (as a Q's do).
-        d = u[:, None] - v[None, :]
-        logit = np.sin(9.0 * d) + 0.2 * d
-        return 1.0 / (1.0 + np.exp(-logit)) + size * 1e-12
-
-    def __call__(self, arrays: dict[str, np.ndarray]) -> np.ndarray:
-        return self._one(arrays, 1)
-
-    def batch(self, requests: list[dict[str, np.ndarray]]) -> list[np.ndarray]:
-        return [self._one(r, len(requests)) for r in requests]
+from ._served import QStub, serve
 
 
 def _variant(pos: Position, edit) -> Position:  # noqa: ANN001
@@ -273,25 +232,25 @@ def served(roster, monkeypatch):  # noqa: ANN001, ANN201
 def _both(reg, positions, width, stub):  # noqa: ANN001, ANN202
     portmenus.ON[0] = False
     del stub.log[:]
-    python = deepen._q_menus(reg, positions, width)
+    python = portmenus.child_menus(reg, positions, width)
     python_log = list(stub.log)
     portmenus.ON[0] = True
     del stub.log[:]
     before = dict(portmenus.COUNTS)
-    ported = deepen._q_menus(reg, positions, width)
+    ported = portmenus.child_menus(reg, positions, width)
     portmenus.ON[0] = False
     assert stub.log == python_log
     assert ported == python
     return portmenus.COUNTS["asked"] - before["asked"]
 
 
-@pytest.mark.parametrize("chunk", [deepen.Q_MENU_CHUNK, 3])
+@pytest.mark.parametrize("chunk", [portmenus.Q_MENU_CHUNK, 3])
 def test_the_ports_menus_are_q_menus(roster, served, monkeypatch, chunk) -> None:  # noqa: ANN001
     """Every child's two menus and every request the Q was sent, at the default chunk and at
     a chunk of 3 (several requests a call). The positive control: the positions the port
     ranked, and games whose support ties (the order among it is the products' last bits)."""
     stub, _model = served
-    monkeypatch.setattr(deepen, "Q_MENU_CHUNK", chunk)
+    monkeypatch.setattr(portmenus, "Q_MENU_CHUNK", chunk)
     reg = roster.reg
     positions = _played(roster) + [v for p in _played(roster)[:2] for v in _variants(p)]
     asked = 0

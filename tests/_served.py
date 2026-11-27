@@ -2,6 +2,7 @@
 that `tools/agent_drift.py` can use it without importing the tests). Its public names, as before."""
 
 from pokeuraou.standin import (  # noqa: F401
+    QStub,
     close_all,
     encoded_of,
     hp_share_leaf,
@@ -14,5 +15,6 @@ from pokeuraou.standin import (  # noqa: F401
     served_q,
     serving,
     steep_leaf,
+    stub_q,
     subset,
 )

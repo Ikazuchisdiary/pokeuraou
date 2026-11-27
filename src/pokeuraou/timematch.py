@@ -35,9 +35,7 @@ teams, the leads and the first chance draws cancel between them; a pair scores 0
 alternates by pair.
 
 **Threads.** A condition's ``threads`` are applied before each of its reads
-(`spread_threads`): the port's cell threads, the deepening's cells expanded ahead and a
-big game's two LPs at once, as `humanplay.use_threads` spreads them. The worker processes
-that expand ahead are started once, for the larger of the two conditions.
+(`spread_threads`): the port's cell threads, as `humanplay.use_threads` spreads them.
 
 **Ponder** (IKA-344) is not a condition here: the user decided on 9/27 not to use it (a
 game whose two clocks differ is rare in practice), so both seats play with it off, as
@@ -58,7 +56,7 @@ from typing import Any
 
 import numpy as np
 
-from . import deepen, equilibrium, humanplay, rustnode, selection_deep
+from . import humanplay, rustnode, selection_deep
 from .deepen import ALL_ACTIONS, MAX_LEVELS
 from .selfplay import _do_self_switch_node, _sample_index
 from .sprt import elo_of
@@ -87,9 +85,6 @@ class Condition:
     #: A fixed menu width in place of the width rule (``width=W``; with ``width_only`` it
     #: is a board's ``d1@W``), or None: the rule.
     width: int | None = None
-    child_q: int | None = None
-    #: Where a deepened move is read (`humanplay.DEEPEN_ROADS`, IKA-464); None: the module's.
-    road: str | None = None
     #: The selection this side plays from (`selection_deep`, IKA-392): a reading spec (its
     #: commas written as semicolons), else the leaf's solve every game has played. Each side
     #: draws its four, and holds its belief about the other's, from the solve of its own
@@ -121,8 +116,6 @@ class Condition:
             + (f", width fixed at {self.width}" if self.width is not None else "")
             + (f", selection read {self.selection}" if self.selection is not None else "")
             + (f" for {self.selection_seconds:g} s" if self.selection_seconds is not None else "")
-            + (f", child Q {self.child_q}" if self.child_q is not None else "")
-            + (f", deepened in the {self.road}" if self.road is not None else "")
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -134,7 +127,7 @@ class Condition:
 
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
-                  "width", "child_q", "road", "selection",
+                  "width", "selection",
                   "selection_seconds")
 
 
@@ -194,12 +187,6 @@ def parse_condition(spec: str) -> Condition:
             got["oracle"] = _oracle(value)
         elif key == "levels":
             got["max_levels"] = int(value) or None
-        elif key == "child_q":
-            got["child_q"] = int(value)
-        elif key == "road":
-            if value not in humanplay.DEEPEN_ROADS:
-                raise ValueError(f"road is one of {humanplay.DEEPEN_ROADS}, not {value!r}")
-            got["road"] = value
         elif key == "width":
             got[key] = int(value)
         elif key == "selection_seconds":
@@ -231,19 +218,12 @@ PORT_THREADS: int | None = None
 
 
 def spread_threads(reg: Any, threads: int) -> None:  # noqa: ANN401
-    """`humanplay.use_threads` without starting or stopping the worker processes: the
-    port's cell threads, the cells expanded ahead and the two LPs at once for ``threads``,
-    with the worker processes already started for the process."""
+    """`humanplay.use_threads` for a read: the port's cell threads for ``threads`` (or
+    `PORT_THREADS` where it is set)."""
+    del reg
     port = PORT_THREADS or threads
     if (rustnode.port_threads() or 1) != port:
         rustnode.set_port_threads(port)
-    remote = deepen.workers(reg) > 0
-    deepen.set_ahead(
-        0 if threads == 1 else threads,
-        helpers=humanplay.AHEAD_HELPERS if threads >= 4 else 1,
-        port_threads=threads, deeper=humanplay.AHEAD_DEEPER if remote else 0,
-    )
-    equilibrium.set_lp_pair(0 if threads == 1 else humanplay.LP_PAIR_CELLS)
 
 
 # ----------------------------------------------------------------------------- the game
@@ -507,7 +487,7 @@ class Match:
             selection_reading=condition.selection,
             # A board reads the stages a reading names, on the count clock (no seconds).
             selection_seconds=condition.selection_seconds, max_levels=condition.max_levels,
-            child_q=condition.child_q, road=condition.road, oracle=condition.oracle, halt=self.halt,
+            oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).
             ponder=False, ponder_seconds=humanplay.PLAY_PONDER_SECONDS,
         )

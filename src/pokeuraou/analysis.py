@@ -6,10 +6,10 @@ board game or a generated one (`pool_match` / `poolplay` records) -- or the move
 a game still being played (``play_human --current-out``) is read from one side's view: its
 bench belief (the other side's completions of its unseen bench, weighted by the selection
 solve as `humanplay` weighs them), its menus at a fixed width, and then the best-first
-deepening (`deepen.deepen_belief` / `deepen.deepen_root`, the ``m...h`` reading) with the
-root's swap oracle, as IKA-307 recommends for a long read: width first, the rest to
-deepening with the oracle. The deepening is anytime, so the answer after every step is an
-answer, and the screen of IKA-332 shows it as it forms.
+deepening in the port (`portdeepen`, IKA-464) with the root's swap oracle, as IKA-307
+recommends for a long read: width first, the rest to deepening with the oracle. The
+deepening is anytime, so the answer after every step is an answer, and the screen of
+IKA-332 shows it as it forms.
 
 **No budget.** The deepening is handed `ENDLESS` cells and a `StopCost` that reads the wall
 clock until a `threading.Event` is set, and the budget's full value after it: the loop
@@ -32,7 +32,8 @@ filled at depth 1 and the root re-solved, the tree already deepened kept (`deepe
 `Widen`). A narrower width, or any other change, reads again from the start as before.
 
 **Memory.** A long read grows the tree. `MemoryWatch` reads the host's free memory, this
-process's resident memory with its worker processes', and the card's (``nvidia-smi``),
+process's resident memory with its worker processes' and its port processes' (the tree is
+the port's, IKA-464), and the card's (``nvidia-smi``),
 and stops the read with a reason before a limit (`Limits`).
 """
 
@@ -57,7 +58,7 @@ import numpy as np
 
 from .actions import SideAction
 from .budget import Budget
-from .deepen import ALL_ACTIONS, GAP_FLOOR, MAX_LEVELS, Step, _Node
+from .deepen import ALL_ACTIONS, MAX_LEVELS, Step
 from .equilibrium import EquilibriumError
 from .hidden import DEFAULT_BENCH_DROP, completions, seen_slots
 from .humanplay import (
@@ -345,40 +346,15 @@ def load_point(reg: Regulation, path: Path) -> Game:
 # ----------------------------------------------------------------------------- the guard
 
 
-def _signal_now(node: _Node) -> np.ndarray:
-    """`deepen._signal`'s matrix without writing its cache (the reader writes nothing)."""
-    if node.signal is not None:
-        return node.signal
-    eq = node.equilibrium
-    gap = eq.row_ev_loss[:, None] + eq.col_ev_loss[None, :]
-    return node.payoff * (1.0 - node.payoff) / (gap + GAP_FLOOR)
-
-
-def guard_lines(root: Any, guard: int) -> tuple[int, int]:  # noqa: ANN401 - _Node or _BeliefRoot
-    """(lines at the guard, nodes below the root): the deepened lines whose last node sits
-    ``guard`` levels down with a cell still worth a step -- what the report's ``lines``
-    count as ``guard`` when the read ends (`deepen._Watch`) -- and the tree's size. Reads
-    the tree, writes nothing."""
-    lines = 0
-    nodes = 0
-    stack = list(root.children.values())
-    while stack:
-        for _weight, child in stack.pop():
-            if not isinstance(child, _Node):
-                continue
-            nodes += 1
-            if child.children:
-                stack.extend(child.children.values())
-                continue
-            if child.level < guard:
-                continue
-            signal = _signal_now(child)
-            live = np.ones(signal.shape, dtype=bool)
-            for cell in child.refused:
-                live[cell] = False
-            if live.any() and float(signal[live].max()) > 0.0:
-                lines += 1
-    return lines, nodes
+def guard_lines(root: Any) -> tuple[int, int]:  # noqa: ANN401 - a deepen.Root
+    """(lines at the guard, nodes below the root): the deepened lines whose last node sits at
+    the read's guard with a cell still worth a step -- what the report's ``lines`` count as
+    ``guard`` -- and the tree's size, as the port counted them in its snapshot (0 and 0 at a
+    depth-1 answer)."""
+    snap = getattr(root, "port", None)
+    if not snap:
+        return 0, 0
+    return int(snap["lines"][2]), int(snap["nodes"])
 
 
 # ----------------------------------------------------------------------------- memory
@@ -467,15 +443,18 @@ def process_rss_gb(pid: int | None = None) -> float | None:
 
 
 def tree_rss_gb() -> float | None:
-    """This process's resident memory with its live children's (the deepening's worker
-    processes)."""
+    """This process's resident memory with its live worker processes' and its port
+    processes' (`rustnode.PORT_PIDS`: the port's deepening keeps its tree there, IKA-464)."""
     import multiprocessing
+
+    from . import rustnode
 
     own = process_rss_gb()
     if own is None:
         return None
-    for child in multiprocessing.active_children():
-        got = process_rss_gb(child.pid)
+    pids = {child.pid for child in multiprocessing.active_children()} | set(rustnode.PORT_PIDS)
+    for pid in sorted(p for p in pids if p is not None):
+        got = process_rss_gb(pid)
         if got is not None:
             own += got
     return own
@@ -654,9 +633,6 @@ class Settings:
     open_information: bool = False
     #: Least milliseconds between two steps sent to the page.
     interval_ms: float = 100.0
-    #: Least milliseconds between two walks of the tree for the guard's count; a walk that
-    #: took t waits at least 10 t (a big tree is walked less often).
-    guard_every_ms: float = 1000.0
 
     def oracle_label(self) -> str:
         if self.oracle is None:
@@ -730,14 +706,12 @@ class Session:
         guard: int,
         recorder: Callable[[Step], None] | None = None,
         max_steps: int | None = None,
-        guard_every_ms: float = 1000.0,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.stop = stop
         self.guard = guard
         self.recorder = recorder
         self.max_steps = max_steps
-        self.guard_every_ms = guard_every_ms
         self.clock = clock
         self.started = clock()
         self.steps = 0
@@ -746,8 +720,6 @@ class Session:
         self.depth = 1
         self.reason = ""
         self.why = ""
-        self._walked = -math.inf
-        self._walk_ms = 0.0
         self.lock = threading.Lock()
         #: The read's width, raised while it runs (IKA-354), and what it reads (`Service`
         #: compares a new request with it: source, game, decision, side, guard).
@@ -768,12 +740,8 @@ class Session:
         if step.kind not in ("start", "done"):
             self.steps = step.index
         self.depth = step.depth
-        now = self.clock()
-        wait = max(self.guard_every_ms, 10.0 * self._walk_ms)
-        if step.kind in ("start", "done") or (now - self._walked) * 1000.0 >= wait:
-            self.guard_count, self.nodes = guard_lines(step.root, self.guard)
-            self._walked = self.clock()
-            self._walk_ms = (self._walked - now) * 1000.0
+        # The port counts them in each snapshot: read at every step, nothing walked here.
+        self.guard_count, self.nodes = guard_lines(step.root)
         if self.recorder is not None:
             self.recorder(step)
         if self.max_steps is not None and step.kind != "done" and step.index >= self.max_steps:
@@ -973,7 +941,6 @@ class Analyzer:
             )
         session = Session(
             stop, guard=settings.levels, recorder=recorder, max_steps=max_steps,
-            guard_every_ms=settings.guard_every_ms,
         )
         # The menus the root holds so far, and the widths it was widened to (IKA-354).
         held = ([a.to_choice() for a in ours], [a.to_choice() for a in theirs])

@@ -16,8 +16,8 @@ from pokeuraou.encode import Encoder
 from pokeuraou.narrow import narrow
 from pokeuraou.selfplay import position_from_sets
 
+from ._served import QStub
 from .test_humanplay import _noisy, pool  # noqa: F401 - the fixture
-from .test_port_menus import QStub
 
 
 @pytest.fixture
@@ -60,7 +60,7 @@ def _read(pool, pos, me, leaf, cells, **kwargs):  # noqa: ANN001, ANN003, ANN202
     ours = narrow(pool.reg, pos, 0, limit=6).actions
     theirs = narrow(pool.reg, pos, 1, limit=6).actions
     return humanplay.solve_move(pool.reg, pos, me, list(ours), list(theirs), None, leaf,
-                                budget=Budget.matrix(), exact=True, cells=cells, road="port",
+                                budget=Budget.matrix(), exact=True, cells=cells,
                                 **kwargs)
 
 
@@ -95,29 +95,33 @@ def test_the_swap_oracle_brings_in_actions_from_outside(pool, served) -> None:  
     assert widened > 0, "the oracle never added an action"
 
 
+def _python_deepening() -> dict:
+    """Python's deepening's answers on these positions, frozen at 887df85 before IKA-464 removed
+    it (`tests/fixtures/ika464-python-deepening.json`; its children by the Q's 8, ``c8``)."""
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures" / "ika464-python-deepening.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_the_port_s_tree_is_the_python_deepening_with_the_q_s_children(pool, served) -> None:  # noqa: ANN001, F811
     """The port's read is `deepen.py`'s with the children by the Q's 8 (``c8``): the same steps,
-    the same value and the same mixture where both took the same number of steps. Without the
-    oracle, so the steps are the deepening's alone; at both seats, on mixed answers."""
-    same = 0
+    the same depth, the same value and the same mixture as Python's deepening gave on the same
+    reads before IKA-464 removed it (the frozen answers). Without the oracle, so the steps are
+    the deepening's alone; at both seats, on mixed answers."""
+    want = {(r["position"], r["me"]): r for r in _python_deepening()["tree"]}
     mixed = 0
-    for pos in _positions(pool, 4, seed=11):
+    for p, pos in enumerate(_positions(pool, 4, seed=11)):
         for me in (0, 1):
             port = _read(pool, pos, me, served, 600, levels=4)
-            python = humanplay.solve_move(
-                pool.reg, pos, me, list(narrow(pool.reg, pos, 0, limit=6).actions),
-                list(narrow(pool.reg, pos, 1, limit=6).actions), None, served,
-                budget=Budget.matrix(), exact=True, cells=600, levels=4, child_q=8, road="python")
-            assert port.deepened.expanded > 0
-            if port.deepened.expanded != python.deepened.expanded:
-                continue
-            same += 1
-            assert port.deepened.depth == python.deepened.depth
-            assert port.value == pytest.approx(python.value, abs=1e-9)
-            np.testing.assert_allclose(port.strategy, python.strategy, atol=1e-7)
+            python = want[p, me]
+            assert port.deepened.expanded == python["expanded"] > 0, (p, me)
+            assert port.deepened.depth == python["depth"]
+            assert port.value == pytest.approx(python["value"], abs=1e-9)
+            np.testing.assert_allclose(port.strategy, python["strategy"], atol=1e-7)
             mixed += float(np.max(port.strategy)) < 1 - 1e-6
-    assert same == 8, f"only {same} of 8 reads took the same steps"
-    assert mixed >= 1, "no mixed answer"
+    assert len(want) == 8 and mixed >= 1, "no mixed answer"
 
 
 def test_a_read_widened_mid_way_keeps_its_tree(pool, served) -> None:  # noqa: ANN001, F811
@@ -136,56 +140,55 @@ def test_a_read_widened_mid_way_keeps_its_tree(pool, served) -> None:  # noqa: A
         return (extra, []) if len(asked) == 2 else None
 
     got = humanplay.solve_move(pool.reg, pos, 0, ours, theirs, None, served, budget=Budget.matrix(),
-                               exact=True, cells=3000, levels=4, road="port", grow=grow)
+                               exact=True, cells=3000, levels=4, grow=grow)
     assert len(asked) >= 2 and got.deepened.grown == len(extra) == 2
     assert got.deepened.grown_cells == 2 * len(theirs)
     assert len(got.ours) == len(ours) + 2 and got.deepened.expanded > 0
     plain = humanplay.solve_move(pool.reg, pos, 0, ours, theirs, None, served,
-                                 budget=Budget.matrix(), exact=True, cells=3000, levels=4, road="port")
+                                 budget=Budget.matrix(), exact=True, cells=3000, levels=4)
     assert plain.deepened.grown == 0 and len(plain.ours) == len(ours)
 
 
-def _move(pool, pos, served, cells, cost, road, **kwargs):  # noqa: ANN001, ANN003, ANN202, F811
+def _move(pool, pos, served, cells, cost, **kwargs):  # noqa: ANN001, ANN003, ANN202, F811
     ours = list(narrow(pool.reg, pos, 0, limit=6).actions)
     theirs = list(narrow(pool.reg, pos, 1, limit=6).actions)
     return humanplay.solve_move(pool.reg, pos, 0, ours, theirs, None, served,
                                 budget=Budget.matrix(), exact=True, cells=cells, cost=cost,
-                                levels=4, road=road, **kwargs)
+                                levels=4, **kwargs)
 
 
 def test_a_priced_budget_is_read_as_the_python_deepening_reads_it(pool, served) -> None:  # noqa: ANN001, F811
     """A count clock's budget priced by `deepen.COSTS` (a person's count-clock game, the tests'
     agents): the port reads the cost's units before every step, the levels and the root's cells
-    at each refinement included, so it takes the steps `deepen.py` takes on the same budget
-    (``c8``), and only its last step passes the budget."""
+    at each refinement included, so it takes the steps `deepen.py` took on the same budget
+    (``c8``, the frozen answers), and only its last step passes the budget."""
     from pokeuraou.deepen import COSTS, Cost
 
     cost = COSTS["local", 1]
     assert cost.level and cost.root, "the prices this test is about"
     budget = int(400.0 / cost.cell)  # 400 ms of priced work, in cells
-    same = 0
-    for pos in _positions(pool, 3, seed=17):
+    want = {r["position"]: r for r in _python_deepening()["priced"]}
+    for p, pos in enumerate(_positions(pool, 3, seed=17)):
         steps: list = []
-        port = _move(pool, pos, served, budget, cost, "port", progress=steps.append)
-        python = _move(pool, pos, served, budget, cost, "python", child_q=8)
+        port = _move(pool, pos, served, budget, cost, progress=steps.append)
         spent = [s.spent for s in steps if s.kind == "refine"]
         assert spent and spent[-1] >= budget and all(v < budget for v in spent[:-1])
-        assert port.deepened.expanded > 0
-        same += port.deepened.expanded == python.deepened.expanded
-    assert same == 3, f"{same} of 3 reads took deepen.py's steps"
+        assert port.deepened.expanded == want[p]["expanded"] > 0, p
+    assert len(want) == 3
     # The control that the port reads the level and root prices at all: a hundred times
     # dearer, the same budget buys fewer steps.
     dear = Cost(fill=cost.fill, refine=cost.refine, cell=cost.cell, level=cost.level * 100,
                 root=cost.root * 100)
     pos = _positions(pool, 1, seed=17)[0]
-    priced = _move(pool, pos, served, budget, cost, "port")
-    dearer = _move(pool, pos, served, budget, dear, "port")
+    priced = _move(pool, pos, served, budget, cost)
+    dearer = _move(pool, pos, served, budget, dear)
     assert 0 < dearer.deepened.expanded < priced.deepened.expanded
 
 
 def test_a_read_is_let_go_however_it_ends(pool, served) -> None:  # noqa: ANN001, F811
     """`deepenEnd` follows every `deepenStart`: after a read, and after a progress callback that
-    raised mid-read, the port holds no read (`deepenCounts.held`)."""
+    raised mid-read or at the read's first report (``start``, before any slice), the port holds
+    no read (`deepenCounts.held`)."""
     from pokeuraou import port as port_mod
 
     def counts() -> dict:
@@ -194,13 +197,16 @@ def test_a_read_is_let_go_however_it_ends(pool, served) -> None:  # noqa: ANN001
     pos = _positions(pool, 1, seed=19)[0]
     _read(pool, pos, 0, served, 300, levels=4)
     assert int(counts()["held"]) == 0
-    started = int(counts()["started"])
 
-    def boom(step) -> None:  # noqa: ANN001
-        if step.kind == "refine":
-            raise RuntimeError("the page went away")
+    for kind in ("refine", "start"):
+        started = int(counts()["started"])
 
-    with pytest.raises(RuntimeError, match="went away"):
-        _read(pool, pos, 0, served, 300, levels=4, progress=boom)
-    after = counts()
-    assert int(after["started"]) == started + 1 and int(after["held"]) == 0
+        def boom(step, kind=kind) -> None:  # noqa: ANN001
+            if step.kind == kind:
+                raise RuntimeError("the page went away")
+
+        with pytest.raises(RuntimeError, match="went away"):
+            _read(pool, pos, 0, served, 300, levels=4, progress=boom)
+        after = counts()
+        assert int(after["started"]) == started + 1, kind
+        assert int(after["held"]) == 0, f"a read raised at {kind!r} was held"

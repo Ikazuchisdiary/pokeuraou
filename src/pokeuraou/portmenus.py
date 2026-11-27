@@ -1,22 +1,28 @@
-"""IKA-389: a read's children's menus by the Q, built in the port -- off by default.
+"""IKA-389: a depth-2 read's children's menus by the Q, built in the port -- off by default.
 
-`deepen._q_menus` built each child's two menus in the worker's Python: both sides' legal
-pools (`qhead.legal_pool`: `side_actions` less `drop_dead_actions`), the Q's arrays
+`child_menus` builds each child's two menus in Python: both sides' legal pools
+(`qhead.legal_pool`: `side_actions` less `drop_dead_actions`), the Q's arrays
 (`qrank._pool_arrays`: the position's encoding, `qhead.encode_actions`, and a `qfeatures`
 crossing to the port a child), a `q_batch` request to the inference server per
-`deepen.Q_MENU_CHUNK` children, the game on each matrix, and each side's `width` best by
-`narrow` (no cover) -- which also asked the port for both pools' damage scores, only to
-write them into a detail line nobody reads. Here one crossing does all of it (`qMenus`,
-`rust/src/qmenus.rs`): the port lists the pools (`rust/src/legal.rs`), lays the same arrays
-into the Q's own block (`RemoteQ._block`, idle while the port answers) and sends the server
-the same requests, solves the games (`lp.rs`, scipy's HiGHS), scores the candidates with
-plain row and column products (IKA-460; they were numpy's BLAS) and hands back the menus alone.
+`Q_MENU_CHUNK` children, the game on each matrix, and each side's `width` best by `narrow`
+(no cover) -- which also asked the port for both pools' damage scores, only to write them
+into a detail line nobody reads. With the switch on, one crossing does all of it
+(`q_menus`, `qMenus`, `rust/src/qmenus.rs`): the port lists the pools
+(`rust/src/legal.rs`), lays the same arrays into the Q's own block (`RemoteQ._block`, idle
+while the port answers) and sends the server the same requests, solves the games (`lp.rs`,
+scipy's HiGHS), scores the candidates with plain row and column products (IKA-460; they
+were numpy's BLAS) and hands back the menus alone.
 
     POKEURAOU_LADDER_PORT_MENUS=1     # on (default off; implies `portserved` and `portlp`)
 
+The switch's name is from the read that set it, the ladder (removed in IKA-464); what reads
+these menus now is the depth-2 refine of a list of cells (`search._refine_cells` with
+``child_q``). The port's deepening (`portdeepen`) builds its children's menus with the same
+`qmenus.rs` inside its own read and does not come here; this module lends it `_action`.
+
 Only where the Q is an inference server's (`qrank.RemoteQ`), its encoder `encode.Encoder`;
-anything else takes the old road. The menus are `_q_menus`' except that the order among tied
-candidates can differ (the last bits of the scores; records/IKA-389.md, IKA-460).
+anything else takes the Python road. The menus are the Python road's except that the order
+among tied candidates can differ (the last bits of the scores; records/IKA-389.md, IKA-460).
 """
 
 from __future__ import annotations
@@ -29,8 +35,8 @@ from . import portserved, rustnode
 from .actions import MoveAction, PassAction, SideAction, SlotAction, SwitchAction
 
 ENV = "POKEURAOU_LADDER_PORT_MENUS"
-#: Whether a read's children's Q menus are built in the port. A list so a test (and a
-#: ladder worker, told by its reader) can turn it on in one process.
+#: Whether a depth-2 read's children's Q menus are built in the port. A list so a test can
+#: turn it on in one process.
 ON = [os.environ.get(ENV, "0").strip() == "1"]
 #: What went: crossings, positions asked about, of them the ones with a game (the positive
 #: control), the Q's requests the port sent, and games the LP could not solve.
@@ -103,8 +109,8 @@ def _action(codes: list) -> SideAction:
 def q_menus(
     reg: Any, positions: Sequence[Any], width: int, chunk: int  # noqa: ANN401 - a Regulation
 ) -> list[tuple[list[SideAction], list[SideAction]]] | None:
-    """`deepen._q_menus(reg, positions, width)` in one crossing, or None where this road
-    does not go (then the caller builds them itself)."""
+    """`child_menus(reg, positions, width)` in one crossing, or None where this road does
+    not go (then `child_menus` builds them in Python)."""
     if not ON[0] or not positions:
         return None
     from . import actions
@@ -164,6 +170,81 @@ def q_menus(
     return [([_action(a) for a in rows], [_action(a) for a in cols]) for rows, cols in menus]
 
 
+#: Positions a `child_menus` forward pass takes at most (IKA-362).
+Q_MENU_CHUNK = 16
+
+
+def child_menus(
+    reg: Any, positions: Sequence[Any], width: int  # noqa: ANN401 - a Regulation
+) -> list[tuple[list[SideAction], list[SideAction]]]:
+    """Both sides' menus in each of `positions`: the `width` best of each side's whole pool
+    (`qhead.legal_pool`, what `narrow` ranks) by the process's Q solved over both pools --
+    the root's ``q-nocover`` ranking (`qrank.q_ranking`), without the cover. The Q is
+    asked for every position in one forward pass (`batched`), `Q_MENU_CHUNK` positions at
+    most. What `search._refine_cells` reads for ``child_q``; it was `deepen._q_menus` until
+    IKA-464 removed Python's deepening.
+    """
+    import numpy as np
+
+    from . import portlp, qhead, qrank
+    from .equilibrium import EquilibriumError, solve
+    from .narrow import narrow
+
+    # IKA-389: all of it in the port in one crossing (`q_menus`, off by default): the same
+    # menus, to the bit.
+    ported = q_menus(reg, positions, width, Q_MENU_CHUNK)
+    if ported is not None:
+        return ported
+    asks = [
+        (pos, (qhead.legal_pool(reg, pos, 0), qhead.legal_pool(reg, pos, 1)))
+        for pos in positions
+    ]
+    wanted = [n for n, (_pos, pools) in enumerate(asks) if pools[0] and pools[1]]
+    # In chunks of `Q_MENU_CHUNK` positions: a depth-2 read's children in one pass asked the
+    # card for more than a process's cap holds (IKA-362).
+    got: list = []
+    for start in range(0, len(wanted), Q_MENU_CHUNK):
+        got.extend(qrank.installed().batched(
+            reg, [asks[n] for n in wanted[start:start + Q_MENU_CHUNK]]
+        ))
+    matrices = dict(zip(wanted, got, strict=True)) if wanted else {}
+    # IKA-381: every game of the call solved in the port in one crossing (`portlp`, off by
+    # default): the same `Equilibrium`s, each error where `solve` would have raised it.
+    solved = (dict(zip(wanted, portlp.solve_many(
+        reg, [np.asarray(matrices[n], dtype=np.float64) for n in wanted]), strict=True))
+        if portlp.ON[0] and wanted else None)
+    out: list[tuple[list[SideAction], list[SideAction]]] = []
+    for n, (pos, pools) in enumerate(asks):
+        if n not in matrices:
+            out.append(([], []))
+            continue
+        q = np.asarray(matrices[n], dtype=np.float64)
+        try:
+            if solved is None:
+                e = solve(q)
+            else:
+                e = solved[n]
+                if isinstance(e, Exception):
+                    raise e
+            scores = (np.asarray(e.row_ev), -np.asarray(e.col_ev))
+        except (EquilibriumError, ValueError):
+            # The mean against every reply, as `qrank.q_ranking` falls back to.
+            scores = (q.mean(axis=1), -q.mean(axis=0))
+        menu: list[list[SideAction]] = []
+        for side in (0, 1):
+            by = {a.to_choice(): float(s) for a, s in zip(pools[side], scores[side], strict=True)}
+
+            def rank(pool: list[SideAction], _scored: object = None, by: dict = by) -> list[float]:
+                return [by[a.to_choice()] for a in pool]
+
+            menu.append(
+                narrow(reg, pos, side, limit=width, candidates=pools[side], rank=rank,
+                       cover=False).actions
+            )
+        out.append((menu[0], menu[1]))
+    return out
+
+
 def counts() -> dict[str, int]:
     return dict(COUNTS)
 
@@ -180,4 +261,4 @@ def tally() -> tuple[int, int, int, int]:
             rustnode.BARE["materialized"])
 
 
-__all__ = ["COUNTS", "ENV", "ON", "counts", "q_menus", "set_on"]
+__all__ = ["COUNTS", "ENV", "ON", "Q_MENU_CHUNK", "child_menus", "counts", "q_menus", "set_on"]

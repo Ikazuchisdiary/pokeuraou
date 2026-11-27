@@ -396,9 +396,6 @@ class SearchResult:
     #: column at the prices in hand. Zero at convergence, because then no column outside
     #: the rectangle beats it; positive when the pass budget ran out first.
     optimism: float = 0.0
-    #: What a best-first deepening spent and how deep it reached (`deepen.Deepened`,
-    #: IKA-33). None when the search was not asked to deepen.
-    deepened: _deepen.Deepened | None = None
 
 
 @timing.labelled("matrix")
@@ -410,87 +407,19 @@ def search(
     evaluate: LeafEvaluator,
     *,
     budget: Budget,
-    refine: int = DEFAULT_REFINE,
-    sub_limit: int = DEFAULT_SUB_LIMIT,
-    sub_branches: int = DEFAULT_SUB_BRANCHES,
-    solve_restricted: bool = False,
-    deepen: int = 0,
-    outside: tuple[Sequence[SideAction], Sequence[SideAction]] | None = None,
-    deepen_cost: _deepen.Cost | None = None,
-    swap: bool = False,
-    breadth_only: bool = False,
-    q_probe: int | None = None,
-    levels: int | None = None,
-    child_q: int | None = None,
-    progress: _deepen.Progress | None = None,
-    discount: float | None = None,
-    grow: _deepen.Grow | None = None,
 ) -> SearchResult:
-    """Solve this turn's matrix game (the depth-1 node: `batched_payoff` and `solve`),
-    optionally deepening the cells that decide it.
+    """Solve this turn's matrix game: the depth-1 node, `batched_payoff` and `solve`.
 
-    ``deepen`` is a budget of cells to spend after the depth-1 solve, best first over the
-    whole tree (`deepen.best_first`, IKA-33). Zero is the depth-1 search unchanged.
-    ``solve_restricted`` picks the deepened root's reading: the restricted rectangle grown
-    by its oracle (IKA-68), or the whole matrix. The fixed depth-2 read (``depth=2``) and
-    its restricted reading were removed in IKA-463.
-
-    ``outside`` turns on the root's double oracle while deepening (IKA-293): each side's
-    candidates beyond its menu, asked every step whether they gain against the other
-    side's support. The result's ``ours`` / ``theirs`` are then the grown menus, which
-    the strategies index. ``swap`` pushes a weightless action out for each that joins,
-    ``breadth_only`` runs the oracle without deepening (the labels' ``s`` and ``b``).
-    ``deepen_cost`` counts the budget in `deepen.Cost`'s prices instead of cells (the
-    human's clock, `deepen.cells_for_seconds`). ``q_probe`` narrows the oracle's probe to
-    a Q's best few a side (the label's ``q<k>``, IKA-322). ``levels`` is the depth guard
-    (``g<L>``) and ``child_q`` the children's menus by a Q (``c<k>``), IKA-307;
-    ``discount`` the depth discount (``d<P>``, IKA-342).
-
-    ``progress`` is called with each `deepen.Step` of the answer as it forms (IKA-332): the
-    depth-1 answer, every step of a deepening, the end. It goes with the depth-1 full
-    matrix, deepened or not, and changes nothing the search computes.
-
-    ``grow`` widens the root while it deepens (IKA-354, `deepen.Grow`): the result's
-    ``ours`` / ``theirs`` are then the grown menus.
+    The fixed depth-2 read (``depth=2``) was removed in IKA-463, and the best-first
+    deepening (``deepen``, IKA-33) in IKA-464: a move is deepened in the port
+    (`portdeepen`, through `humanplay.solve_move`).
     """
-    if (
-        outside is not None or deepen_cost is not None or swap or breadth_only
-        or q_probe is not None or levels is not None or child_q is not None
-        or discount is not None or grow is not None
-    ) and not deepen:
-        raise ValueError(
-            "outside, deepen_cost, swap, breadth_only, q_probe, levels, child_q, discount "
-            "and grow are how a deepening spends; deepen is 0"
-        )
     row = list(ours)
     col = list(theirs)
     with timing.region("open.node"):
         payoff, unmodelled = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
     with timing.region("lp.open"):
         equilibrium = solve(payoff)
-    if deepen > 0:
-        got = _deepen.deepen_root(
-            reg, pos, row, col, evaluate, budget=budget, payoff=payoff,
-            equilibrium=equilibrium, cells=deepen, sub_limit=sub_limit,
-            sub_branches=sub_branches, unmodelled=unmodelled,
-            reading=(
-                "breadth" if breadth_only else "restricted" if solve_restricted else "mixed"
-            ),
-            refine=refine, outside=outside, cost=deepen_cost, swap=swap, q_probe=q_probe,
-            levels=levels, child_q=child_q,
-            progress=progress, discount=discount, grow=grow,
-        )
-        return SearchResult(
-            equilibrium=got.equilibrium,
-            payoff=got.payoff,
-            ours=got.rows,
-            theirs=got.cols,
-            unmodelled=unmodelled,
-            refined=got.report.expanded,
-            deepened=got.report,
-        )
-    if progress is not None:
-        _deepen.announce_depth1(progress, pos, row, col, payoff, equilibrium)
     return SearchResult(
         equilibrium=equilibrium,
         payoff=payoff,
@@ -926,9 +855,9 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
         if child_q is None:
             menus = iter(narrow_many(reg, asks, limit=sub_limit) if asks else [])
         else:
-            # IKA-362: each child's menus by the Q's `child_q` best (`deepen._q_menus`), every
-            # child of the read in one forward pass; the same order as `asks`.
-            from .deepen import _q_menus
+            # IKA-362: each child's menus by the Q's `child_q` best (`portmenus.child_menus`),
+            # every child of the read in one forward pass; the same order as `asks`.
+            _q_menus = portmenus.child_menus
 
             live = [pos for pos, side in asks if side == 0]
             if q_groups is not None:
@@ -1213,13 +1142,9 @@ class BeliefResult:
     #: The restricted game's own value minus what its strategy guarantees against every
     #: column of every completion, as `SearchResult.optimism`.
     optimism: float = 0.0
-    #: What a best-first deepening of the Bayesian root did (IKA-294), or None. When it
-    #: widened, `ours` / `theirs` are the grown menus (side 0's actions first, as always)
-    #: and the strategy indexes this side's.
-    deepened: _deepen.Deepened | None = None
     #: The depth-1 node this answer was solved over, as (side 0's menu, side 1's menu, one
     #: matrix per completion in side 0's orientation, their weights) -- references, nothing
-    #: computed. The menus are the ones passed in, before any growth by a deepening.
+    #: computed.
     node_payoff: tuple | None = None
 
 
@@ -1233,9 +1158,6 @@ def belief_solve(
     *,
     budget: Budget,
     sides: Sequence[int] = (0, 1),
-    sub_limit: int = DEFAULT_SUB_LIMIT,
-    sub_branches: int = DEFAULT_SUB_BRANCHES,
-    deepen: dict[int, dict[str, Any]] | None = None,
     progress: _deepen.Progress | None = None,
 ) -> dict[int, BeliefResult]:
     """Both sides' answers, resolving each turn as few times as it has to be resolved.
@@ -1255,20 +1177,14 @@ def belief_solve(
     of each (IKA-282). With one leaf the shared node is built as before, whichever side is
     asked for, so self-play is unchanged; only the unread LP is skipped.
 
-    `deepen` maps a side to how it deepens its Bayesian root after the depth-1 answer
-    (IKA-294, a label ending in ``h``): `deepen.deepen_belief`'s ``cells``, ``reading``,
-    ``swap``, ``q_probe`` (IKA-322), ``levels`` and ``child_q`` (IKA-307), ``discount``
-    (IKA-342) and ``outside``
-    -- the last in side 0's orientation,
-    as `search`'s (side 0's candidates, side 1's). A side not in it is answered as above.
+    A side's deepened answer is the port's (`portdeepen`, IKA-464), from the same node.
 
-    `progress` is called with each `deepen.Step` of every wanted side's answer as it forms
-    (IKA-332; the step's root says which side), deepened or not. It changes nothing that is
-    computed.
+    `progress` is called with the depth-1 answer of every wanted side (`deepen.Step`'s
+    ``start`` and ``done``, IKA-332; the step's root says which side). It changes nothing
+    that is computed.
     """
     from .beliefnode import belief_payoffs
 
-    deepen = deepen or {}
     wanted = tuple(side for side in (0, 1) if side in sides)
     if not wanted:
         raise ValueError(f"belief_solve asked for no side: {sides!r}")
@@ -1328,40 +1244,10 @@ def belief_solve(
             unmodelled=nodes[side].unmodelled,
             classes=len(matrices),
         )
-        if progress is not None and side not in deepen:
+        if progress is not None:
             own, other = (row, col) if side == 0 else (col, row)
-            _deepen.announce_belief_depth1(
+            _deepen.announce_depth1(
                 progress, side, own, other, items, weights, matrices, solved
-            )
-        if side in deepen:
-            how = dict(deepen[side])
-            outside = how.pop("outside", None)
-            # A side's own children's width (a label's w<k>, IKA-362).
-            side_sub_limit = how.pop("sub_limit", sub_limit)
-            if outside is not None and side == 1:
-                outside = (outside[1], outside[0])
-            own, other = (row, col) if side == 0 else (col, row)
-            # Its own copy: with one leaf both sides' answers share the node's notes.
-            notes = set(nodes[side].unmodelled)
-            with timing.region("deepen.hidden"):
-                got = _deepen.deepen_belief(
-                    reg, side, position, own, other, items, weights, matrices, solved,
-                    evaluators[side], budget=budget, sub_limit=side_sub_limit,
-                    sub_branches=sub_branches, unmodelled=notes, outside=outside,
-                    progress=progress, **how,
-                )
-            grown_row, grown_col = (got.own, got.other) if side == 0 else (got.other, got.own)
-            eq = got.equilibrium
-            out[side] = BeliefResult(
-                strategy=np.asarray(eq.row_strategy, dtype=np.float64),
-                value=float(eq.value),
-                replies=tuple(np.asarray(y, dtype=np.float64) for y in eq.col_strategies),
-                ours=list(grown_row),
-                theirs=list(grown_col),
-                unmodelled=notes,
-                classes=len(matrices),
-                refined=got.report.expanded,
-                deepened=got.report,
             )
         out[side].node_payoff = (row, col, built, weights)
     return out

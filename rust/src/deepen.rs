@@ -1070,6 +1070,10 @@ impl Read {
             "rootSum": self.root_sum,
             "elapsedMs": self.elapsed.as_secs_f64() * 1e3,
             "unmodelled": self.notes.iter().collect::<Vec<_>>(),
+            // The root's cells read deeper than the leaf, and the ones refused: (k, i, j),
+            // what a page marks as a pair's reading (`progress.Reader`).
+            "deep": root.children.keys().map(|&(k, i, j)| [k, i, j]).collect::<Vec<_>>(),
+            "refusedCells": root.refused.iter().map(|&(k, i, j)| [k, i, j]).collect::<Vec<_>>(),
         })
     }
 

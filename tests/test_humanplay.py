@@ -508,21 +508,23 @@ def test_the_memory_brake_stops_the_deepening_and_changes_nothing_unset(pool) ->
 
 
 def test_the_oracle_game_is_the_same_at_any_thread_count(pool) -> None:  # noqa: ANN001
-    from pokeuraou import deepen
+    from pokeuraou import portdeepen, rustnode
     from pokeuraou.deepen import ALL_ACTIONS
 
     agent = _agent(pool, oracle=ALL_ACTIONS)
     one, _, _ = _play(pool, PolicyPerson("random", 9), seed=9, agent=agent)
     try:
-        humanplay.use_threads(3, pool.reg)
-        before = dict(deepen.ahead_counts())
+        humanplay.use_threads(3)
+        threads = rustnode.port_threads()
+        before = portdeepen.COUNTS["reads"]
         three, _, _ = _play(pool, PolicyPerson("random", 9), seed=9, agent=agent)
-        after = deepen.ahead_counts()
+        reads = portdeepen.COUNTS["reads"] - before
     finally:
-        humanplay.use_threads(1, pool.reg)
+        humanplay.use_threads(1)
     assert json.dumps(three, ensure_ascii=False) == json.dumps(one, ensure_ascii=False)
-    # The positive controls: the helpers expanded cells ahead, and the oracle was asked.
-    assert after["expanded"] > before["expanded"]
+    # The positive controls: the port read the moves on three cell threads, and the oracle
+    # was asked.
+    assert threads == 3 and reads > 0
     moves = [d for d in one["decisions"] if d["kind"] == "move" and d.get("deepened")]
     assert any("probed" in (d["deepened"][0] or d["deepened"][1] or {}) for d in moves)
 

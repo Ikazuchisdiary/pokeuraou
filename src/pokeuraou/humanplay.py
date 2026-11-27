@@ -110,7 +110,7 @@ from .position import Position
 from .priors import SampledSet
 from .progress import Reader, Recorder, action_label, part_json, slot_part
 from .regulation import Regulation
-from .search import belief_solve, search
+from .search import belief_solve
 from .selection_book import BenchPrior, BookEntry
 from .selfplay import (
     MAX_TURNS,
@@ -468,14 +468,8 @@ CLOCKS = ("wall", "count")
 #: turns) it asks nothing; it matters where the legal list is longer than the width.
 PLAY_ORACLE = ALL_ACTIONS
 
-#: Where a deepened move is read (IKA-464): ``python`` (`deepen.py`, `narrow`'s children) or
-#: ``port`` (`portdeepen`, the port's `deepenStart`, the Q's children). `solve_move`'s
-#: ``road`` names one for a call.
-DEEPEN_ROADS = ("python", "port")
-DEEPEN_ROAD = "python"
-
 #: The deepening's depth guard for a person's game and the analysis mode (None would be
-#: `deepen.MAX_LEVELS`, 8, which generation and the board keep). IKA-342: 16. On 16 recorded
+#: `deepen.MAX_LEVELS`, 8). IKA-342: 16, measured on Python's deepening. On 16 recorded
 #: M-C positions read for 7.5 to 60 s of the count clock, the answer at guard 16 lost less
 #: than guard 8's in the game of a long guard-32 read (15 s -0.003, 30 s -0.007 in 11 of 16,
 #: 60 s -0.011), and sat nearer the long guard-8 read than guard 32 did: the middle of two
@@ -526,25 +520,6 @@ def default_threads(cpus: int | None = None) -> int:
 
     logical = cpus if cpus is not None else (os.cpu_count() or 2)
     return max(1, min(PLAY_THREADS, logical // 2))
-
-
-#: one core (`equilibrium.set_lp_pair`): the root's Bayesian game of a wide menu, not the
-#: 8 x 8 children, whose LPs are mostly Python (IKA-32 stage 2).
-LP_PAIR_CELLS = 1024
-
-#: Helper threads expanding the deepening's cells ahead, from four cores up.
-AHEAD_HELPERS = 2
-
-#: Cells a worker process expands a level down from each cell it expands (the loop often
-#: goes on down the line it just refined). 0: measured no faster with the loop expanding
-#: the cells no helper started itself (records/IKA-32.md stage 2).
-AHEAD_DEEPER = 0
-
-
-
-#: Worker processes expanding the deepening's cells ahead, at most (IKA-32 stage 2). Each
-#: holds a CUDA context and the leaf (about 0.5 GB of the card) and a port.
-AHEAD_WORKERS_MAX = 6
 
 
 def inference_address(given: str | None = None) -> str | None:
@@ -662,15 +637,6 @@ def served_q(address: str, q_path: Path, encoder: Any, *, arm: str = "q") -> Any
     return q
 
 
-def served_process_leaf(reg: Regulation, address: str, arm: str) -> Any:  # noqa: ANN401
-    """The leaf of a deepening worker process (`deepen.start_workers`): the same server arm, its
-    own connection, no CUDA context."""
-    from .encode import Encoder
-    from .inference import RemoteValue
-
-    return RemoteValue(address, arm, Encoder(reg))
-
-
 def worker_leaf(reg: Regulation, kind: str, *args: Any) -> Any:  # noqa: ANN401
     """A worker process's leaf (the selection reading's, `selection_deep.PoolReader`), with
     the Q its menus are ranked by installed (IKA-364). ``kind`` is ``served`` (address, arm,
@@ -695,41 +661,18 @@ def worker_spec(*, address: str, q_path: Any) -> tuple[Any, ...]:  # noqa: ANN40
     return ("served", address, "value", None if q_path is None else str(q_path), "q")
 
 
-def use_threads(
-    threads: int,
-    reg: Regulation | None = None,
-    leaf: tuple[Any, ...] | None = None,
-    factory: Any = served_process_leaf,  # noqa: ANN401 - a module-level function
-) -> None:
-    """Spread one move over `threads` cores (IKA-32): the port's cell pool (stage 1), the
-    deepening's cells expanded ahead and a big game's two LPs at once (stage 2). With
-    `reg` and `leaf` (the arguments of ``factory``: the server's address and arm) the cells
-    ahead are expanded by ``threads - 1`` worker processes (at most `AHEAD_WORKERS_MAX`), each
-    with its own connection, port and GIL; without, by helper threads in this process. None of
-    them changes a move -- only how long it takes -- so a game on the count clock is the same
-    game at any count; 1 turns them all off. ``factory`` builds a worker's leaf from ``leaf``
-    (`served_process_leaf`)."""
-    from . import deepen, equilibrium, rustnode
+def use_threads(threads: int) -> None:
+    """Spread one move over `threads` cores (IKA-32 stage 1): the port's cell pool, which
+    resolves a read's turns and fills. It changes no move -- only how long it takes -- so a
+    game on the count clock is the same game at any count. Python's deepening also expanded
+    cells ahead in helper threads or worker processes and solved a big game's two LPs at once
+    (IKA-32 stage 2); IKA-464 removed them with it."""
+    from . import rustnode
 
     if threads < 1:
         raise ValueError(f"threads must be >= 1, not {threads}")
     if (rustnode.port_threads() or 1) != threads:
         rustnode.set_port_threads(threads)
-    if reg is not None:
-        wanted = 0 if threads == 1 or leaf is None else min(threads - 1, AHEAD_WORKERS_MAX)
-        if deepen.workers(reg) != wanted:
-            deepen.start_workers(reg, wanted, factory, tuple(leaf or ()),
-                                 port_threads=1)
-    # Without worker processes: two helper threads from four cores up, each with a port of
-    # `threads` cell threads (the helpers' Python and the loop's LPs share one GIL, so more
-    # helpers wait on it). With them, each worker also expands `AHEAD_DEEPER` cells a
-    # level down from each cell it expands.
-    remote = reg is not None and deepen.workers(reg) > 0
-    deepen.set_ahead(
-        0 if threads == 1 else threads, helpers=AHEAD_HELPERS if threads >= 4 else 1,
-        port_threads=threads, deeper=AHEAD_DEEPER if remote else 0,
-    )
-    equilibrium.set_lp_pair(0 if threads == 1 else LP_PAIR_CELLS)
 
 # ----------------------------------------------------------------------------- the person
 
@@ -1221,10 +1164,6 @@ class Agent:
     #: The deepening's depth guard (IKA-307, a label's ``g<L>``), or None: `MAX_LEVELS`.
     #: Given, each move's record says why the deepening and its lines stopped.
     max_levels: int | None = None
-    #: The children's menus by the Q's k best (IKA-307, ``c<k>``), or None: `narrow`'s.
-    child_q: int | None = None
-    #: Where a deepened move is read (`DEEPEN_ROADS`, IKA-464), or None: `DEEPEN_ROAD`.
-    road: str | None = None
     #: The root's swap oracle while deepening (a label's ``s<W>`` / ``sall``, IKA-293/310;
     #: IKA-307's allocation "width first, the rest to deepening with the swap oracle"):
     #: the width of the menu whose rest it asks (`deepen.ALL_ACTIONS`: every legal
@@ -1251,8 +1190,6 @@ class Agent:
     def __post_init__(self) -> None:
         if self.clock not in CLOCKS:
             raise ValueError(f"clock is one of {CLOCKS}, not {self.clock!r}")
-        if self.road is not None and self.road not in DEEPEN_ROADS:
-            raise ValueError(f"road is one of {DEEPEN_ROADS}, not {self.road!r}")
         if self.clock == "count" and not self.width_only and (self.form, self.cores) not in COSTS:
             raise ValueError(
                 f"the count clock spends the budget at measured prices, and there are none "
@@ -1312,32 +1249,30 @@ def solve_move(
     cells: int = 0,
     cost: Any = None,  # noqa: ANN401 - deepen.Cost, WallCost or another reading of the budget
     levels: int | None = None,
-    child_q: int | None = None,
     outside: tuple[list[SideAction], list[SideAction]] | None = None,
     progress: Callable[[Any], None] | None = None,
     discount: float | None = None,
     grow: Any = None,  # noqa: ANN401 - deepen.Grow
-    road: str | None = None,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
-    open game when ``exact``: at depth 1 the port's `beliefNode` on one exact completion a
-    side (`belief_solve` over `open_spreads`), and `search` only when ``cells`` > 0 deepens
-    it. Else the Bayesian game over the other side's completions in ``spreads``
-    (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens
-    best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle;
-    ``levels`` and ``discount`` are the depth guard and the depth discount (IKA-342);
-    ``grow`` widens the root mid-read (`deepen.Grow`, IKA-354).
-    ``road`` names where a deepened move is read (`DEEPEN_ROADS`; None: `DEEPEN_ROAD`).
-    What `HumanGame` asks at each move, and what the analysis mode asks with no budget
+    open game when ``exact`` (one exact completion a side, `open_spreads`), else the
+    Bayesian game over the other side's completions in ``spreads``. At depth 1 the port's
+    `beliefNode` (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens best first in
+    the port (`portdeepen`, IKA-464), the budget read by ``cost``; ``outside`` adds the
+    root's swap oracle; ``levels`` and ``discount`` are the depth guard and the depth
+    discount (IKA-342); ``grow`` widens the root mid-read (`deepen.Grow`, IKA-354). What
+    `HumanGame` asks at each move, and what the analysis mode asks with no budget
     (IKA-337). Raises `EquilibriumError` as the solves do."""
     you = 1 - me
-    if cells and (road or DEEPEN_ROAD) == "port":
+    if exact:
+        # IKA-463: the open node is the port's `beliefNode` on one exact completion a side
+        # (fills, leaf and LP in one request), as the hidden one.
+        spreads = open_spreads(pos)
+    assert spreads is not None
+    if cells:
         from . import portdeepen
 
-        if child_q is not None:
-            raise ValueError("the port's deepening ranks its children by the Q's 8: no child_q "
-                             "(IKA-464)")
-        items = list(open_spreads(pos)[you] if exact else (spreads or {})[you])
+        items = list(spreads[you])
         got = portdeepen.deepen_move(
             reg, pos, me, list(ours), list(theirs), items, leaf, budget=budget, cells=cells,
             cost=cost, levels=levels, discount=discount, outside=outside, progress=progress,
@@ -1349,37 +1284,9 @@ def solve_move(
             value=float(got.value) if me == 0 else -float(got.value),
             deepened=got.deepened, unmodelled=got.unmodelled,
         )
-    if exact and cells:
-        got = search(
-            reg, pos, ours, theirs, leaf, budget=budget, deepen=cells, deepen_cost=cost,
-            levels=levels, child_q=child_q, discount=discount, outside=outside,
-            swap=outside is not None, **({"grow": grow} if grow is not None else {}),
-            progress=progress,
-        )
-        eq = got.equilibrium
-        return SolvedMove(
-            strategy=np.asarray(eq.row_strategy if me == 0 else eq.col_strategy, dtype=np.float64),
-            model=[float(x) for x in (eq.col_strategy if me == 0 else eq.row_strategy)],
-            ours=got.ours, theirs=got.theirs, value=float(eq.value), deepened=got.deepened,
-            unmodelled=set(got.unmodelled),
-        )
-    if exact:
-        # IKA-463: the open depth-1 node is the port's `beliefNode` on one exact completion a
-        # side (fills, leaf and LP in one request), as the hidden one; not `search` and
-        # Python's LP.
-        spreads = open_spreads(pos)
-    assert spreads is not None
     answers = belief_solve(
         reg, pos, ours, theirs, spreads,
-        {me: leaf, you: _not_asked}, budget=budget, sides=(me,),
-        deepen=(
-            {me: {"cells": cells, "cost": cost, "levels": levels,
-                  "reading": "mixed", "swap": outside is not None, "outside": outside,
-                  "child_q": child_q, "discount": discount,
-                  **({"grow": grow} if grow is not None else {})}}
-            if cells else None
-        ),
-        progress=progress,
+        {me: leaf, you: _not_asked}, budget=budget, sides=(me,), progress=progress,
     )
     got = answers[me]
     return SolvedMove(
@@ -1388,7 +1295,7 @@ def solve_move(
         ours=got.ours, theirs=got.theirs,
         # Side 1 solved the negated transpose: its value back in side 0's units.
         value=float(got.value) if me == 0 else -float(got.value),
-        deepened=got.deepened, unmodelled=set(got.unmodelled),
+        deepened=None, unmodelled=set(got.unmodelled),
     )
 
 
@@ -1853,8 +1760,8 @@ class HumanGame:
         try:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
-                cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
-                outside=outside, progress=progress, road=agent.road,
+                cells=cells, cost=cost, levels=agent.max_levels,
+                outside=outside, progress=progress,
             )
         except EquilibriumError:
             return None
@@ -2411,7 +2318,6 @@ def play(
         **({"oracle": "sall" if agent.oracle >= ALL_ACTIONS else f"s{agent.oracle}"}
            if agent.oracle is not None else {}),
         **({"maxLevels": agent.max_levels} if agent.max_levels is not None else {}),
-        **({"childQ": agent.child_q} if agent.child_q is not None else {}),
         **({"ponder": {"seconds": agent.ponder_seconds}} if agent.ponder else {}),
         "rule": {
             "widths": list(WIDTHS),
