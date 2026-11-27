@@ -97,6 +97,7 @@ from .deepen import ALL_ACTIONS, COSTS, cells_for_seconds
 from .equilibrium import EquilibriumError
 from .hidden import (
     DEFAULT_BENCH_DROP,
+    Completion,
     completions,
     identity,
     seen_identities,
@@ -1384,6 +1385,13 @@ def _not_asked(positions: list[Position]) -> np.ndarray:  # pragma: no cover - n
     raise AssertionError("the person's side is never solved")
 
 
+def open_spreads(pos: Position) -> dict[int, list[Completion]]:
+    """The open node as a belief node: each side's bench one exact completion of weight 1,
+    the position itself (`hidden.completions` when every slot is seen)."""
+    return {side: [Completion(position=pos, species=(), slots=(), weight=1.0, exact=True)]
+            for side in (0, 1)}
+
+
 @dataclass
 class SolvedMove:
     """One side's answer at a move decision (`solve_move`)."""
@@ -1444,16 +1452,11 @@ def solve_move(
             raise ValueError("a ladder is read on the depth-1 node alone (IKA-367)")
         return _ladder_move(reg, pos, me, ours, theirs, spreads, leaf, budget=budget,
                             exact=exact, how=ladder)
-    if exact:
+    if exact and cells:
         got = search(
-            reg, pos, ours, theirs, leaf, budget=budget,
-            **(
-                {"deepen": cells, "deepen_cost": cost, "levels": levels,
-                 "child_q": child_q, "discount": discount,
-                 "outside": outside, "swap": outside is not None,
-                 **({"grow": grow} if grow is not None else {})}
-                if cells else {}
-            ),
+            reg, pos, ours, theirs, leaf, budget=budget, deepen=cells, deepen_cost=cost,
+            levels=levels, child_q=child_q, discount=discount, outside=outside,
+            swap=outside is not None, **({"grow": grow} if grow is not None else {}),
             progress=progress,
         )
         eq = got.equilibrium
@@ -1463,6 +1466,11 @@ def solve_move(
             ours=got.ours, theirs=got.theirs, value=float(eq.value), deepened=got.deepened,
             unmodelled=set(got.unmodelled),
         )
+    if exact:
+        # IKA-463: the open depth-1 node is the port's `beliefNode` on one exact completion a
+        # side (fills, leaf and LP in one request), as the hidden one; not `search` and
+        # Python's LP.
+        spreads = open_spreads(pos)
     assert spreads is not None
     answers = belief_solve(
         reg, pos, ours, theirs, spreads,
@@ -1514,25 +1522,16 @@ def _ladder_move(  # noqa: PLR0913 - solve_move's, with the ladder's settings
     def node(
         ours: list[SideAction], theirs: list[SideAction],
     ) -> tuple[Any, list[np.ndarray], list[float], list[Any], SimpleNamespace, set[str]]:
-        """The depth-1 node on these menus: its search, matrices, weights, items, answer."""
-        if exact:
-            got = search(reg, pos, ours, theirs, leaf, budget=budget)
-            eq = got.equilibrium
-            return (
-                got, [np.asarray(got.payoff, dtype=np.float64)], [1.0], [_ladder.Item(pos)],
-                SimpleNamespace(
-                    row_strategy=eq.row_strategy if me == 0 else eq.col_strategy,
-                    col_strategies=[eq.col_strategy if me == 0 else eq.row_strategy],
-                ),
-                set(got.unmodelled),
-            )
-        assert spreads is not None
-        answers = belief_solve(reg, pos, ours, theirs, spreads, {me: leaf, you: _not_asked},
-                               budget=budget, sides=(me,))
+        """The depth-1 node on these menus: its answer, matrices, weights, items, start.
+        The open node is the port's `beliefNode` on one exact completion a side (IKA-463)."""
+        node_spreads = open_spreads(pos) if exact else spreads
+        assert node_spreads is not None
+        answers = belief_solve(reg, pos, ours, theirs, node_spreads,
+                               {me: leaf, you: _not_asked}, budget=budget, sides=(me,))
         got = answers[me]
         _row, _col, built, weights = got.node_payoff
         return (
-            got, built, weights, list(spreads[you]),
+            got, built, weights, list(node_spreads[you]),
             SimpleNamespace(row_strategy=got.strategy, col_strategies=list(got.replies)),
             set(got.unmodelled),
         )

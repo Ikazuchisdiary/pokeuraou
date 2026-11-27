@@ -414,6 +414,47 @@ def hp_share_model(encoder: Encoder) -> Callable[[Encoded], np.ndarray]:
     return score
 
 
+class Rows:
+    """An encoded batch read back per mon, each array shaped (rows, 2, mons a side): the
+    species id (``""`` where no mon), whether it is on the field, its HP and maximum HP."""
+
+    def __init__(self, encoder: Encoder, encoded: Encoded, names: np.ndarray) -> None:
+        mon_k = {name: k for k, name in enumerate(encoder.mon_names)}
+        mon = encoded.mon.astype(np.float64)
+        self.present = encoded.mask > 0
+        self.species = np.where(self.present, names[encoded.species], "")
+        self.active = (mon[..., mon_k["is_active"]] > 0) & self.present
+        self.maxhp = np.where(self.present, np.rint(mon[..., mon_k["maxhp_scaled"]] * HP_SCALE), 0.0)
+        self.hp = np.rint(mon[..., mon_k["hp_fraction"]] * self.maxhp)
+
+
+class RowStub:
+    """A stand-in leaf a test writes over `Rows` (``score(rows) -> values``), for a request
+    the port scores on the inference server itself (IKA-463: `selectionSolve`): it has
+    `from_encoded` and `encoder`, so the tests serve it (`served_from`). ``calls`` holds the
+    rows of each request."""
+
+    def __init__(self, reg: Any, score: Callable[[Rows], np.ndarray]) -> None:  # noqa: ANN401
+        self.encoder = Encoder(reg)
+        self.score = score
+        self.calls: list[int] = []
+        names = [""] * (max(self.encoder.vocab.species.values()) + 1)
+        for name, index in self.encoder.vocab.species.items():
+            names[index] = name
+        self._names = np.asarray(names, dtype=object)
+
+    def from_encoded(self, encoded: Encoded) -> np.ndarray:
+        self.calls.append(len(encoded.species))
+        return np.asarray(self.score(Rows(self.encoder, encoded, self._names)), dtype=np.float64)
+
+    def __call__(self, positions: Sequence[Any]) -> np.ndarray:  # noqa: ANN401 - positions
+        """The same values on positions, encoded here (a test that calls the leaf itself)."""
+        if not positions:
+            return np.zeros(0, dtype=np.float64)
+        encoded = self.encoder.encode_positions(list(positions), bind=False)
+        return np.asarray(self.score(Rows(self.encoder, encoded, self._names)), dtype=np.float64)
+
+
 def subset(encoded: Encoded, rows: list[int]) -> Encoded:
     """Rows ``rows`` of an `Encoded`, in that order (what the Python road cut a lent fill with)."""
     return Encoded(

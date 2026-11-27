@@ -33,27 +33,25 @@ import pytest
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.pool import draw_pair, load_pool, unordered_pairs
 from pokeuraou.poolplay import SolvedSelections
-from pokeuraou.regulation import repo_root
+from pokeuraou.regulation import load_regulation, repo_root
 from pokeuraou.selection_book import BenchPrior
+from pokeuraou.standin import RowStub
 from pokeuraou.teams import TeamError
 
 from ._harness import load_tool
 from ._served import hp_share_leaf
 
 
-def _stub(positions):  # noqa: ANN001, ANN202
-    """Antisymmetric: HP summed per side, the active pair counted twice (leads matter).
+def _hp_leads(rows):  # noqa: ANN001, ANN202
+    strength = (rows.hp * np.where(rows.active, 2, 1)).sum(axis=-1)
+    return 1.0 / (1.0 + np.exp(-(strength[:, 0] - strength[:, 1]) / 150.0))
 
-    What a selection solve reads (it scores ~10^5 leaves; in Python, on positions). A game's
-    nodes are scored by the port on the inference server (IKA-460): `_served_stub`."""
-    out = np.empty(len(positions), dtype=np.float64)
-    for i, pos in enumerate(positions):
-        strength = [
-            sum(m.hp * (2 if m.active_index is not None else 1) for m in side.pokemon)
-            for side in pos.sides
-        ]
-        out[i] = 1.0 / (1.0 + np.exp(-(strength[0] - strength[1]) / 150.0))
-    return out
+
+#: Antisymmetric: HP summed per side, the active pair counted twice (leads matter). What a
+#: selection solve reads: the port scores it on a stand-in inference server
+#: (`standin.RowStub`, IKA-463). A test may also call it on positions. A game's nodes are
+#: scored on the tests' hp-share server: `_served_stub`.
+_stub = RowStub(load_regulation("gen9championsvgc2026regmb"), _hp_leads)
 
 
 #: An arm's leaf in a played game: the tests' hp-share server (antisymmetric too).

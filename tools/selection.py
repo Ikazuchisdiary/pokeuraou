@@ -1,7 +1,7 @@
 """Solves the 6->4 selection against one opponent's team sheet.
 
-    uv run --group learn python tools/selection.py --place 1
-    uv run --group learn python tools/selection.py --player "Antonio Sanchez" --classes 8
+    uv run python tools/selection.py --place 1
+    uv run python tools/selection.py --player "Antonio Sanchez" --classes 8
 
 The opponent is named by placement or by player, from the cached tournament standings, so
 the question being answered is "what do I bring against *this* team" rather than against an
@@ -17,18 +17,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.damage import register_mega_stones
-from pokeuraou.encode import Encoder
 from pokeuraou.names import localiser
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.selection import SpreadClass, render, solve_selection
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import load_roster
-from pokeuraou.value import BatchedValue, load_model
 
 
 def main() -> None:
@@ -56,7 +53,6 @@ def main() -> None:
         "the value function's antisymmetry, so the game is symmetric and its value is "
         "forced. Any other answer is a wiring bug, not a modelling choice.",
     )
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
     roster = load_roster(args.roster)
@@ -90,10 +86,24 @@ def main() -> None:
             "Selection cannot be solved without a value function -- the cells are win "
             "probabilities, and hp-share is not one."
         )
-    encoder = Encoder(reg)
-    net, meta = load_model(args.model, encoder)
-    device = torch.device(args.device)
-    value = BatchedValue(net.to(device), encoder, device=device)
+    # IKA-463: the port solves the selection game on the Rust inference server (CUDA).
+    import tempfile
+
+    from pokeuraou.humanplay import served_leaf
+    from pokeuraou.inference import start_server
+
+    log = Path(tempfile.mkdtemp(prefix="selection-")) / "server.log"
+    server, address = start_server({"value": [args.model]}, regulation=reg.meta.format_id, log=log)
+    value, _encoder = served_leaf(reg, address, [args.model])
+    try:
+        _solve(args, reg, roster, team, prior, value)
+    finally:
+        value.close()
+        server.terminate()
+
+
+def _solve(args: argparse.Namespace, reg: object, roster: object, team: object, prior: object,
+           value: object) -> None:
 
     loc = localiser(reg, args.lang)
 
@@ -106,12 +116,7 @@ def main() -> None:
         file=sys.stderr,
     )
     print("  " + " / ".join(namer(s) for s in team.species), file=sys.stderr)
-    print(
-        f"モデル: {args.model.name}  検証 AUC {meta.get('val_auc', float('nan')):.4f}, "
-        f"log loss {meta.get('val_logloss', float('nan')):.4f} "
-        f"({meta.get('games', '?')} ゲームで学習)",
-        file=sys.stderr,
-    )
+    print(f"モデル: {args.model.name}", file=sys.stderr)
 
     # Each class is one draw of the opponent's six spreads from the belief. Independent
     # draws rather than a partition: the belief has no joint structure across their six,

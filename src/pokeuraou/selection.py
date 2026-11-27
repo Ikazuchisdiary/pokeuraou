@@ -39,13 +39,18 @@ from typing import Any
 
 import numpy as np
 
-from .equilibrium import BayesianEquilibrium, solve_bayesian
+from .equilibrium import BayesianEquilibrium
 from .position import Position
 from .priors import SampledSet
 from .regulation import Regulation
 from .selection_book import BookEntry
-from .selfplay import lead_branches_from_sets, position_from_sets
 from .teams import all_selections
+
+
+def _sheet(s: SampledSet) -> dict[str, Any]:
+    """A set as the port reads a sheet's (`hiddenbench::sheet_set`, `rustworker`'s)."""
+    return {"species": s.species, "ability": s.ability, "item": s.item, "nature": s.nature,
+            "sp": dict(s.sp), "moves": list(s.moves)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,62 +136,76 @@ def solve_selection(
     No turn is resolved. A cell is the value of the turn-1 position itself, because the
     value function already answers "who wins from here" and re-resolving a turn would be
     asking a strictly worse question at 90x90x256 the cost.
+
+    IKA-463: the whole solve is the port's `selectionSolve` request (`rust/src/selection.rs`,
+    the fill the Rust worker's selection store uses): per class every opening's branches --
+    a draw in the leads' switch-ins (a Speed tie that decides the field) is every outcome at
+    its weight, the cell their mean (IKA-352) -- scored on ``evaluate``'s inference server in
+    one batch, the antisymmetry check, and the Bayesian game. ``evaluate`` is an inference
+    server's leaf (`inference.RemoteValue`); any other is `beliefnode.UnservedLeaf`.
     """
+    import base64
     import time
+
+    from . import port, portlp, rustnode, timing
+    from .beliefnode import served_leaf
+    from .encode import rules_of
+    from .inference import request_failed
 
     if not classes:
         raise ValueError("no spread classes to solve over")
     size = pick or reg.meta.picked_team_size
+    if size != reg.meta.picked_team_size:
+        raise ValueError(f"the port solves a selection of {reg.meta.picked_team_size}, not {size}")
     selections = tuple(all_selections(reg.meta.team_size, size))
     started = time.perf_counter()
-
-    matrices: list[np.ndarray] = []
-    evaluated = 0
-    for spread_class in classes:
-        # In one pipelined exchange with the port (IKA-209): the leads' switch-ins were a
-        # quarter of a millisecond each in Python and are a round trip each over there.
-        # A draw in the leads' switch-ins (a Speed tie that decides the field) is every
-        # outcome at its weight, the cell their mean (IKA-352); nearly every opening has one.
-        openings = lead_branches_from_sets(
-            reg,
-            [
-                ([our_six[i] for i in ours], [spread_class.sets[j] for j in theirs])
-                for ours in selections
-                for theirs in selections
-            ],
-        )
-        positions = [pos for branches in openings for _weight, pos in branches]
-        values = np.asarray(evaluate(positions), dtype=np.float64)
-        if len(positions) != len(openings):
-            owner = np.repeat(np.arange(len(openings)), [len(b) for b in openings])
-            weights = np.array([w for branches in openings for w, _pos in branches])
-            values = np.bincount(owner, weights=weights * values, minlength=len(openings))
-        evaluated += len(positions)
-        matrices.append(values.reshape(len(selections), len(selections)))
-
-    # The matrix is only a zero-sum game if the value function is antisymmetric. It is by
-    # construction, so this is a check on the wiring rather than on the model: a mirrored
-    # position must come back at exactly one minus the original.
-    sample = [
-        position_from_sets(
-            reg,
-            [our_six[i] for i in selections[0]],
-            [classes[0].sets[j] for j in selections[k]],
-        )
-        for k in range(min(8, len(selections)))
-    ]
-    # `Position.swapped` rather than swapping the list here: effects carry side-indexed
-    # source slots, and an approximate mirror makes an antisymmetry check meaningless. It
-    # happens to be harmless on a turn-1 position, which has no such effects yet -- but a
-    # check that only works on turn 1 is a check waiting to mislead.
-    mirrored = [pos.swapped() for pos in sample]
-    forward = evaluate(sample)
-    backward = evaluate(mirrored)
-    evaluated += len(sample) + len(mirrored)
-    antisymmetry = float(np.abs(forward + backward - 1.0).max()) if len(sample) else 0.0
-
+    owner = served_leaf(evaluate, "the selection game")
     weights = np.array([c.weight for c in classes], dtype=np.float64)
-    equilibrium = solve_bayesian(matrices, weights)
+    server: dict[str, Any] = {
+        "address": owner.address,
+        "model": owner.model,
+        "shm": owner._block.name,  # noqa: SLF001 - the leaf's own block, idle while the port asks
+        "bytes": int(owner._block.size),  # noqa: SLF001
+        "batch": int(owner.batch_size),
+    }
+    request: dict[str, Any] = {
+        "kind": "selectionSolve",
+        "ours": [_sheet(s) for s in our_six],
+        "classes": [[_sheet(s) for s in c.sets] for c in classes],
+        "server": server,
+        "solve": [{"side": 0, "weights": portlp._b64(weights)}],  # noqa: SLF001
+    }
+    rules = rules_of(owner)
+    if rules.mega_from_slots:
+        request["encoding"] = rules.to_request()
+    answer = port.ask(reg, lambda node: node.selection_solve(request))
+    portlp.COUNTS["crossings"] += 1
+    portlp.COUNTS["lps"] += int(answer.get("lps", 0))
+    if "fault" in answer:
+        raise portlp.PortFault("selectionSolve", str(answer["fault"]))
+    if "serverError" in answer:
+        raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
+                              "capGb": answer.get("capGb")}, "inference failed")
+    if "served" not in answer:
+        raise RuntimeError("the port did not answer `selectionSolve`; the binary predates it -- rebuild it")
+    served = answer["served"]
+    waited = float(served.get("waitUs", 0.0)) / 1e6
+    rustnode.PORT_WAITED[0] -= waited
+    owner.waited += waited
+    owner.copied += float(served.get("copyUs", 0.0)) / 1e6
+    owner.calls += int(served.get("requests", 0))
+    owner.evaluated += int(served.get("rows", 0))
+    timing.count("leaves", int(served.get("rows", 0)))
+    timing.count("serve.requests", int(served.get("requests", 0)))
+    n = len(selections)
+    flat = np.frombuffer(base64.b64decode(answer["matrices"]), dtype="<f8")
+    matrices = [flat[k * n * n:(k + 1) * n * n].reshape(n, n).astype(np.float64)
+                for k in range(len(classes))]
+    evaluated = int(answer["evaluated"])
+    antisymmetry = float(answer["antisymmetry"])
+    equilibrium = portlp.bayesian_answer(matrices, weights, answer["answers"][0])
+    if isinstance(equilibrium, Exception):
+        raise equilibrium
 
     return SelectionAnalysis(
         reg=reg,

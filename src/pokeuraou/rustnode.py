@@ -1007,6 +1007,11 @@ class RustNode:
         the replacement fills it replaces were (`rust.replacements`)."""
         return self._exchange(request)
 
+    def selection_solve(self, request: dict[str, Any]) -> dict[str, Any]:
+        """IKA-463: a selection game (`selectionSolve`) in one crossing: the matrices filled and
+        scored on the inference server, and the Bayesian game solved."""
+        return self._exchange(request)
+
     def parallel(self) -> dict[str, Any]:
         """The port's cell-thread counters (IKA-32): `threads`, and how many maps and items
         ran on the pool, `offMain` of them on a thread other than the one reading requests."""

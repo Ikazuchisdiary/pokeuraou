@@ -39,7 +39,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.damage import register_mega_stones  # noqa: E402
-from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
 from pokeuraou.selection import SpreadClass, solve_selection  # noqa: E402
 from pokeuraou.standings import (  # noqa: E402
@@ -57,22 +56,28 @@ def main() -> None:
     ap.add_argument("--teams", type=int, default=8, help="opponents to solve")
     ap.add_argument("--classes", type=int, default=8)
     ap.add_argument("--seed", type=int, default=20260919)
-    ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
-    import torch
+    import tempfile
 
-    from pokeuraou.value import BatchedValue, load_ensemble
+    from pokeuraou.humanplay import served_leaf
+    from pokeuraou.inference import start_server
 
     roster = load_roster(args.roster)
     reg = roster.reg
     register_mega_stones(reg)
-    encoder = Encoder(reg)
-    nets, _ = load_ensemble(list(args.model), encoder)
-    device = torch.device(
-        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    )
-    leaf = BatchedValue([n.to(device) for n in nets], encoder, device=device)
+    # IKA-463: the port solves the selection game on the Rust inference server (CUDA).
+    log = Path(tempfile.mkdtemp(prefix="blind-opponent-")) / "server.log"
+    server, address = start_server({"value": list(args.model)}, regulation=reg.meta.format_id, log=log)
+    leaf, _encoder = served_leaf(reg, address, list(args.model))
+    try:
+        _compare(args, reg, roster, leaf)
+    finally:
+        leaf.close()
+        server.terminate()
+
+
+def _compare(args: argparse.Namespace, reg: object, roster: object, leaf: object) -> None:
 
     standings = load_standings(find_cached_standings(), reg)
     prior = load_chaos(find_cached_chaos(reg.meta.format_id), reg)

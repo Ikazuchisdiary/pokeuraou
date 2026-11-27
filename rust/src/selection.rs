@@ -8,8 +8,12 @@
 //! same rows in the same requests (one batch of every opening's branches, cut at the server's
 //! chunk; then the eight antisymmetry positions and their mirrors), and the file is the same
 //! JSON `prep.rs` and `BookEntry.from_json` read.
+//!
+//! IKA-463: the same fill (`fill`) answers the `selectionSolve` request, which a person's game,
+//! the analysis mode and the tools ask through `selection.solve_selection`: every spread class's
+//! matrix, scored on the caller's inference server, and the Bayesian game solved here.
 
-use crate::encode::Encoder;
+use crate::encode::{EncodeRules, Encoder};
 use crate::hiddenbench::SheetSet;
 use crate::lp::{solve_bayesian, sum_f64};
 use crate::position::Position;
@@ -97,17 +101,156 @@ fn swapped(position: &Position) -> Position {
 
 /// The leaf's value of each position (side 0's win probability), one batch cut at the server's
 /// chunk as `RemoteValue.__call__` cuts it.
-fn score(encoder: &Encoder, server: &Server, positions: &[&Position]) -> Result<Vec<f64>, String> {
-    let mut stats = Stats::default();
+fn score(
+    encoder: &Encoder,
+    server: &Server,
+    rules: EncodeRules,
+    positions: &[&Position],
+    stats: &mut Stats,
+) -> Result<Vec<f64>, served::Failed> {
     let mut out = Vec::with_capacity(positions.len());
     // Encoded a chunk at a time, as `RemoteValue.__call__` does, so one batch is never all in memory.
     for chunk in positions.chunks(server.batch.max(1)) {
-        let encoded = encoder.encode_positions(chunk);
+        let encoded = encoder.encode_positions_with(chunk, rules);
         let rows = [chunk.len()];
-        let batch = served::begin(server, &encoder.widths, &[&encoded], &rows, &mut stats).map_err(failed)?;
-        out.extend(served::finish(server, batch, &mut stats).map_err(failed)?);
+        let batch = served::begin(server, &encoder.widths, &[&encoded], &rows, stats)?;
+        out.extend(served::finish(server, batch, stats)?);
     }
     Ok(out)
+}
+
+/// Why a selection game has no matrices: a rule the port refused, or the server's failure.
+pub(crate) enum FillFailed {
+    Refused(String),
+    Server(served::Failed),
+}
+
+/// The 90 x 90 matrices of a selection game (`selection.solve_selection`'s fill): per spread
+/// class of the other side's six, every opening's branches scored in one batch and a cell the
+/// weighted sum of its branches, row-major; then the antisymmetry check of the first class (our
+/// first selection against its first eight, and their mirrors). The matrices, the check, and
+/// the positions scored.
+pub(crate) fn fill(
+    reg: &Reg,
+    encoder: &Encoder,
+    server: &Server,
+    rules: EncodeRules,
+    row: &[SheetSet],
+    classes: &[&[SheetSet]],
+    stats: &mut Stats,
+) -> Result<(Vec<Vec<f64>>, f64, usize), FillFailed> {
+    let refused = FillFailed::Refused;
+    let Some(first) = classes.first() else { return Err(refused("no spread classes to solve over".into())) };
+    if classes.iter().any(|c| c.len() != row.len()) {
+        return Err(refused("the two sheets are not the same size".into()));
+    }
+    let selections = all_selections(row.len(), reg.picked_team_size);
+    let n = selections.len();
+    fn pick<'s>(sets: &'s [SheetSet], sel: &[usize]) -> Vec<&'s SheetSet> {
+        sel.iter().map(|i| &sets[*i]).collect()
+    }
+    let mut matrices = Vec::with_capacity(classes.len());
+    let mut evaluated = 0usize;
+    for col in classes {
+        // Every opening's branches, in (ours, theirs) order, flattened as `solve_selection` does.
+        let mut positions: Vec<Position> = Vec::new();
+        let mut owner: Vec<(usize, f64)> = Vec::new();
+        let mut branched = false;
+        for (i, ours) in selections.iter().enumerate() {
+            let mine = pick(row, ours);
+            for (j, theirs) in selections.iter().enumerate() {
+                let other = pick(col, theirs);
+                let opening = crate::prep::opening(reg, [&mine, &other]).map_err(refused)?;
+                let branches = crate::resolve::commands::lead_branches(reg, &opening).map_err(refused)?;
+                if branches.len() != 1 {
+                    branched = true;
+                }
+                for (weight, position) in branches {
+                    owner.push((i * n + j, weight));
+                    positions.push(position);
+                }
+            }
+        }
+        let refs: Vec<&Position> = positions.iter().collect();
+        let values = score(encoder, server, rules, &refs, stats).map_err(FillFailed::Server)?;
+        let mut matrix = vec![0.0f64; n * n];
+        if !branched {
+            matrix.copy_from_slice(&values);
+        } else {
+            // `np.bincount(owner, weights=weights * values)`: each cell 0.0 plus its branches in order.
+            for ((cell, weight), value) in owner.iter().zip(&values) {
+                matrix[*cell] += weight * value;
+            }
+        }
+        evaluated += positions.len();
+        matrices.push(matrix);
+    }
+
+    // The antisymmetry check: our first selection against the first eight of theirs, each with
+    // the leads' draws taken as their first option (`position_from_sets` without a generator).
+    let mut sample = Vec::new();
+    for theirs in selections.iter().take(8) {
+        let opening = crate::prep::opening(reg, [&pick(row, &selections[0]), &pick(first, theirs)]).map_err(refused)?;
+        sample.push(crate::resolve::commands::lead_phase(reg, opening, |_| Ok(0)).map_err(refused)?);
+    }
+    let mirrored: Vec<Position> = sample.iter().map(swapped).collect();
+    let forward = score(encoder, server, rules, &sample.iter().collect::<Vec<_>>(), stats).map_err(FillFailed::Server)?;
+    let backward = score(encoder, server, rules, &mirrored.iter().collect::<Vec<_>>(), stats).map_err(FillFailed::Server)?;
+    let antisymmetry = forward.iter().zip(&backward).map(|(f, b)| (f + b - 1.0).abs()).fold(0.0f64, f64::max);
+    evaluated += sample.len() + mirrored.len();
+    Ok((matrices, antisymmetry, evaluated))
+}
+
+/// `selectionSolve` (IKA-463): `selection.solve_selection` in one request. The matrices filled
+/// and scored on the caller's inference server (`fill`), and the Bayesian game over the spread
+/// classes solved as `beliefFold` solves side 0's game (`solve_games`).
+///
+/// { "kind": "selectionSolve", "ours": [set], "classes": [[set]], "server": {...},
+///   "encoding": {"megaFromSlots": b}, "solve": [ { "side": 0, "weights": b64 } ] }
+/// -> `beliefFold`'s answer (`matrices`, `answers`, `lps`) and `antisymmetry`, `evaluated`,
+///    `served`; or `fault`, or `serverError`.
+pub fn selection_solve(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
+    let fault = |e: String| json!({ "fault": e });
+    let sets = |v: &Value| -> Vec<SheetSet> {
+        v.as_array().map(|a| a.iter().map(crate::hiddenbench::sheet_set).collect()).unwrap_or_default()
+    };
+    let server = match Server::from_json(&value["server"]) {
+        Ok(server) => server,
+        Err(why) => return fault(why),
+    };
+    let rules = EncodeRules {
+        mega_from_slots: value
+            .get("encoding")
+            .and_then(|e| e.get("megaFromSlots"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    let row = sets(&value["ours"]);
+    let classes: Vec<Vec<SheetSet>> = value["classes"].as_array().map(|a| a.iter().map(sets).collect()).unwrap_or_default();
+    let class_refs: Vec<&[SheetSet]> = classes.iter().map(Vec::as_slice).collect();
+    let mut stats = Stats::default();
+    let (matrices, antisymmetry, evaluated) = match fill(reg, encoder, &server, rules, &row, &class_refs, &mut stats) {
+        Ok(filled) => filled,
+        Err(FillFailed::Refused(why)) => return fault(format!("the selection game: {why}")),
+        Err(FillFailed::Server(why)) => return crate::beliefnode::server_failed(why),
+    };
+    let n = all_selections(row.len(), reg.picked_team_size).len();
+    // Side 0's game over the classes: the jobs are the other side's (`solve_asks`).
+    let sides = vec![1i64; matrices.len()];
+    let mut answer = match crate::beliefnode::solve_games(value, &matrices, &sides, n, n) {
+        Ok(answer) => answer,
+        Err(why) => return fault(why),
+    };
+    answer["kind"] = json!("selectionSolve");
+    answer["antisymmetry"] = json!(antisymmetry);
+    answer["evaluated"] = json!(evaluated);
+    answer["served"] = json!({
+        "requests": stats.requests,
+        "rows": stats.rows,
+        "waitUs": stats.wait_ns as f64 / 1e3,
+        "copyUs": stats.copy_ns as f64 / 1e3,
+    });
+    answer
 }
 
 fn failed(why: served::Failed) -> String {
@@ -141,53 +284,14 @@ pub fn solve_pair(
     }
     let selections = all_selections(row.sets.len(), reg.picked_team_size);
     let n = selections.len();
-    fn pick<'s>(sets: &'s [SheetSet], sel: &[usize]) -> Vec<&'s SheetSet> {
-        sel.iter().map(|i| &sets[*i]).collect()
-    }
-    // Every opening's branches, in (ours, theirs) order, flattened as `solve_selection` does.
-    let mut positions: Vec<Position> = Vec::new();
-    let mut owner: Vec<(usize, f64)> = Vec::new();
-    let mut branched = false;
-    for (i, ours) in selections.iter().enumerate() {
-        let mine = pick(row.sets, ours);
-        for (j, theirs) in selections.iter().enumerate() {
-            let other = pick(col.sets, theirs);
-            let opening = crate::prep::opening(reg, [&mine, &other])?;
-            let branches = crate::resolve::commands::lead_branches(reg, &opening)?;
-            if branches.len() != 1 {
-                branched = true;
-            }
-            for (weight, position) in branches {
-                owner.push((i * n + j, weight));
-                positions.push(position);
-            }
-        }
-    }
-    let refs: Vec<&Position> = positions.iter().collect();
-    let values = score(encoder, server, &refs)?;
-    let mut matrix = vec![0.0f64; n * n];
-    if !branched {
-        matrix.copy_from_slice(&values);
-    } else {
-        // `np.bincount(owner, weights=weights * values)`: each cell 0.0 plus its branches in order.
-        for ((cell, weight), value) in owner.iter().zip(&values) {
-            matrix[*cell] += weight * value;
-        }
-    }
-    let evaluated_cells = positions.len();
-
-    // The antisymmetry check: our first selection against the first eight of theirs, each with
-    // the leads' draws taken as their first option (`position_from_sets` without a generator).
-    let mut sample = Vec::new();
-    for theirs in selections.iter().take(8) {
-        let opening = crate::prep::opening(reg, [&pick(row.sets, &selections[0]), &pick(col.sets, theirs)])?;
-        sample.push(crate::resolve::commands::lead_phase(reg, opening, |_| Ok(0))?);
-    }
-    let mirrored: Vec<Position> = sample.iter().map(swapped).collect();
-    let forward = score(encoder, server, &sample.iter().collect::<Vec<_>>())?;
-    let backward = score(encoder, server, &mirrored.iter().collect::<Vec<_>>())?;
-    let antisymmetry = forward.iter().zip(&backward).map(|(f, b)| (f + b - 1.0).abs()).fold(0.0f64, f64::max);
-    let evaluated = evaluated_cells + sample.len() + mirrored.len();
+    let mut stats = Stats::default();
+    let (mut matrices, antisymmetry, evaluated) =
+        match fill(reg, encoder, server, EncodeRules::default(), row.sets, &[col.sets], &mut stats) {
+            Ok(filled) => filled,
+            Err(FillFailed::Refused(why)) => return Err(why),
+            Err(FillFailed::Server(why)) => return Err(failed(why)),
+        };
+    let matrix = matrices.remove(0);
 
     let solved = solve_bayesian(&[(matrix.clone(), n, n)], &[1.0], 1e-9).map_err(|why| format!("the selection game: {why:?}"))?;
     // `assemble_bayesian` for one class of weight 1.

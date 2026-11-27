@@ -37,6 +37,7 @@ from pokeuraou.selection_book import (
     explore_mixture,
     perplexity,
 )
+from pokeuraou.standin import RowStub
 from pokeuraou.standings import Standings, TeamMember, TournamentTeam
 from pokeuraou.teams import all_selections, load_roster
 
@@ -240,25 +241,18 @@ def test_the_entry_carries_the_lps_own_numbers(roster) -> None:  # noqa: ANN001
     """``book_entry`` must copy the solve, not re-derive anything."""
     reg = roster.reg
 
-    def evaluate(positions):  # noqa: ANN001, ANN202
+    def score(rows):  # noqa: ANN001, ANN202
         """Antisymmetric by construction: strength is a sum over each side's members.
 
         The active pair counts double, so leads matter and the 90 selections are not all
         the same cell -- otherwise the LP would return an arbitrary tie and this test
-        would check nothing.
+        would check nothing. Read off the encoded rows (`standin.RowStub`): the port scores
+        the selection game on the inference server (IKA-463).
         """
-        out = np.empty(len(positions), dtype=np.float64)
-        for i, pos in enumerate(positions):
-            strengths = []
-            for side in pos.sides:
-                strengths.append(
-                    sum(
-                        m.maxhp * (2 if m.active_index is not None else 1)
-                        for m in side.pokemon
-                    )
-                )
-            out[i] = 1.0 / (1.0 + np.exp(-(strengths[0] - strengths[1]) / 200.0))
-        return out
+        strengths = (rows.maxhp * np.where(rows.active, 2, 1)).sum(axis=-1)
+        return 1.0 / (1.0 + np.exp(-(strengths[:, 0] - strengths[:, 1]) / 200.0))
+
+    evaluate = RowStub(reg, score)
 
     classes = [
         SpreadClass(weight=0.4, sets=tuple(roster.sets), label="a"),

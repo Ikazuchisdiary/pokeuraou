@@ -51,6 +51,10 @@ from pokeuraou.pool import load_pool
 from pokeuraou.regulation import repo_root
 from pokeuraou.selfplay import position_from_sets
 
+# Antisymmetric: HP summed per side, the active pair counted twice; a served stand-in, since
+# the port scores the selection game on the server (IKA-463).
+from .test_poolplay import _stub
+
 #: A fixed price table, so these tests do not move when `NODE_TIME` is re-measured.
 PRICES = {("local", 1): NodeTime(fixed_ms=10.0, cell_ms=0.05),
           ("local", 8): NodeTime(fixed_ms=10.0, cell_ms=0.02)}
@@ -61,16 +65,6 @@ def _prices(monkeypatch):  # noqa: ANN001, ANN202
     monkeypatch.setattr(humanplay, "NODE_TIME", PRICES)
 
 
-def _stub(positions):  # noqa: ANN001, ANN202
-    """Antisymmetric: HP summed per side, the active pair counted twice (test_poolplay's)."""
-    out = np.empty(len(positions), dtype=np.float64)
-    for i, pos in enumerate(positions):
-        strength = [
-            sum(m.hp * (2 if m.active_index is not None else 1) for m in side.pokemon)
-            for side in pos.sides
-        ]
-        out[i] = 1.0 / (1.0 + np.exp(-(strength[0] - strength[1]) / 150.0))
-    return out
 
 
 @pytest.fixture(scope="module")
@@ -378,6 +372,44 @@ def test_the_agent_s_replacement_is_the_port_s_replacement_node(  # noqa: ANN001
     # One request a phase, the agent's own game only.
     assert len(asked) == len(compared) and portlp.COUNTS["replaced"] - before == len(asked)
     assert asked == [(c[0],) for c in compared]
+
+
+def test_the_open_node_is_the_port_s_belief_node(pool, noisy_leaf) -> None:  # noqa: ANN001
+    """IKA-463: the open depth-1 node of a move (`solve_move(exact=True)`, no deepening) is
+    the port's `beliefNode` on one exact completion a side, one request a node. Its mixture,
+    its model of the other side and its value are those of the search it replaced
+    (`search.search`: the port's fill and Python's LP), at both seats, on mixed games (IKA-463
+    record, section 11, gives the broken versions this test failed on)."""
+    from pokeuraou import portlp
+    from pokeuraou.budget import Budget
+    from pokeuraou.narrow import narrow
+    from pokeuraou.search import search
+
+    reg = pool.reg
+    rng = np.random.default_rng(5)
+    mixed = 0
+    for _ in range(6):
+        four = [list(pool.teams[s].sets)[:4] for s in (0, 1)]
+        pos = position_from_sets(reg, four[0], four[1], rng=rng)
+        for side in pos.sides:
+            for mon in side.pokemon:
+                if mon.active_index is not None:
+                    mon.hp = max(1, int(mon.maxhp * rng.uniform(0.3, 1.0)))
+        ours = narrow(reg, pos, 0, limit=6).actions
+        theirs = narrow(reg, pos, 1, limit=6).actions
+        old = search(reg, pos, ours, theirs, noisy_leaf, budget=Budget.matrix()).equilibrium
+        for me in (0, 1):
+            before = portlp.COUNTS["exact"]
+            new = humanplay.solve_move(reg, pos, me, list(ours), list(theirs), None, noisy_leaf,
+                                       budget=Budget.matrix(), exact=True)
+            assert portlp.COUNTS["exact"] == before + 1
+            want = old.row_strategy if me == 0 else old.col_strategy
+            model = old.col_strategy if me == 0 else old.row_strategy
+            np.testing.assert_allclose(new.strategy, want, atol=1e-9)
+            np.testing.assert_allclose(new.model, model, atol=1e-9)
+            assert new.value == pytest.approx(float(old.value), abs=1e-9)
+            mixed += float(np.max(want)) < 1 - 1e-6
+    assert mixed >= 2, "no mixed answer; a seat mix-up between pure answers would pass"
 
 
 def test_the_wall_clock_spends_the_budget(pool, tmp_path) -> None:  # noqa: ANN001

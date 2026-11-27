@@ -300,13 +300,17 @@ def test_a_paste_reads_as_a_roster_and_a_bad_one_gives_none(reg) -> None:  # noq
 # ------------------------------------------------------------------------------ the read
 
 
-def _stub(positions):  # noqa: ANN001, ANN202
-    out = np.empty(len(positions), dtype=np.float64)
-    for i, pos in enumerate(positions):
-        strength = [sum(m.hp * (2 if m.active_index is not None else 1) for m in side.pokemon)
-                    for side in pos.sides]
-        out[i] = 1.0 / (1.0 + np.exp(-(strength[0] - strength[1]) / 150.0))
-    return out
+def _hp_leads(rows):  # noqa: ANN001, ANN202
+    strength = (rows.hp * np.where(rows.active, 2, 1)).sum(axis=-1)
+    return 1.0 / (1.0 + np.exp(-(strength[:, 0] - strength[:, 1]) / 150.0))
+
+
+def _stub_of(reg):  # noqa: ANN001, ANN202
+    """HP summed per side, the active pair counted twice, read off the encoded rows: the port
+    scores the selection game on a stand-in inference server (`standin.RowStub`, IKA-463)."""
+    from pokeuraou.standin import RowStub
+
+    return RowStub(reg, _hp_leads)
 
 
 def _rosters(reg):  # noqa: ANN001, ANN202
@@ -323,8 +327,9 @@ def _rosters(reg):  # noqa: ANN001, ANN202
 def test_true_sets_in_give_solve_entry_bit_for_bit_and_one_changed_set_moves_it(reg, port) -> None:  # noqa: ANN001
     register_mega_stones(reg)
     mine, them = _rosters(reg)
-    direct = humanplay.solve_entry(reg, (mine, them), _stub, "stub")
-    via = rankedentry.solve_ranked(reg, mine, opponent_roster(reg, them.sets), _stub, "stub")
+    stub = _stub_of(reg)
+    direct = humanplay.solve_entry(reg, (mine, them), stub, "stub")
+    via = rankedentry.solve_ranked(reg, mine, opponent_roster(reg, them.sets), stub, "stub")
     assert np.array_equal(direct.our_strategy, via.our_strategy)
     assert direct.value == via.value and direct.selections == via.selections
     assert np.array_equal(direct.their_strategies[0], via.their_strategies[0])
@@ -333,7 +338,7 @@ def test_true_sets_in_give_solve_entry_bit_for_bit_and_one_changed_set_moves_it(
     # (the stub reads HP, so the change is a spread: a leaf that reads moves would move on those too)
     changed[0] = apply_override(reg, rankedentry.OpponentSet(changed[0], "manual", 0, 0, (), "override", 0),
                                 {"sp": {"hp": 32, "atk": 2, "spe": 32}}).set
-    other = rankedentry.solve_ranked(reg, mine, opponent_roster(reg, changed), _stub, "stub")
+    other = rankedentry.solve_ranked(reg, mine, opponent_roster(reg, changed), stub, "stub")
     assert (not np.array_equal(direct.our_strategy, other.our_strategy)) or direct.value != other.value
 
 

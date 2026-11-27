@@ -19,21 +19,21 @@ from pokeuraou import poolplay
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.pool import load_pool
 from pokeuraou.poolplay import SolvedSelections
+from pokeuraou.regulation import load_regulation
+from pokeuraou.standin import RowStub
 
 from ._harness import load_tool
 from .test_poolplay import _stub, _variants, _write_pool
 
 
-def _other_stub(positions):  # noqa: ANN001, ANN202
-    """Antisymmetric too, and a different opinion: the bench counts double, not the leads."""
-    out = np.empty(len(positions), dtype=np.float64)
-    for i, pos in enumerate(positions):
-        strength = [
-            sum(m.hp * (1 if m.active_index is not None else 2) for m in side.pokemon)
-            for side in pos.sides
-        ]
-        out[i] = 1.0 / (1.0 + np.exp(-(strength[0] - strength[1]) / 40.0))
-    return out
+def _bench_double(rows):  # noqa: ANN001, ANN202
+    strength = (rows.hp * np.where(rows.active, 1, 2)).sum(axis=-1)
+    return 1.0 / (1.0 + np.exp(-(strength[:, 0] - strength[:, 1]) / 40.0))
+
+
+#: Antisymmetric too, and a different opinion: the bench counts double, not the leads (served:
+#: the port scores the selection game on the server, IKA-463).
+_other_stub = RowStub(load_regulation("gen9championsvgc2026regmb"), _bench_double)
 
 
 @pytest.fixture(scope="module")

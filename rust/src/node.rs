@@ -1245,6 +1245,10 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("replacementNode") => {
             crate::replacenode::replacement_node(reg, encoder, &value)
         }
+        // IKA-463: a selection game's matrices, scores and Bayesian game in one request.
+        Ok(value) if value["kind"].as_str() == Some("selectionSolve") => {
+            crate::selection::selection_solve(reg, encoder, &value)
+        }
         // IKA-458 stage 3.6a: a replacement phase's node, the draws and the phase in one request.
         Ok(value) if value["kind"].as_str() == Some("replacementPhase") => {
             crate::replacephase::replacement_phase(reg, encoder, &value)

@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from pokeuraou.selection import SpreadClass, cyclic_share, render, solve_selection
+from pokeuraou.standin import RowStub
 from pokeuraou.teams import all_selections, load_roster
 
 REGULATION = "gen9championsvgc2026regmb"
@@ -31,42 +32,45 @@ def roster():  # noqa: ANN201
     return load_roster("rizabanadohido")
 
 
-def _antisymmetric_stub(scores: dict[str, float]):  # noqa: ANN202
+def EncodedStub(reg, score) -> RowStub:  # noqa: ANN001, N802
+    """A stand-in leaf read off the encoded rows, so the port's `selectionSolve` can score it
+    on a stand-in inference server (IKA-463). ``score(species, active)`` gets each row's
+    species ids and whether each is on the field, both shaped (rows, 2, mons a side), absent
+    mons ``""``."""
+    return RowStub(reg, lambda rows: score(rows.species, rows.active))
+
+
+def _sigmoid(x):  # noqa: ANN001, ANN202
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _antisymmetric_stub(reg, scores: dict[str, float]) -> RowStub:  # noqa: ANN001
     """A stand-in value function: each side's strength is the sum of its members' scores.
 
     Antisymmetric by construction -- ``V = sigmoid(ours - theirs)`` -- so it satisfies the
     one property the real network guarantees, which is what the solver relies on.
     """
+    value = np.vectorize(lambda s: scores.get(s, 0.0), otypes=[np.float64])
 
-    def evaluate(positions):  # noqa: ANN001, ANN202
-        out = np.empty(len(positions), dtype=np.float64)
-        for i, pos in enumerate(positions):
-            strengths = []
-            for side in pos.sides:
-                strengths.append(
-                    sum(scores.get(m.species, 0.0) for m in side.pokemon)
-                )
-            out[i] = 1.0 / (1.0 + np.exp(-(strengths[0] - strengths[1])))
-        return out
+    def score(species, _active):  # noqa: ANN001, ANN202
+        strength = value(species).sum(axis=-1)
+        return _sigmoid(strength[:, 0] - strength[:, 1])
 
-    return evaluate
+    return EncodedStub(reg, score)
 
 
 def test_the_action_space_is_the_ordered_ninety(roster) -> None:  # noqa: ANN001
     reg = roster.reg
     classes = [SpreadClass(weight=1.0, sets=tuple(roster.sets), label="mirror")]
-    calls: list[int] = []
-
-    def evaluate(positions):  # noqa: ANN001, ANN202
-        calls.append(len(positions))
-        return np.full(len(positions), 0.5)
-
-    analysis = solve_selection(reg, roster.sets, classes, evaluate)
+    stub = EncodedStub(reg, lambda species, _active: np.full(len(species), 0.5))
+    analysis = solve_selection(reg, roster.sets, classes, stub)
     assert len(analysis.ours) == 90
     assert len(analysis.theirs) == 90
     assert analysis.matrices[0].shape == (90, 90)
     # 90x90 for the matrix, then the antisymmetry sample and its mirror.
-    assert calls[0] == 8100
+    assert stub.calls[0] == 8100
+    assert stub.calls[1:] == [8, 8]
+    assert analysis.positions_evaluated == 8116
 
 
 def test_a_mirror_is_exactly_even(roster) -> None:  # noqa: ANN001
@@ -74,7 +78,7 @@ def test_a_mirror_is_exactly_even(roster) -> None:  # noqa: ANN001
     reg = roster.reg
     scores = {m.species: float(i) for i, m in enumerate(roster.sets)}
     classes = [SpreadClass(weight=1.0, sets=tuple(roster.sets), label="mirror")]
-    analysis = solve_selection(reg, roster.sets, classes, _antisymmetric_stub(scores))
+    analysis = solve_selection(reg, roster.sets, classes, _antisymmetric_stub(reg, scores))
     assert analysis.value == pytest.approx(0.5, abs=1e-9)
     assert analysis.antisymmetry_error < 1e-9
     assert analysis.equilibrium.duality_gap < 1e-9
@@ -94,13 +98,8 @@ def test_the_matrix_is_ours_by_theirs(roster) -> None:  # noqa: ANN001
     # advantage is real rather than symmetric.
     classes = [SpreadClass(weight=1.0, sets=tuple(roster.sets), label="weak")]
 
-    def evaluate(positions):  # noqa: ANN001, ANN202
-        out = np.empty(len(positions), dtype=np.float64)
-        for i, pos in enumerate(positions):
-            ours = sum(scores.get(m.species, 0.0) for m in pos.sides[0].pokemon)
-            out[i] = 1.0 / (1.0 + np.exp(-ours))
-        return out
-
+    value = np.vectorize(lambda s: scores.get(s, 0.0), otypes=[np.float64])
+    evaluate = EncodedStub(reg, lambda species, _active: _sigmoid(value(species[:, 0]).sum(axis=-1)))
     analysis = solve_selection(reg, roster.sets, classes, evaluate)
     assert analysis.value > 0.5
     for selection, frequency, _loss in analysis.our_frequencies():
@@ -119,21 +118,11 @@ def test_the_leads_are_distinguished_from_the_bench(roster) -> None:  # noqa: AN
     star = roster.sets[0].species
     classes = [SpreadClass(weight=1.0, sets=tuple(roster.sets), label="mirror")]
 
-    def evaluate(positions):  # noqa: ANN001, ANN202
-        out = np.empty(len(positions), dtype=np.float64)
-        for i, pos in enumerate(positions):
-            def active_score(side) -> float:  # noqa: ANN001
-                return sum(
-                    3.0
-                    for m in side.pokemon
-                    if m.species == star and m.active_index is not None
-                )
+    def score(species, active):  # noqa: ANN001, ANN202
+        led = 3.0 * ((species == star) & active).sum(axis=-1)
+        return _sigmoid(led[:, 0] - led[:, 1])
 
-            delta = active_score(pos.sides[0]) - active_score(pos.sides[1])
-            out[i] = 1.0 / (1.0 + np.exp(-delta))
-        return out
-
-    analysis = solve_selection(reg, roster.sets, classes, evaluate)
+    analysis = solve_selection(reg, roster.sets, classes, EncodedStub(reg, score))
     # Symmetric game, so the value is still a half; what matters is *which* selections.
     assert analysis.value == pytest.approx(0.5, abs=1e-9)
     for selection, frequency, _loss in analysis.our_frequencies():
@@ -168,7 +157,7 @@ def test_a_pure_equilibrium_is_reported_as_a_dominance_claim(roster) -> None:  #
     reg = roster.reg
     scores = {m.species: float(i) for i, m in enumerate(roster.sets)}
     classes = [SpreadClass(weight=1.0, sets=tuple(roster.sets), label="mirror")]
-    analysis = solve_selection(reg, roster.sets, classes, _antisymmetric_stub(scores))
+    analysis = solve_selection(reg, roster.sets, classes, _antisymmetric_stub(reg, scores))
     text = render(analysis)
     assert "均衡値" in text
     if len(analysis.equilibrium.row_support()) == 1:
@@ -187,3 +176,60 @@ def test_every_selection_appears_once(roster) -> None:  # noqa: ANN001
     assert len(selections) == len(set(selections))
     seen = {(frozenset(s[:2]), frozenset(s[2:])) for s in selections}
     assert len(seen) == len(selections)
+
+
+def _python_solve(reg, our_six, classes, evaluate):  # noqa: ANN001, ANN202
+    """The reference: `solve_selection` as it was before IKA-463 -- the openings' branches
+    scored in Python and folded by weight, and Python's `solve_bayesian`."""
+    from pokeuraou.equilibrium import solve_bayesian
+    from pokeuraou.selfplay import lead_branches_from_sets
+
+    selections = all_selections(reg.meta.team_size, reg.meta.picked_team_size)
+    matrices = []
+    for c in classes:
+        openings = lead_branches_from_sets(
+            reg, [([our_six[i] for i in ours], [c.sets[j] for j in theirs])
+                  for ours in selections for theirs in selections])
+        positions = [pos for branches in openings for _w, pos in branches]
+        owner = np.repeat(np.arange(len(openings)), [len(b) for b in openings])
+        weights = np.array([w for branches in openings for w, _pos in branches])
+        values = np.bincount(owner, weights=weights * evaluate(positions), minlength=len(openings))
+        matrices.append(values.reshape(len(selections), len(selections)))
+    return matrices, solve_bayesian(matrices, np.array([c.weight for c in classes]))
+
+
+def test_the_port_s_solve_is_the_python_solve_it_replaced(roster) -> None:  # noqa: ANN001
+    """IKA-463: `solve_selection` is the port's `selectionSolve`, one request. On two spread
+    classes that differ, its matrices, mixtures and value are the Python solve's
+    (`_python_solve`). The comparison can fail: the classes' matrices differ, so a class taken
+    for the other moves them, and the equilibrium is mixed."""
+    import dataclasses
+
+    from pokeuraou import portlp
+
+    reg = roster.reg
+    scores = {m.species: float(i) * 1.1 for i, m in enumerate(roster.sets)}
+    value = np.vectorize(lambda s: scores.get(s, 0.0), otypes=[np.float64])
+
+    def score(rows):  # noqa: ANN001, ANN202
+        # Cyclic in the leads (sin of the difference), so the game mixes; the HP, which the
+        # second class moves, makes the two classes' matrices differ.
+        x = (value(rows.species) * rows.active + rows.maxhp / 500.0 * ~rows.active).sum(axis=-1)
+        return _sigmoid(3.0 * np.sin(x[:, 0] - x[:, 1]))
+
+    stub = RowStub(reg, score)
+    moved = tuple(dataclasses.replace(s, sp={"hp": 32, "def": 32, "spd": 2}) for s in roster.sets)
+    classes = [SpreadClass(0.3, tuple(roster.sets), "sheet"), SpreadClass(0.7, moved, "moved")]
+    before = portlp.COUNTS["crossings"]
+    analysis = solve_selection(reg, roster.sets, classes, stub)
+    assert portlp.COUNTS["crossings"] == before + 1
+    matrices, reference = _python_solve(reg, roster.sets, classes, stub)
+    assert float(np.max(np.abs(matrices[0] - matrices[1]))) > 0.01
+    for got, want in zip(analysis.matrices, matrices, strict=True):
+        np.testing.assert_allclose(got, want, rtol=0, atol=1e-12)
+    eq = analysis.equilibrium
+    assert len(eq.row_support()) > 1, "a pure answer would not tell the mixtures apart"
+    np.testing.assert_allclose(eq.row_strategy, reference.row_strategy, atol=1e-9)
+    for got, want in zip(eq.col_strategies, reference.col_strategies, strict=True):
+        np.testing.assert_allclose(got, want, atol=1e-9)
+    assert analysis.value == pytest.approx(float(reference.value), abs=1e-12)
