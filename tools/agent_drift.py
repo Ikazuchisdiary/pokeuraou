@@ -288,25 +288,23 @@ def shipping_args() -> set[str]:
     return set(SHIPPING_ARGS) & set(AGENT_ARGS)
 
 
-#: The keys of the Rust workers' configs that decide which agent plays (IKA-458 stage 3.7):
-#: generation's config (`rustworker.build_config`) and every board arm (`rustworker.board_config`)
-#: built from generation's flags must agree on them by value (`tests/_worker_agent.py`).
-WORKER_AGENT = ("node", "exactBudget", "maxTurns", "notes", "width", "leaf and store tag", "Q")
+#: IKA-458 stage 3.7: generation's config (`rustworker.build_config`) and every board arm
+#: (`rustworker.board_config`) built from generation's flags agree on every key, by value, except
+#: those `pokeuraou.workeragent.ALLOWED_DIFFERENT` names with its reason.
+WORKER_AGENT = "every key but pokeuraou.workeragent.ALLOWED_DIFFERENT"
 
 
 def worker_drift(rustworker_source: Path | None = None) -> list[str]:
     """How a board arm of generation's leaf, Q and width plays another agent than generation.
 
-    Builds both configs from the same flags on the tests' stand-in inference server and compares
-    them by value (`tests/_worker_agent.agent_differences`), checks the node keys the Rust workers
+    Builds both configs from the same flags on the stand-in inference server and compares
+    them by value (`pokeuraou.workeragent.agent_differences`), checks the node keys the Rust workers
     write after reading a config (`rust_node_writes`), and holds the board's default width to
     generation's. Empty when the two build the same agent.
     """
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    from tests import _worker_agent
+    from pokeuraou import workeragent
 
-    problems = _worker_agent.worker_drift(rustworker_source)
+    problems = workeragent.worker_drift(rustworker_source)
     generation = flag_defaults(ROOT / "tools/generate_queue.py").get("--limit")
     board = next((ast.unparse(n.value) for n in ast.parse(
         (ROOT / "tools/pool_match.py").read_text(encoding="utf-8")).body
@@ -332,8 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  DRIFTED   rustworker.py: the board's worker builds another agent than "
               f"generation's: {'; '.join(worker)}")
     else:
-        print("  ok        rustworker.py: generation's config and every board arm agree on the agent "
-              f"({', '.join(WORKER_AGENT)}) by value (IKA-458 stage 3.7)")
+        print("  ok        rustworker.py: generation's config and every board arm agree on "
+              f"{WORKER_AGENT}, by value (IKA-458 stage 3.7)")
     print(f"  a play_game call must name: {', '.join(sorted(reference))}")
     print("  (depth, policy, solve_sparsely and solve_restricted default to the shipped\n"
           "   setting, so an omission there is not a drift)\n")
@@ -433,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
     if worker:
         print(
             f"\n  WORKER: {'; '.join(worker)}.\n  The board's arms have to play generation's "
-            "agent: build each agent key the same way in rustworker (WORKER_AGENT)."
+            "agent: build each key the same way in rustworker, or name it in ALLOWED_DIFFERENT."
         )
     if play_drift:
         print(
