@@ -15,6 +15,7 @@ the inference server's (`qrank.RemoteQ`).
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -41,8 +42,26 @@ SLICE_STEPS = 4
 #: The shortest slice of wall time, in milliseconds.
 SLICE_MIN_MS = 25.0
 
-#: The process's reads and slices: the positive control a test reads.
-COUNTS = {"reads": 0, "slices": 0}
+#: The least wall time between two walks of the tree for its lines (the guard's count a page
+#: shows), in milliseconds; Python's deepening walked its tree no more often than once a
+#: second either (`analysis.Session`'s ``guard_every_ms`` before IKA-464).
+LINES_EVERY_MS = 1000.0
+
+#: The process's reads and slices, and the walks asked for after a read's last slice: the
+#: positive control a test reads.
+COUNTS = {"reads": 0, "slices": 0, "walks": 0}
+
+
+def _ask_run(reg: Regulation, run: dict[str, Any]) -> dict[str, Any]:
+    """One `deepenRun` and its answer, a fault raised."""
+    got = port.ask(reg, lambda node: node._exchange(run))  # noqa: SLF001
+    if "no deepening is held" in str(got.get("fault", "")):
+        raise portlp.PortFault(
+            "deepenRun", "the read was lost: the port was started again mid-read, and a "
+            "read lives only in the process that began it")
+    if "fault" in got or "serverError" in got or "tooBig" in got:
+        raise portlp.PortFault("deepenRun", str(got))
+    return got
 
 
 def _code(action: SideAction) -> list:
@@ -95,14 +114,15 @@ def _q_server(reg: Regulation) -> dict[str, Any]:
 
 def _is_wall(cost: Any) -> bool:  # noqa: ANN401
     """Whether the budget's reading is the wall clock (`humanplay.WallCost`, perhaps inside a
-    `HaltingCost` or `PonderCost`): then a slice is wall time, else a few counted steps."""
+    `HaltingCost` or `PonderCost`, or a reading that says ``wall``: `analysis.StopCost` when
+    no step count stops the read): then a slice is wall time, else a few counted steps."""
     from .humanplay import WallCost
 
     seen = cost
     for _ in range(8):
         if seen is None:
             return False
-        if isinstance(seen, WallCost):
+        if isinstance(seen, WallCost) or getattr(seen, "wall", False) is True:
             return True
         seen = getattr(seen, "inner", None)
     return False
@@ -253,6 +273,7 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
         ))
 
     wall = _is_wall(cost)
+    walked = [time.perf_counter()]
     snap = answer
     announce("start", snap)
     stop = ""
@@ -280,16 +301,20 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
         wanted = None if grow is None else grow(meter(snap))
         if wanted is not None:
             run["grow"] = [_codes(wanted[0]), _codes(wanted[1])]
-        got = port.ask(reg, lambda node, run=run: node._exchange(run))  # noqa: SLF001
-        if "no deepening is held" in str(got.get("fault", "")):
-            raise portlp.PortFault(
-                "deepenRun", "the read was lost: the port was started again mid-read, and a "
-                "read lives only in the process that began it")
-        if "fault" in got or "serverError" in got or "tooBig" in got:
-            raise portlp.PortFault("deepenRun", str(got))
+        # The lines are counted by walking the tree, at most every `LINES_EVERY_MS` (they
+        # change nothing the read does; a page shows them).
+        now = time.perf_counter()
+        walk = (now - walked[0]) * 1000.0 >= LINES_EVERY_MS
+        run["walk"] = walk
+        if walk:
+            walked[0] = now
+        snap = _ask_run(reg, run)
         COUNTS["slices"] += 1
-        snap = got
         announce("refine", snap)
+    if snap.get("linesFresh") is False:
+        # The report's lines are the tree's as it ended: one walk, no step.
+        snap = _ask_run(reg, {"kind": "deepenRun", "id": ident, "steps": 0, "walk": True})
+        COUNTS["walks"] += 1
     own = [_action(a) for a in snap["own"]]
     other = [_action(a) for a in snap["other"]]
     lines = tuple(int(v) for v in snap["lines"])

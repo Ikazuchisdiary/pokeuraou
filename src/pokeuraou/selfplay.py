@@ -314,8 +314,9 @@ class GameRecord:
     bench_drop: list[str] = field(
         default_factory=lambda: [LEGACY_BENCH_DROP, LEGACY_BENCH_DROP]
     )
-    #: Each side's best-first deepening label (`deepen.parse_deepen`, IKA-33). Written
-    #: only when a side deepened, so a record without it searched at depth 1.
+    #: Each side's best-first deepening label (IKA-33; ``m<N>...`` in the records of the
+    #: workers that deepened, read by `deepen.parse_deepen` until IKA-464). Written only when
+    #: a side deepened, so a record without it searched at depth 1.
     deepen: list[str] = field(default_factory=lambda: [LEGACY_DEEPEN, LEGACY_DEEPEN])
     #: Each side's search depth and whether its depth 2 read the restricted game (IKA-111).
     #: Written only when a side searched past depth 1, so a record without them is depth 1

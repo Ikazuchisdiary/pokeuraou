@@ -67,7 +67,8 @@ def q_identity(q_models: object, rank_fill: str) -> str | None:
 #: (`hidden.parse_bench_drop`): kept them all. Fixed for the same reason as the fill above.
 LEGACY_BENCH_DROP = "none"
 
-#: The best-first deepening of every game before IKA-33 (`deepen.parse_deepen`): none.
+#: The best-first deepening label of a side that did not deepen: every game before IKA-33,
+#: and every generated game (the labels were read by `deepen.parse_deepen` until IKA-464).
 LEGACY_DEEPEN = "none"
 
 #: Recorded games whose `provenance.kind` is this came from ordinary self-play, where both

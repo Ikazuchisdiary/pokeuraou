@@ -12,11 +12,12 @@ deepening is anytime, so the answer after every step is an answer, and the scree
 IKA-332 shows it as it forms.
 
 **No budget.** The deepening is handed `ENDLESS` cells and a `StopCost` that reads the wall
-clock until a `threading.Event` is set, and the budget's full value after it: the loop
-stops at the top of its next step. The event is set by the page's Stop button, by
-``max_seconds``, by ``max_steps`` (after that many steps -- on this reading of the clock
-the same position, settings and step count give the same answer, bit for bit, whatever
-the machine and its load or the number of threads), by the memory watch, or never; the
+clock until a `threading.Event` is set, and the budget's full value after it: the read
+stops at the end of its slice of wall time (`portdeepen.SLICE_MS`, a quarter second). The
+event is set by the page's Stop button, by ``max_seconds``, by ``max_steps`` (a slice is
+then one step, and the read stops after that many steps -- the same position, settings and
+step count give the same answer, bit for bit, whatever the machine and its load or the
+number of threads), by the memory watch, or never; the
 deepening also stops on its own when nothing inside the depth guard is worth a step
 (``exhausted``).
 
@@ -102,15 +103,21 @@ STOPS = {
 class StopCost:
     """A reading of the deepening's budget (`deepen.Cost`'s place) that does not run out
     until ``stop`` is set: the milliseconds since ``start`` (``cell`` 1, as `WallCost`),
-    and `ENDLESS` -- the whole budget -- once it is. The loop reads it only at the top of a
-    step, so a stop set inside a step (the progress callback, the page, a timer) ends the
-    read after that step; the counts are not read."""
+    and `ENDLESS` -- the whole budget -- once it is; the counts are not read.
+
+    ``wall`` (a read no step count stops): the port's deepening reads it as the wall clock,
+    in slices of wall time (`portdeepen.SLICE_MS`), so a stop set inside a slice (the page, a
+    timer, the memory watch) ends the read after that slice. Not ``wall`` (``max_steps``):
+    a slice is one step, and the read stops after the step it was told to, on any machine."""
 
     cell = 1.0
 
-    def __init__(self, stop: threading.Event, start: float | None = None) -> None:
+    def __init__(
+        self, stop: threading.Event, start: float | None = None, *, wall: bool = True
+    ) -> None:
         self.stop = stop
         self.start = time.perf_counter() if start is None else start
+        self.wall = wall
 
     def ms(  # noqa: ARG002
         self, fills: int, refines: int, cells: int, probed: int = 0, qs: int = 0
@@ -999,7 +1006,8 @@ class Analyzer:
         try:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, self.leaf, budget=budget, exact=exact,
-                cells=ENDLESS, cost=StopCost(stop, started), levels=settings.levels,
+                cells=ENDLESS, cost=StopCost(stop, started, wall=max_steps is None),
+                levels=settings.levels,
                 outside=outside, progress=session, discount=settings.discount,
                 grow=session.widen,
             )

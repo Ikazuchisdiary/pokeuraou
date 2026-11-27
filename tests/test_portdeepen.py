@@ -210,3 +210,27 @@ def test_a_read_is_let_go_however_it_ends(pool, served) -> None:  # noqa: ANN001
         after = counts()
         assert int(after["started"]) == started + 1, kind
         assert int(after["held"]) == 0, f"a read raised at {kind!r} was held"
+
+
+def test_the_lines_are_walked_now_and_then_and_at_the_end(pool, served, monkeypatch) -> None:  # noqa: ANN001, F811
+    """The port walks its tree for the lines (the guard's count) at most every
+    `LINES_EVERY_MS`; a read whose last slice did not walk asks for one walk at the end, so
+    the report's lines are the tree's as it ended: the same lines as a read that walked at
+    every slice."""
+    pos = _positions(pool, 1, seed=23)[0]
+
+    def read(every: float) -> tuple:
+        monkeypatch.setattr(portdeepen, "LINES_EVERY_MS", every)
+        fresh: list = []
+        walks = portdeepen.COUNTS["walks"]
+        got = _read(pool, pos, 0, served, 600, levels=2,
+                    progress=lambda s: fresh.append(s.root.port.get("linesFresh")))
+        return got.deepened, fresh, portdeepen.COUNTS["walks"] - walks
+
+    seldom, fresh, walks = read(1e9)
+    always, fresh_always, walks_always = read(0.0)
+    # The positive control: slices answered the last walk's lines, and the end walked once.
+    assert False in fresh and walks == 1
+    assert all(f is not False for f in fresh_always) and walks_always == 0
+    assert seldom.lines == always.lines and sum(seldom.lines) > 0
+    assert seldom.expanded == always.expanded and seldom.cells == always.cells

@@ -18,7 +18,8 @@
 //!   "outside": [A0, A1] | null,      // the swap oracle's candidates (`sall`: every legal action)
 //!   "levels": L, "discount": d | null, "branches": 3, "childWidth": 8,
 //!   "qServer": S, "properties": bool, "megaFromSlots": bool }
-//! { "kind": "deepenRun", "id": n, "ms": t?, "cells": c?, "steps": k?, "grow": [A0, A1]? }
+//! { "kind": "deepenRun", "id": n, "ms": t?, "cells": c?, "steps": k?, "grow": [A0, A1]?,
+//!   "walk": bool? }                  // false: the lines of the last walk (default true)
 //! { "kind": "deepenEnd", "id": n }
 //! ```
 //!
@@ -297,6 +298,9 @@ struct Read {
     deepest: usize,
     refused_count: u64,
     guarded: u64,
+    /// The lines as the last walk of the tree counted them (`lines`): a snapshot asked not
+    /// to walk (`"walk": false`) answers these.
+    lines_seen: [u64; 4],
     steps: u64,
     exhausted: bool,
     child_passes: u64,
@@ -1031,8 +1035,13 @@ impl Read {
         out
     }
 
-    /// The read as it stands.
-    fn snapshot(&self) -> Value {
+    /// The read as it stands. ``walk`` false answers the lines of the last walk
+    /// (`lines_seen`, ``linesFresh`` false) instead of walking the tree again: a walk costs
+    /// the tree's size, and a long read is asked for a snapshot several times a second.
+    fn snapshot(&mut self, walk: bool) -> Value {
+        if walk {
+            self.lines_seen = self.lines();
+        }
         let root = &self.root;
         let flat: Vec<f64> = root.prices.iter().flatten().copied().collect();
         let oracle = self.oracle.as_ref();
@@ -1058,7 +1067,8 @@ impl Read {
             "steps": self.steps,
             "exhausted": self.exhausted,
             "levels": self.levels,
-            "lines": self.lines(),
+            "lines": self.lines_seen,
+            "linesFresh": walk,
             "guarded": self.guarded,
             "nodes": self.nodes.len(),
             "childPasses": self.child_passes,
@@ -1263,6 +1273,7 @@ fn start(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Result<V
         deepest: 0,
         refused_count: 0,
         guarded: 0,
+        lines_seen: [0; 4],
         steps: 0,
         exhausted: false,
         child_passes: 0,
@@ -1286,7 +1297,7 @@ fn start(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Result<V
         next.set(id + 1);
         id
     });
-    let mut answer = read.snapshot();
+    let mut answer = read.snapshot(true);
     answer["id"] = json!(id);
     READS.with(|reads| reads.borrow_mut().insert(id, read));
     STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1320,7 +1331,7 @@ pub fn deepen_run(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) ->
     };
     let answer = match got {
         Ok(why) => {
-            let mut answer = read.snapshot();
+            let mut answer = read.snapshot(value["walk"].as_bool().unwrap_or(true));
             answer["id"] = json!(id);
             answer["stopped"] = json!(why);
             answer
