@@ -170,22 +170,29 @@ def test_a_priced_budget_is_read_as_the_python_deepening_reads_it(pool, served) 
     refined and of the best cell after it. Two cells can tie to the last bit (position 1, step
     19: two cells of level 1 at 233.47166917005143, both refinements of 193 cells), and which
     of the two each side takes is the last bit of a sum in Rust or in numpy. So the two reads
-    may part, at any step, only where Python's best two were tied there; the step is not fixed.
-    A read that parts at a step with no tie, or that reads the budget otherwise, fails here."""
+    may part, at any step, only where Python's best two were tied there (within a relative
+    1e-12: position 0's step 11 ties to 2.2e-13); the step is not fixed. A read that parts at a
+    step with no tie, or that reads the budget otherwise, fails here. The steps compared are at
+    least those before each position's first tie, which no choice between tied cells can part."""
     from pokeuraou.deepen import COSTS, Cost
+
+    def tied(first: float, second: float | None) -> bool:
+        return second is not None and abs(first - second) <= 1e-12 * max(abs(first), abs(second))
 
     cost = COSTS["local", 1]
     assert cost.level and cost.root, "the prices this test is about"
     budget = int(400.0 / cost.cell)  # 400 ms of priced work, in cells
     want = {r["position"]: r for r in _python_deepening()["priced"]}
     compared = 0
+    untied = 0
     for p, pos in enumerate(_positions(pool, 3, seed=17)):
+        python = want[p]["steps"]
+        untied += next((k for k, s in enumerate(python) if tied(s[3], s[4])), len(python))
         steps: list = []
         port = _move(pool, pos, served, budget, cost, progress=steps.append)
         got = [(s.cells, s.spent, s.root.equilibrium.value) for s in steps if s.kind == "refine"]
         spent = [v for _cells, v, _value in got]
         assert spent and spent[-1] >= budget and all(v < budget for v in spent[:-1])
-        python = want[p]["steps"]
         same = 0
         while same < min(len(got), len(python)):
             cells, units, value = got[same]
@@ -201,8 +208,9 @@ def test_a_priced_budget_is_read_as_the_python_deepening_reads_it(pool, served) 
         assert same < len(python), (p, same, "the port read on past Python's last step")
         assert same < len(got), (p, same, "the port stopped before Python's last step")
         first, second = python[same][3], python[same][4]
-        assert first == second, (p, same + 1, first, second)
-    assert compared >= 60, compared
+        assert tied(first, second), (p, same + 1, first, second)
+    assert untied == 4 + 18 + 12, untied  # the frozen answers' first ties: steps 5, 19 and 13
+    assert compared >= untied, (compared, untied)
     # The control that the port reads the level and root prices at all: a hundred times
     # dearer, the same budget buys fewer steps.
     dear = Cost(fill=cost.fill, refine=cost.refine, cell=cost.cell, level=cost.level * 100,
