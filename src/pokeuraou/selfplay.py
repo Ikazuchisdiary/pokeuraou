@@ -579,8 +579,8 @@ def positions_from_sets(
     the side's `mega_capable_slots` exactly as they went in, or the quartet's every member
     is asked for. What it cannot check is a switch-in that *reads* the bench without
     writing it (Illusion, which neither engine models) -- a regulation that brings one
-    has to stop sharing. `tools/diff_generation.py` with a learned leaf holds the result to
-    the per-position answer through the recorded selection policy.
+    has to stop sharing. (`tools/diff_generation.py` held the result to the per-position answer
+    through the recorded selection policy until IKA-458 stage 3.7 removed it.)
 
     Shallow: the members of a quartet share its leads' objects, and every opening shares
     its Pokemon with the other openings that put the same set in the same slot (IKA-267:
@@ -1180,7 +1180,7 @@ def play_game(
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
     ``hidden_game`` (IKA-458 stage 3.5) is this game's sheets and priors as the port made them
-    when it prepared the game (`prepgame`), for `hiddenStep` to read there; None has this call
+    when it prepared the game (`prepGame`), for `hiddenStep` to read there; None has this call
     define them to the port from ``sheets`` and ``bench_prior``.
 
     ``search_limit`` may be a pair, giving each side its own number of candidates. Equal

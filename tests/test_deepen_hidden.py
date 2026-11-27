@@ -29,7 +29,6 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.equilibrium import solve, solve_bayesian
 from pokeuraou.hidden import completions
 from pokeuraou.narrow import narrow
-from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
 from pokeuraou.position import Position
 from pokeuraou.search import (
     DEFAULT_SUB_BRANCHES,
@@ -41,7 +40,6 @@ from pokeuraou.teams import load_roster
 
 from .test_deepen import _Act, _grown_by_oracle, _hidden_game, _payload, pool, setup  # noqa: F401
 from .test_hidden_depth2 import LEAF, _played
-from .test_poolplay import _served_stub, _stub
 
 
 @pytest.fixture(scope="module")
@@ -467,25 +465,3 @@ def test_without_h_a_hidden_node_stays_at_depth_one(setup) -> None:  # noqa: ANN
     for d in game.decisions:
         if d.deepened is not None:
             assert "classes" not in d.deepened[0]
-
-
-def test_the_hidden_deepening_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN001, F811
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-
-    def arm(label: str) -> PoolArm:
-        return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=2,
-                       rank_by_leaf=False, deepen=label)
-
-    tested, other = arm("m30sallh"), arm("none")
-    for which in (0, 1):
-        record, sides = pool_match_game(
-            pool.reg, pool, (tested, other), seed=33, game_index=0, which=which,
-            max_turns=3,
-        )
-        assert record.deepen[which] == "m30sallh" and record.deepen[1 - which] == "none"
-        assert sides["deepens"][which] == "m30sallh"
-        moves = [d for d in record.decisions if d.kind == "move"]
-        assert moves
-        for d in moves:
-            assert d.deepened[which] is not None and d.deepened[1 - which] is None
-            assert "classes" in d.deepened[which]

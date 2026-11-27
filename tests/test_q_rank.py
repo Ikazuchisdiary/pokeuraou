@@ -37,7 +37,7 @@ from pokeuraou.encode import Encoder
 from pokeuraou.equilibrium import solve
 from pokeuraou.narrow import narrow
 from pokeuraou.pool import load_pool
-from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
+from pokeuraou.poolplay import PoolArm
 from pokeuraou.search import parse_rank_fill, rank_fill_covers
 
 from .test_poolplay import _served_stub, _stub, _variants, _write_pool
@@ -235,25 +235,6 @@ def _rankings() -> dict[str, int]:
     return {k: v["rankings"] for k, v in qrank.QRANKED.items()}
 
 
-def test_the_q_ranking_follows_its_arm_into_either_seat(pool, stub_q) -> None:  # noqa: ANN001, ARG001
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-    tested, other = _arm("q-nocover", solver), _arm("refs2-nocover", solver)
-    for which in (0, 1):
-        before = _rankings()
-        record, _sides = pool_match_game(
-            pool.reg, pool, (tested, other), seed=274, game_index=0, which=which,
-            max_turns=2,
-        )
-        assert record.rank_fill[which] == "q-nocover"
-        assert record.rank_fill[1 - which] == "refs2-nocover"
-        moves = sum(d.kind == "move" for d in record.decisions)
-        assert moves > 0
-        after = _rankings()
-        # The q arm ranks both sides' menus of its own construction, once per move decision.
-        assert after["q-nocover"] - before.get("q-nocover", 0) == 2 * moves
-        assert after.get("refs2-nocover", 0) == before.get("refs2-nocover", 0)
-
-
 def _game(record) -> object:  # noqa: ANN001
     """A record as JSON without its clocks."""
 
@@ -265,64 +246,6 @@ def _game(record) -> object:  # noqa: ANN001
         return x
 
     return strip(record.to_json(objective="test", search_limit=2))
-
-
-def test_one_round_trip_plays_the_games_of_one_request_per_ranking(
-    pool, stub_q, monkeypatch  # noqa: ANN001
-) -> None:
-    """Stage 3: `prefetch` sends both sides' requests together; the games do not move."""
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-    tested, other = _arm("q-nocover", solver), _arm("refs2-nocover", solver)
-    got = {}
-    for how in ("together", "apart"):
-        if how == "apart":
-            # Positive control: without the prefetch every ranking is its own trip.
-            monkeypatch.setattr(qrank, "prefetch", lambda *_a, **_k: {})
-        trips, calls = stub_q.trips, stub_q.calls
-        records = [
-            pool_match_game(
-                pool.reg, pool, (tested, other), seed=274, game_index=g, which=which,
-                max_turns=3,
-            )[0]
-            for g in (0,)
-            for which in (0, 1)
-        ]
-        got[how] = (records, stub_q.trips - trips, stub_q.calls - calls)
-    together, apart = got["together"], got["apart"]
-    assert [_game(r) for r in together[0]] == [_game(r) for r in apart[0]]
-    # The same requests (hidden benches: two views, two requests a menu), half the trips.
-    assert together[2] == apart[2] > 0
-    assert 2 * together[1] == apart[1]
-
-
-def test_each_arm_ranks_by_the_q_its_label_names(pool) -> None:  # noqa: ANN001
-    """Stage 3: ``q-nocover`` and ``q-nocover.b`` in one match rank by two Qs."""
-    encoder = Encoder(pool.reg)
-    plain, named = _StubQ(encoder, "a.pt"), _StubQ(encoder, "b.pt")
-    qrank.install(plain)
-    qrank.install(named, "b")
-    try:
-        solver = SolvedSelections(pool.reg, pool.teams, _stub)
-        tested, other = _arm("q-nocover", solver), _arm("q-nocover.b", solver)
-        before = _rankings()
-        record, _sides = pool_match_game(
-            pool.reg, pool, (tested, other), seed=274, game_index=0, which=1,
-            max_turns=2,
-        )
-        assert record.rank_fill == ["q-nocover.b", "q-nocover"]
-        after = _rankings()
-        moves = sum(d.kind == "move" for d in record.decisions)
-        for label in ("q-nocover", "q-nocover.b"):
-            assert after[label] - before.get(label, 0) == 2 * moves
-        # Each arm's requests went to its own Q, and only there (one or two a menu: two
-        # when the sides' views differ).
-        assert 0 < plain.calls <= 2 * moves and 0 < named.calls <= 2 * moves
-        assert plain.trips == named.trips == moves
-        assert qrank.describe_installed({"": plain, "b": named}) == ["a.pt", "b=b.pt"]
-        with pytest.raises(RuntimeError, match="needs the Q 'c'"):
-            qrank.installed("c")
-    finally:
-        qrank._INSTALLED.clear()  # noqa: SLF001
 
 
 def _untrained_q(reg, encoder, path):  # noqa: ANN001, ANN202
@@ -367,4 +290,3 @@ def test_a_q_loaded_here_and_served_answer_alike(pool, pos, tmp_path) -> None:  
             remote.close()
     finally:
         server.shutdown()
-

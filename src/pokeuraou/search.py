@@ -239,7 +239,7 @@ DEFAULT_RANK_FILL = f"refs{DEFAULT_REFERENCES}"
 #: The tools resolve an unnamed ``--rank-fill`` with `resolve_rank_fill`; ``refs2`` is still
 #: played when named. A q fill with no Q stops -- it never falls back to ``refs2`` in
 #: generation or on the board (`qrank.default_q`). Since IKA-341 the library resolves an
-#: unnamed fill the same way (`play_game`, `_menus`, `generate_pool`, `PoolArm`): it loads
+#: unnamed fill the same way (`play_game`, `_menus`, `PoolArm`): it loads
 #: no Q itself, so a leaf-ranked call with none installed stops at its first menu
 #: (`qrank.installed`).
 SHIPPED_RANK_FILL = "q-nocover"

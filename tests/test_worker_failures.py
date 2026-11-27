@@ -254,8 +254,8 @@ def test_profile_stages_exits_with_its_driver_s_failure(
     monkeypatch.setattr(profile_stages, "build",
                         lambda _args: [sys.executable, str(driver), str(out)])
     monkeypatch.setattr(sys, "argv", [
-        "profile_stages.py", "generation", "--no-timing", "--hide-bench", "--games", "1",
-        "--timing-dir", str(tmp_path / "timing"), "--out", str(out),
+        "profile_stages.py", "generation", "--no-timing", "--hide-bench", "--served", "--games",
+        "1", "--timing-dir", str(tmp_path / "timing"), "--out", str(out),
     ])
     with pytest.raises(SystemExit) as stopped:
         profile_stages.main()

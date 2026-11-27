@@ -10,16 +10,15 @@ kept per pair. What these tests hold:
   seat 1;
 - **a true mirror is exactly 50%**: its selection game has value 0.5 and both seats draw
   from the same mixture, so the two seats are exchangeable (not only equal in value);
-- **the memo changes no game**: the same games with the memo on and off, with the memo
-  shown to have fired;
-- **a seed is a set of games**: the same seed and indices replay the same records; a
-  different seed does not (the positive control);
-- IKA-128: the pool path hides the bench without a flag and gives both seats a belief
-  from the solve.
+- **a store solved for another leaf stops the run**, and the pair filters leave the pairs
+  they name.
+
+The games themselves are the Rust worker's since IKA-458 stage 3.7: `test_rust_worker.py`
+holds that a seed is a set of games, that the store changes no game, the record's selection
+fields and the mirror's one mixture.
 
 The pool here is three variants of our M-B roster written in the pool file's shape, so no
-fetched data is needed. The leaf that solves the selection is an antisymmetric stub; the
-games themselves are played with hp-share at width 2 to stay cheap.
+fetched data is needed. The leaf that solves the selection is an antisymmetric stub.
 """
 
 from __future__ import annotations
@@ -31,14 +30,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pokeuraou import poolplay
 from pokeuraou.damage import register_mega_stones
-from pokeuraou.payoff import HP_SHARE
 from pokeuraou.pool import draw_pair, load_pool, unordered_pairs
-from pokeuraou.poolplay import SolvedSelections, generate_pool
+from pokeuraou.poolplay import SolvedSelections
 from pokeuraou.regulation import repo_root
 from pokeuraou.selection_book import BenchPrior
-from pokeuraou.selfplay import GameRecord
 from pokeuraou.teams import TeamError
 
 from ._harness import load_tool
@@ -192,147 +188,6 @@ def test_the_other_seating_is_the_same_solve_transposed(pool) -> None:  # noqa: 
     assert direct.value == pytest.approx(ba.value, abs=1e-7)
 
 
-def test_a_solved_selection_needs_a_leaf(pool, tmp_path) -> None:  # noqa: ANN001
-    with pytest.raises(ValueError, match="needs a leaf"):
-        generate_pool(pool.reg, pool, games=1, out=tmp_path / "g.jsonl")
-
-
-# ------------------------------------------------------------------------ the games
-
-
-def _fake_play(calls: list[dict]):  # noqa: ANN202
-    """A `play_game` that records its inputs and the generator's state, and plays nothing.
-
-    A game is a function of these inputs and of the generator, so two runs that hand it
-    the same ones play the same game; the one real replay is
-    `test_a_seed_and_its_indices_are_the_same_games_when_played`.
-    """
-
-    def fake(reg, rng, own, foe, label, **kwargs):  # noqa: ANN001, ANN003, ANN202
-        priors = kwargs["bench_prior"]
-        calls.append({
-            "own": [(s.species, tuple(sorted(s.sp.items()))) for s in own],
-            "foe": [(s.species, tuple(sorted(s.sp.items()))) for s in foe],
-            "label": label,
-            "selection": kwargs["selection"],
-            "sheets": kwargs["sheets"] is not None,
-            "priors": None if priors is None else [
-                None if p is None else (p.species, p.probabilities) for p in priors
-            ],
-            "state": rng.bit_generator.state["state"],
-        })
-        record = GameRecord(own_team=[], foe_team=[], foe_archetype=label)
-        record.outcome = float(rng.random() < 0.5)
-        record.turns = 1
-        return record
-
-    return fake
-
-
-def _games(pool, out: Path, *, seed: int, indices, monkeypatch, memo: bool = True,  # noqa: ANN001
-           solver: SolvedSelections | None = None):  # noqa: ANN202
-    calls: list[dict] = []
-    monkeypatch.setattr(poolplay, "play_game", _fake_play(calls))
-    solver = solver or SolvedSelections(pool.reg, pool.teams, _stub, memo=memo)
-    stats = generate_pool(
-        pool.reg, pool, games=0, seed=seed, out=out,
-        solver=solver, objective=HP_SHARE, indices=list(indices),
-    )
-    records = [
-        json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line
-    ]
-    return stats, solver, records, calls
-
-
-@pytest.fixture(scope="module")
-def shared(pool):  # noqa: ANN001, ANN201
-    """One solver for the tests that do not ask about the memo: a solve is seconds."""
-    return SolvedSelections(pool.reg, pool.teams, _stub)
-
-
-def test_a_seed_and_its_indices_are_the_same_games_when_played(pool, tmp_path) -> None:  # noqa: ANN001
-    """The real thing, twice: two games at width 2, played out, byte for byte."""
-    runs = []
-    for name in ("a", "b"):
-        out = tmp_path / f"{name}.jsonl"
-        solver = SolvedSelections(pool.reg, pool.teams, _stub)
-        generate_pool(
-            pool.reg, pool, games=0, seed=81, out=out, solver=solver,
-            objective=HP_SHARE, search_limit=2, max_turns=40, indices=[0, 1],
-        )
-        records = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
-        for record in records:
-            record.pop("searchSeconds")
-        runs.append(records)
-    assert runs[0], "no game finished; the comparison would be vacuous"
-    assert runs[0] == runs[1]
-
-
-def test_a_seed_and_its_indices_are_the_same_inputs(pool, shared, tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    _, _, first, calls = _games(
-        pool, tmp_path / "a.jsonl", seed=81, indices=range(6), monkeypatch=monkeypatch,
-        solver=shared,
-    )
-    _, _, again, calls_again = _games(
-        pool, tmp_path / "b.jsonl", seed=81, indices=range(6), monkeypatch=monkeypatch,
-        solver=shared,
-    )
-    assert len(first) == 6
-    assert first == again and calls == calls_again
-    # Positive control: another seed is other games.
-    _, _, other, calls_other = _games(
-        pool, tmp_path / "c.jsonl", seed=82, indices=range(6), monkeypatch=monkeypatch,
-        solver=shared,
-    )
-    assert calls_other != calls
-    # And an index is its own game, whichever order the queue deals them in.
-    _, _, _, backwards = _games(
-        pool, tmp_path / "d.jsonl", seed=81, indices=reversed(range(6)),
-        monkeypatch=monkeypatch, solver=shared,
-    )
-    assert backwards == calls[::-1]
-
-
-def test_the_memo_changes_no_game(pool, tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    kept_stats, kept, with_memo, calls = _games(
-        pool, tmp_path / "m.jsonl", seed=5, indices=range(10), monkeypatch=monkeypatch
-    )
-    _, fresh, without, calls_fresh = _games(
-        pool, tmp_path / "n.jsonl", seed=5, indices=range(10), monkeypatch=monkeypatch,
-        memo=False,
-    )
-    assert kept.reused > 0, "no pair came twice, so the memo was never read"
-    assert kept.solves + kept.reused == kept_stats["games"] == 10
-    assert fresh.reused == 0 and fresh.solves == 10
-    assert with_memo == without
-    assert calls == calls_fresh
-
-
-def test_the_store_shares_the_solves_between_workers_and_changes_no_game(
-    pool, tmp_path, monkeypatch  # noqa: ANN001
-) -> None:
-    store = tmp_path / "store"
-    first = SolvedSelections(pool.reg, pool.teams, _stub, store=store, tag="t")
-    _, _, _, calls_first = _games(
-        pool, tmp_path / "w0.jsonl", seed=11, indices=range(6), monkeypatch=monkeypatch,
-        solver=first,
-    )
-    assert first.solves > 0 and first.loaded == 0
-    # A second worker with its own process memory: everything it meets is on disk.
-    second = SolvedSelections(pool.reg, pool.teams, _stub, store=store, tag="t")
-    _, _, with_store, calls_second = _games(
-        pool, tmp_path / "w1.jsonl", seed=11, indices=range(6), monkeypatch=monkeypatch,
-        solver=second,
-    )
-    assert second.solves == 0 and second.loaded == first.solves
-    _, _, without, calls_fresh = _games(
-        pool, tmp_path / "w2.jsonl", seed=11, indices=range(6), monkeypatch=monkeypatch,
-        memo=False,
-    )
-    assert calls_second == calls_fresh == calls_first
-    assert with_store == without
-
-
 def test_a_store_solved_for_another_leaf_stops_the_run(pool, tmp_path) -> None:  # noqa: ANN001
     store = tmp_path / "store"
     SolvedSelections(pool.reg, pool.teams, _stub, store=store, tag="leaf A").entry(0, 1)
@@ -341,183 +196,24 @@ def test_a_store_solved_for_another_leaf_stops_the_run(pool, tmp_path) -> None: 
         other.entry(1, 0)
 
 
-def test_the_record_says_solved_and_carries_the_pair(pool, shared, tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    _, _, records, calls = _games(
-        pool, tmp_path / "r.jsonl", seed=7, indices=range(8), monkeypatch=monkeypatch,
-        solver=shared,
-    )
-    assert len(records) == 8
-    for record, call in zip(records, calls, strict=True):
-        assert record["selectionSource"] == "solved"
-        assert record["pool"]["benchPrior"] == ["solved", "solved"]
-        assert record["pool"]["id"] == "test-pool"
-        a, b = record["pool"]["teams"]
-        assert record["pool"]["mirror"] == (a == b)
-        assert len(record["ownSelectionPolicy"]) == 90
-        assert sum(record["foeSelectionMixture"]) == pytest.approx(1.0)
-        assert call["label"] == ("mirror" if a == b else "pool")
-        # The six each seat played are its pool team's, spreads included.
-        six = {t.id: t for t in pool.teams}
-        assert list(call["selection"][0]) == [s.species for s in six[a].sets]
-        assert list(call["selection"][1]) == [s.species for s in six[b].sets]
-
-
-def test_both_seats_get_a_belief_from_the_solve(pool, shared, tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    """IKA-128: hidden, with both sides' bench priors from the pair's solve."""
-    _, _, _, calls = _games(
-        pool, tmp_path / "s.jsonl", seed=9, indices=range(4), monkeypatch=monkeypatch,
-        solver=shared,
-    )
-    for call in calls:
-        assert call["sheets"]
-        assert call["priors"] is not None and all(p is not None for p in call["priors"])
-        own_six, foe_six = call["selection"][0], call["selection"][1]
-        assert list(call["priors"][0][0]) == own_six
-        assert list(call["priors"][1][0]) == foe_six
-
-
-def test_the_uniform_reference_names_itself(pool, tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    calls: list[dict] = []
-    monkeypatch.setattr(poolplay, "play_game", _fake_play(calls))
-    out = tmp_path / "u.jsonl"
-    generate_pool(
-        pool.reg, pool, games=3, seed=1, out=out, selection="uniform",
-    )
-    records = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
-    assert [r["selectionSource"] for r in records] == ["uniform"] * 3
-    assert all(r["pool"]["benchPrior"] == ["uniform", "uniform"] for r in records)
-    assert all(c["priors"] is None for c in calls)
-
-
-def test_mirror_games_draw_both_seats_from_one_mixture(mirror_pool, tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    stats, _, records, _ = _games(
-        mirror_pool, tmp_path / "mm.jsonl", seed=3, indices=range(4),
-        monkeypatch=monkeypatch,
-    )
-    assert stats["mirror_games"] == stats["games"] == 4
-    assert len(records) == 4
-    for record in records:
-        assert record["selectionValue"] == pytest.approx(0.5, abs=1e-9)
-        assert record["ownSelectionMixture"] == record["foeSelectionMixture"]
-        assert record["ownSelectionPolicy"] == record["foeSelectionPolicy"]
-
-
-# ---------------------------------------------------------------------------- the CLI
-
-
-def test_the_pool_cli_hides_the_bench_without_a_flag(pool, monkeypatch) -> None:  # noqa: ANN001
-    tool = load_tool("selfplay")
-    import pokeuraou.pool as pool_module
-
-    called: dict = {}
-
-    def fake_generate(reg, pool_arg, **kwargs):  # noqa: ANN001, ANN003, ANN202
-        called.update(kwargs)
-        return {"games": 0, "finished": 0, "discarded_unfinished": 0, "wins": 0,
-                "decisions": 0, "turns": 0, "mirror_games": 0, "mirror_wins": 0,
-                "mirror_draws": 0, "path": "x"}
-
-    monkeypatch.setattr(pool_module, "load_pool", lambda name: pool)
-    monkeypatch.setattr(poolplay, "generate_pool", fake_generate)
-    monkeypatch.setattr(tool, "build_leaf", lambda args, reg: (_stub, "value:stub"))
-    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1"])
-    tool.main()
-    assert "hide_bench" not in called
-    assert called["selection"] == "solved"
-
-    called.clear()
-    monkeypatch.setattr(
-        "sys.argv", ["selfplay.py", "--pool", "p", "--games", "1", "--open-bench"]
-    )
-    with pytest.raises(SystemExit):
-        tool.main()
-
-
-def test_the_pool_cli_refuses_the_roster_path_flags(monkeypatch) -> None:  # noqa: ANN001
-    tool = load_tool("selfplay")
-    monkeypatch.setattr(
-        "sys.argv", ["selfplay.py", "--pool", "p", "--roster", "rizabanadohido"]
-    )
-    with pytest.raises(SystemExit):
-        tool.main()
-
-
 # ------------------------------------------------------------- a subset of the pairs
 
 
-def test_a_pairs_subset_draws_only_those_pairs_and_records_the_pool_index(
-    pool, shared, tmp_path, monkeypatch  # noqa: ANN001
-) -> None:
-    """IKA-444: `pairs` restricts the draw; ``pool.pair`` stays the index in pool.pairs."""
-    wanted = [(0, 1), (1, 2)]
-    calls: list[dict] = []
-    monkeypatch.setattr(poolplay, "play_game", _fake_play(calls))
-    out = tmp_path / "s.jsonl"
-    generate_pool(
-        pool.reg, pool, games=0, seed=444, out=out, solver=shared,
-        objective=HP_SHARE, indices=list(range(40)), pairs=wanted,
-    )
-    records = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
-    assert len(records) == 40
-    ids = [t.id for t in pool.teams]
-    seen = set()
-    for record in records:
-        a, b = (ids.index(t) for t in record["pool"]["teams"])
-        pair = (min(a, b), max(a, b))
-        assert pair in wanted
-        assert pool.pairs[record["pool"]["pair"]] == pair
-        seen.add(pair)
-    assert seen == set(wanted), "both pairs of the subset are drawn"
-
-
-def test_a_pairs_subset_must_be_pairs_of_the_pool(pool, shared, tmp_path) -> None:  # noqa: ANN001
-    for bad in ([], [(1, 0)], [(0, 9)]):
-        with pytest.raises(ValueError, match="subset of pool.pairs"):
-            generate_pool(
-                pool.reg, pool, games=1, out=tmp_path / "x.jsonl",
-                solver=shared, objective=HP_SHARE, pairs=bad,
-            )
-
-
-def test_the_pool_cli_passes_the_pair_filters(pool, monkeypatch) -> None:  # noqa: ANN001
-    """`--pairs-no-mirror` / `--pairs-with` reach generate_pool; neither means every pair."""
+def test_the_pair_filters_leave_the_pairs_they_name(pool) -> None:  # noqa: ANN001
+    """IKA-444: `--pairs-no-mirror` / `--pairs-with` (tools/selfplay.py's `pool_pairs`, which
+    the Rust worker's config carries); neither means every pair."""
     tool = load_tool("selfplay")
-    import pokeuraou.pool as pool_module
 
-    called: dict = {}
+    def error(message: str) -> None:
+        raise SystemExit(message)
 
-    def fake_generate(reg, pool_arg, **kwargs):  # noqa: ANN001, ANN003, ANN202
-        called.update(kwargs)
-        return {"games": 0, "finished": 0, "discarded_unfinished": 0, "wins": 0,
-                "decisions": 0, "turns": 0, "mirror_games": 0, "mirror_wins": 0,
-                "mirror_draws": 0, "path": "x"}
-
-    monkeypatch.setattr(pool_module, "load_pool", lambda name: pool)
-    monkeypatch.setattr(poolplay, "generate_pool", fake_generate)
-    monkeypatch.setattr(tool, "build_leaf", lambda args, reg: (_stub, "value:stub"))
-    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1"])
-    tool.main()
-    assert called["pairs"] is None
-
-    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1",
-                                     "--pairs-no-mirror"])
-    tool.main()
-    assert called["pairs"] == [p for p in pool.pairs if p[0] != p[1]]
-
+    assert tool.pool_pairs(pool, None, False, error) is None
+    assert tool.pool_pairs(pool, None, True, error) == [p for p in pool.pairs if p[0] != p[1]]
     species = pool.teams[0].sets[0].species
-    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1",
-                                     "--pairs-with", species])
-    tool.main()
-    assert called["pairs"] == list(pool.pairs), "every team of this pool holds it"
-
-    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pool", "p", "--games", "1",
-                                     "--pairs-with", "notaspecies"])
+    assert tool.pool_pairs(pool, [species], False, error) == list(pool.pairs), (
+        "every team of this pool holds it"
+    )
     with pytest.raises(SystemExit):
-        tool.main()
+        tool.pool_pairs(pool, ["notaspecies"], False, error)
 
 
-def test_the_roster_path_refuses_the_pair_filters(monkeypatch) -> None:  # noqa: ANN001
-    tool = load_tool("selfplay")
-    monkeypatch.setattr("sys.argv", ["selfplay.py", "--pairs-no-mirror"])
-    with pytest.raises(SystemExit):
-        tool.main()

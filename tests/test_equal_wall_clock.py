@@ -157,13 +157,3 @@ def test_two_agents_holding_one_leaf_are_each_charged_all_of_it(setup, monkeypat
         "charged all of it, so with the same game on the same clock the two runs differ "
         "by exactly two -- anything else means `one_agent` did not reach the accounting"
     )
-
-
-def test_the_pool_match_says_its_two_arms_are_two_agents() -> None:
-    """A match holds two agents whether or not they hold one leaf object.
-
-    Left to default, a symmetric pricing run reports half the cost it is measuring
-    (`generation_match.py`, which held this, was removed in IKA-460 with M-B).
-    """
-    body = (ROOT / "src" / "pokeuraou" / "poolplay.py").read_text(encoding="utf-8")
-    assert "one_agent=False" in body

@@ -23,7 +23,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pokeuraou import eqselect, selfplay
+from pokeuraou import selfplay
 from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
@@ -39,14 +39,14 @@ from pokeuraou.equilibrium import solve, solve_bayesian
 from pokeuraou.hidden import completions
 from pokeuraou.narrow import narrow
 from pokeuraou.pool import load_pool
-from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
+from pokeuraou.poolplay import PoolArm
 from pokeuraou.regulation import load_regulation
 from pokeuraou.search import belief_solve
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
 from .test_beliefnode import _Leaf
-from .test_poolplay import _served_stub, _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _variants, _write_pool
 
 
 def _games(seed: int, count: int, size: int, grid: float):  # noqa: ANN202
@@ -169,33 +169,6 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
 def _arm(label: str, solver) -> PoolArm:  # noqa: ANN001
     return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=3, rank_by_leaf=False,
                    eq_select=label)
-
-
-def test_the_label_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN001
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-    tested, other = _arm("qre0.05", solver), _arm("lp", solver)
-    for which in (0, 1):
-        before = dict(eqselect.STATS.get("qre0.05", {"calls": 0, "moved": 0}))
-        record, sides = pool_match_game(
-            pool.reg, pool, (tested, other), seed=196, game_index=0, which=which,
-            max_turns=3,
-        )
-        assert record.eq_select[which] == "qre0.05"
-        assert record.eq_select[1 - which] == "lp"
-        assert sides["eq_selects"][which] == "qre0.05"
-        payload = record.to_json(objective="value:arm", search_limit=(3, 3))
-        assert payload["eqSelect"] == record.eq_select
-        # The positive control: the label's solves ran, and moved the strategy.
-        after = eqselect.STATS["qre0.05"]
-        assert after["calls"] > before["calls"]
-        assert after["moved"] > before["moved"]
-
-    same = _arm("lp", solver)
-    record, _ = pool_match_game(
-        pool.reg, pool, (same, same), seed=196, game_index=0, which=0,
-        max_turns=3,
-    )
-    assert "eqSelect" not in record.to_json(objective="value:arm", search_limit=(3, 3))
 
 
 @pytest.fixture(scope="module")

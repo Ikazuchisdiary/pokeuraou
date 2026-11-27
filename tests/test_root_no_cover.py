@@ -24,7 +24,7 @@ from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.narrow import narrow, slot_options
 from pokeuraou.pool import load_pool
-from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
+from pokeuraou.poolplay import PoolArm
 from pokeuraou.search import DEFAULT_REFERENCES, parse_rank_fill, rank_fill_covers
 
 from .test_poolplay import _served_stub, _stub, _variants, _write_pool
@@ -153,30 +153,3 @@ def _arm(fill: str, solver) -> PoolArm:  # noqa: ANN001
 
 def _counted() -> dict[str, int]:
     return {k: v["menus"] for k, v in narrowing.COVERLESS.items()}
-
-
-def test_the_uncovered_menu_follows_its_arm_into_either_seat(pool, monkeypatch) -> None:  # noqa: ANN001
-    _ranking_by_order(monkeypatch)
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-    tested, other = _arm("refs2-nocover", solver), _arm("refs2", solver)
-    for which in (0, 1):
-        before = _counted()
-        record, sides = pool_match_game(
-            pool.reg, pool, (tested, other), seed=323, game_index=0, which=which,
-            max_turns=2,
-        )
-        assert record.rank_fill[which] == "refs2-nocover"
-        assert record.rank_fill[1 - which] == "refs2"
-        moves = sum(d.kind == "move" for d in record.decisions)
-        assert moves > 0
-        after = _counted()
-        # One construction per move decision by the uncovered arm, both sides' menus.
-        assert after["refs2-nocover"] - before.get("refs2-nocover", 0) == 2 * moves
-        assert after.get("refs2", 0) == before.get("refs2", 0)
-
-    # Null: identical covered arms build nothing without the cover.
-    before = _counted()
-    same = _arm("refs2", solver)
-    pool_match_game(pool.reg, pool, (same, same), seed=323, game_index=0, which=0,
-                    max_turns=2)
-    assert _counted() == before

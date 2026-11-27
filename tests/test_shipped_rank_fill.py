@@ -17,8 +17,8 @@ IKA-331 judged it (the leaf learned from q-nocover's pool is not weaker, and the
 The games under the new default are byte for byte the master's with
 ``--rank-fill q-nocover --q-model data/models/q-mc0.pt`` spelled out (records/IKA-338.md);
 that needs the port, the leaf and the Q, so it is measured there rather than here.
-Nothing here needs torch, CUDA or data/: the Q is a stand-in and the games are recorded
-calls.
+Nothing here needs torch, CUDA or data/: the Q is a stand-in, and the tools stop at the
+Rust worker's config or at the first inference server.
 """
 
 from __future__ import annotations
@@ -28,11 +28,10 @@ from pathlib import Path
 
 import pytest
 
-from pokeuraou import poolplay, qrank
+from pokeuraou import qrank, rustworker
 from pokeuraou.search import DEFAULT_RANK_FILL, SHIPPED_RANK_FILL, resolve_rank_fill
 
 from ._harness import load_tool
-from .test_pool_match import Counted, _recorder
 from .test_poolplay import _stub, _variants, _write_pool
 
 
@@ -104,24 +103,24 @@ def test_the_tail_decides_the_launchers_q() -> None:
 
 
 def _generation_worker(monkeypatch, pool_file: str, tmp_path: Path, extra: list[str]) -> dict:  # noqa: ANN001
+    """`tools/selfplay.py` to the config it would write: its flags and the Q it named."""
     import pokeuraou.pool as pool_module
     from pokeuraou.pool import load_pool
 
     tool = load_tool("selfplay")
     called: dict = {}
 
-    def fake_generate(reg, pool_arg, **kwargs):  # noqa: ANN001, ANN003, ANN202
-        called.update(kwargs)
-        return {"games": 0, "finished": 0, "discarded_unfinished": 0, "wins": 0,
-                "decisions": 0, "turns": 0, "mirror_games": 0, "mirror_wins": 0,
-                "mirror_draws": 0, "path": "x"}
+    def fake_config(args, pool_arg, evaluate, leaf_label, q_record, pairs, store):  # noqa: ANN001, ANN202, PLR0913
+        called.update(rank_fill=args.rank_fill, q_record=q_record)
+        return {}
 
     pool = load_pool(pool_file)
     monkeypatch.setattr(pool_module, "load_pool", lambda name: pool)
-    monkeypatch.setattr(poolplay, "generate_pool", fake_generate)
+    monkeypatch.setattr(rustworker, "build_config", fake_config)
+    monkeypatch.setattr(rustworker, "write_config", lambda config, path: None)
     monkeypatch.setattr(tool, "build_leaf", lambda args, reg: (_stub, "value:stub"))
-    monkeypatch.setattr(sys, "argv", ["selfplay.py", "--pool", "p", "--games", "1",
-                                      "--out", str(tmp_path / "g.jsonl"), *extra])
+    monkeypatch.setattr(sys, "argv", ["selfplay.py", "--pool", "p", "--inference", "h:1",
+                                      "--rust-config", str(tmp_path / "c.json"), *extra])
     qrank._INSTALLED.clear()
     tool.main()
     return called
@@ -134,10 +133,9 @@ def test_generation_plays_q_nocover_by_the_default_q(
     assert called["rank_fill"] == "q-nocover"
     assert FakeQ.loaded == [q_here]
     assert qrank.installed().path == q_here
-    # Without a leaf ranking there is no fill to read, and no Q is loaded.
-    FakeQ.loaded = []
-    called = _generation_worker(monkeypatch, pool_file, tmp_path, [])
-    assert called["rank_fill"] == "refs2" and not FakeQ.loaded
+    # The config's records name the Q and its sha256 (IKA-340).
+    assert called["q_record"] == {"qModel": ["q-mc0.pt"],
+                                  "qModelSha256": [qrank.file_sha256(q_here)]}
 
 
 def test_a_missing_q_stops_generation(monkeypatch, pool_file, tmp_path, no_q, capsys) -> None:  # noqa: ANN001
@@ -149,52 +147,55 @@ def test_a_missing_q_stops_generation(monkeypatch, pool_file, tmp_path, no_q, ca
     assert not FakeQ.loaded
 
 
-def test_refs2_named_is_refs2_without_a_q(monkeypatch, pool_file, tmp_path, no_q) -> None:  # noqa: ANN001
-    called = _generation_worker(monkeypatch, pool_file, tmp_path,
-                                ["--rank-leaf", "--rank-fill", "refs2"])
-    assert called["rank_fill"] == "refs2" and not FakeQ.loaded
+def test_refs2_named_and_the_damage_ranking_are_refused(
+    monkeypatch, pool_file, tmp_path, no_q, capsys  # noqa: ANN001
+) -> None:
+    """The Rust worker plays a q-nocover fill only (IKA-458 stage 3.7): refs2 named, and no
+    leaf ranking, stop before any Q is loaded."""
+    for extra in (["--rank-leaf", "--rank-fill", "refs2"], []):
+        with pytest.raises(SystemExit):
+            _generation_worker(monkeypatch, pool_file, tmp_path, extra)
+        assert "the Rust worker does not play" in capsys.readouterr().err
+    assert not FakeQ.loaded
 
 
-def _generate_queue(monkeypatch, tmp_path: Path, argv: list[str]):  # noqa: ANN001, ANN202
-    """Runs `generate_queue.main` to its `run_workers`; (exit code, worker 0's command)."""
-    driver = load_tool("generate_queue")
-    seen: dict[str, list[str]] = {}
+def _launcher(tool: str, monkeypatch, tmp_path: Path, argv: list[str]):  # noqa: ANN001, ANN202
+    """Runs a launcher's `main` to its first inference server; (exit code, the server's Qs)."""
+    from pokeuraou import rustnet
 
-    def fake_run_workers(indices, build, **_kwargs) -> int:  # noqa: ANN001
-        seen["command"] = build(0, "127.0.0.1:1")
-        return 0
+    driver = load_tool(tool)
+    seen: dict[str, dict] = {}
 
-    monkeypatch.setattr(driver, "run_workers", fake_run_workers)
-    # The Python worker's command: the Rust worker's config carries the Q (`rustworker`), and an
-    # unserved run has no Rust worker (IKA-458 stage 3.7).
-    monkeypatch.setattr(sys, "argv", ["generate_queue.py", "--out", str(tmp_path / "out"),
-                                      "--games", "1", "--value", "a.pt", "--python-worker", *argv])
+    def fake_server(regulation, arms, qs, out_dir, *rest):  # noqa: ANN001, ANN002, ANN202
+        seen["qs"] = qs
+        raise SystemExit(0)
+
+    monkeypatch.setattr(rustnet, "server_command", fake_server)
+    monkeypatch.setattr(sys, "argv", [f"{tool}.py", "--out", str(tmp_path / "out"),
+                                      "--games", "1", "--value", "a.pt", "--served", *argv])
     with pytest.raises(SystemExit) as ended:
         driver.main()
-    return ended.value.code, seen.get("command")
+    return ended.value.code, seen.get("qs")
 
 
 def test_the_generation_launcher_hands_the_default_q(
     monkeypatch, tmp_path, pool_file, q_here  # noqa: ANN001
 ) -> None:
-    code, command = _generate_queue(monkeypatch, tmp_path,
-                                    ["--pool", pool_file, "--", "--rank-leaf"])
-    assert code == 0
-    at = command.index("--q-model")
-    assert command[at + 1] == str(q_here)
+    code, qs = _launcher("generate_queue", monkeypatch, tmp_path,
+                         ["--pool", pool_file, "--", "--rank-leaf"])
+    assert code == 0 and qs == {"q": str(q_here)}
     # refs2 named: no Q.
-    code, command = _generate_queue(monkeypatch, tmp_path,
-                                    ["--pool", pool_file, "--", "--rank-leaf",
-                                     "--rank-fill", "refs2"])
-    assert code == 0 and "--q-model" not in command and "--q-arm" not in command
+    code, qs = _launcher("generate_queue", monkeypatch, tmp_path,
+                         ["--pool", pool_file, "--", "--rank-leaf", "--rank-fill", "refs2"])
+    assert code == 0 and qs == {}
 
 
 def test_a_missing_q_stops_the_generation_launcher(
     monkeypatch, tmp_path, pool_file, no_q  # noqa: ANN001
 ) -> None:
-    code, command = _generate_queue(monkeypatch, tmp_path,
-                                    ["--pool", pool_file, "--", "--rank-leaf"])
-    assert command is None, "a worker was built for a run whose Q is missing"
+    code, qs = _launcher("generate_queue", monkeypatch, tmp_path,
+                         ["--pool", pool_file, "--", "--rank-leaf"])
+    assert qs is None, "a server was started for a run whose Q is missing"
     assert isinstance(code, str) and str(no_q) in code and "--rank-fill refs2" in code
 
 
@@ -202,77 +203,56 @@ def test_a_missing_q_stops_the_generation_launcher(
 
 
 def _board_worker(tmp_path, monkeypatch, extra: list[str]) -> list[str]:  # noqa: ANN001
+    """`tools/pool_match.py` to the config it would write: the arms' fills."""
     tool = load_tool("pool_match")
     fills: list[str] = []
-    record = _recorder([])
 
-    def fake(reg, rng, own, foe, label, **kwargs):  # noqa: ANN001, ANN003, ANN202
-        fills.append(kwargs["rank_fill"])
-        return record(reg, rng, own, foe, label, **kwargs)
+    def fake_config(args, pool, arms, arm_label, q_record, pairs):  # noqa: ANN001, ANN202, PLR0913
+        fills.extend(arm.rank_fill for arm in arms)
+        return {}
 
     monkeypatch.setattr(tool, "build_leaves",
-                        lambda args, encoder: (Counted(_stub), None, "stub", None))
-    monkeypatch.setattr(poolplay, "play_game", fake)
+                        lambda args, encoder: (_stub, _stub, "stub", "stub"))
+    monkeypatch.setattr(rustworker, "board_config", fake_config)
+    monkeypatch.setattr(rustworker, "write_config", lambda config, path: None)
     qrank._INSTALLED.clear()
     tool.main([
         "--pool", str(_write_pool(tmp_path / "pool.json", _variants())),
-        "--value", "unused.pt", "--hide-bench", "--games", "1", "--seed", "9",
-        "--games-out", str(tmp_path / "m" / "games-worker0.jsonl"), "--limit", "2",
-        "--baseline", "b.pt", *extra,
+        "--inference", "h:1", "--baseline-inference-arm", "value", "--hide-bench",
+        "--seed", "9", "--limit", "2", "--rust-config", str(tmp_path / "c.json"), *extra,
     ])
     return fills
 
 
 def test_both_board_arms_play_q_nocover_by_the_default_q(tmp_path, monkeypatch, q_here) -> None:  # noqa: ANN001
     fills = _board_worker(tmp_path, monkeypatch, ["--rank-leaf", "--baseline-rank-leaf"])
-    # Two games (one per seat); play_game gets the pair of the arms' fills each time.
-    assert fills and all(tuple(f) == ("q-nocover", "q-nocover") for f in fills)
+    assert fills == ["q-nocover", "q-nocover"]
     assert FakeQ.loaded == [q_here]
 
 
 def test_a_missing_q_stops_the_board(tmp_path, monkeypatch, no_q, capsys) -> None:  # noqa: ANN001
     with pytest.raises(SystemExit) as stopped:
-        _board_worker(tmp_path, monkeypatch, ["--rank-leaf"])
+        _board_worker(tmp_path, monkeypatch, ["--rank-leaf", "--baseline-rank-leaf"])
     assert stopped.value.code == 2
     assert str(no_q) in capsys.readouterr().err
-    assert not (tmp_path / "m" / "games-worker0.jsonl").exists()
-
-
-def _match_queue(monkeypatch, tmp_path: Path, argv: list[str]):  # noqa: ANN001, ANN202
-    driver = load_tool("match_queue")
-    seen: dict[str, list[str]] = {}
-
-    def fake_run_workers(indices, build, **_kwargs) -> int:  # noqa: ANN001
-        seen["command"] = build(0, "127.0.0.1:1")
-        return 0
-
-    monkeypatch.setattr(driver, "run_workers", fake_run_workers)
-    # The Python worker command: the Rust worker needs --served (IKA-458 stage 3.7).
-    monkeypatch.setattr(sys, "argv", ["match_queue.py", "--out", str(tmp_path / "out"),
-                                      "--games", "1", "--value", "a.pt", "--python-worker", *argv])
-    with pytest.raises(SystemExit) as ended:
-        driver.main()
-    return ended.value.code, seen.get("command")
 
 
 def test_the_board_launcher_hands_the_default_q(
     monkeypatch, tmp_path, pool_file, q_here  # noqa: ANN001
 ) -> None:
-    code, command = _match_queue(monkeypatch, tmp_path,
-                                 ["--pool", pool_file, "--hide-bench", "--baseline", "b.pt",
-                                  "--", "--rank-leaf", "--baseline-rank-leaf"])
-    assert code == 0
-    at = command.index("--q-model")
-    assert Path(command[at + 1]) == q_here
+    code, qs = _launcher("match_queue", monkeypatch, tmp_path,
+                         ["--pool", pool_file, "--hide-bench", "--baseline", "b.pt",
+                          "--", "--rank-leaf", "--baseline-rank-leaf"])
+    assert code == 0 and Path(qs["q"]) == q_here
 
 
 def test_a_missing_q_stops_the_board_launcher(
     monkeypatch, tmp_path, pool_file, no_q  # noqa: ANN001
 ) -> None:
-    code, command = _match_queue(monkeypatch, tmp_path,
-                                 ["--pool", pool_file, "--hide-bench", "--baseline", "b.pt",
-                                  "--", "--rank-leaf", "--baseline-rank-leaf"])
-    assert command is None
+    code, qs = _launcher("match_queue", monkeypatch, tmp_path,
+                         ["--pool", pool_file, "--hide-bench", "--baseline", "b.pt",
+                          "--", "--rank-leaf", "--baseline-rank-leaf"])
+    assert qs is None
     assert isinstance(code, str) and str(no_q) in code
 
 

@@ -3,17 +3,15 @@ M-C generation does.
 
 The user's decision of 9/28: the library's unnamed fill of a leaf-ranked menu is q-nocover,
 which needs the process's Q and stops without one (IKA-338's rule, now in `play_game`,
-`_menus`, `generate_pool` and `PoolArm`); a person's game with no Q it can read falls
+`_menus` and `PoolArm`); a person's game with no Q it can read falls
 back to refs2 with a note; the refs fills stay, played when named. What these tests hold:
 
-- **unnamed is q-nocover or a stop**: a leaf-ranked `play_game` / `generate_pool` /
+- **unnamed is q-nocover or a stop**: a leaf-ranked `play_game` /
   `PoolArm` with no fill ranks by the installed Q (the record's ``rankFill``), and with no Q
   it stops at the first menu -- never refs2;
 - **a side that reads no fill keeps its bytes**: damage-ranked, the record carries no
   ``rankFill``, as before;
 - **a call that leaves the fill off drifts**: `agent_drift` holds it to account;
-- **the rank-score file has cells to record**: under a q fill it stops, where it wrote
-  empty lines (IKA-278's file, since IKA-338's default);
 - **a person's menus**: a Q of another vocabulary than the leaf's falls back to refs2 with a
   note when the fill was not named, and stops when it was.
 
@@ -22,7 +20,6 @@ Nothing here needs torch, CUDA or data/: the Q is a stand-in.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -32,13 +29,12 @@ import pytest
 from pokeuraou import qrank, selfplay
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
-from pokeuraou.payoff import HP_SHARE
 from pokeuraou.pool import load_pool
-from pokeuraou.poolplay import PoolArm, SolvedSelections, generate_pool
+from pokeuraou.poolplay import PoolArm
 from pokeuraou.search import DEFAULT_RANK_FILL, SHIPPED_RANK_FILL
 
 from ._harness import load_tool
-from .test_poolplay import _served_stub, _stub, _variants, _write_pool
+from .test_poolplay import _served_stub, _variants, _write_pool
 from .test_q_rank import _StubQ
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,48 +112,6 @@ def test_a_pool_arm_resolves_its_fill_at_construction() -> None:
     named = PoolArm(name="c", evaluate=_served_stub, solver=None, limit=2, rank_by_leaf=True,
                     rank_fill="refs2")
     assert (leafy.rank_fill, damage.rank_fill, named.rank_fill) == ("q-nocover", "refs2", "refs2")
-
-
-def _generate(pool, out: Path, **kwargs):  # noqa: ANN001, ANN003, ANN202
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-    generate_pool(
-        pool.reg, pool, games=0, seed=278, out=out, solver=solver,
-        evaluate=_served_stub, objective=HP_SHARE, search_limit=3, max_turns=8, rank_by_leaf=True,
-        indices=[0, 1, 2], **kwargs,
-    )
-    return [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines() if x]
-
-
-def test_generate_pool_resolves_as_generation_does(pool, tmp_path, no_q) -> None:  # noqa: ANN001
-    with pytest.raises(RuntimeError, match="needs a Q"):
-        _generate(pool, tmp_path / "none.jsonl")
-    qrank.install(_StubQ(Encoder(pool.reg)))
-    games = _generate(pool, tmp_path / "q.jsonl")
-    assert games and all(g["rankFill"] == ["q-nocover", "q-nocover"] for g in games)
-
-
-def test_the_rank_score_file_stops_under_a_q_fill(pool, tmp_path, stub_q) -> None:  # noqa: ANN001
-    with pytest.raises(ValueError, match="refs leaf ranking"):
-        _generate(pool, tmp_path / "g.jsonl", rank_scores_out=tmp_path / "rank.jsonl.gz")
-    with pytest.raises(ValueError, match="refs leaf ranking"):
-        _generate(pool, tmp_path / "g.jsonl", rank_fill="q", rank_scores_out=tmp_path / "r.jsonl.gz")
-    assert not (tmp_path / "g.jsonl").exists()
-    # A refs fill records, as before.
-    _generate(pool, tmp_path / "refs.jsonl", rank_fill="refs2",
-              rank_scores_out=tmp_path / "rank-refs.jsonl.gz")
-    assert (tmp_path / "rank-refs.jsonl.gz").stat().st_size > 0
-
-
-def test_the_generation_worker_refuses_to_record_rank_scores_under_a_q_fill(
-    tmp_path, capsys  # noqa: ANN001
-) -> None:
-    tool = load_tool("selfplay")
-    args = type("A", (), {"record_rank_scores": True, "rank_leaf": True, "rank_fill": "q-nocover"})()
-    with pytest.raises(SystemExit):
-        tool.rank_scores_path(args, _Parser(), tmp_path / "g.jsonl")
-    assert "name --rank-fill refs2" in capsys.readouterr().err
-    args.rank_fill = "refs2"
-    assert tool.rank_scores_path(args, _Parser(), tmp_path / "g.jsonl") is not None
 
 
 class _Parser:

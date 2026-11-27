@@ -22,7 +22,7 @@ from pokeuraou import qrank, selfplay
 from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.pool import load_pool
-from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
+from pokeuraou.poolplay import PoolArm
 from pokeuraou.provenance import LEGACY_RANK_FILL, agent_name, provenance
 from pokeuraou.search import DEFAULT_RANK_FILL, DEFAULT_REFERENCES, parse_rank_fill
 
@@ -101,40 +101,6 @@ def _arm(pool, fill: str, solver) -> PoolArm:  # noqa: ANN001
                    rank_fill=fill)
 
 
-def test_the_fill_follows_its_arm_into_either_seat(pool, monkeypatch) -> None:  # noqa: ANN001
-    asked = _recording_ranking(monkeypatch)
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-    tested, other = _arm(pool, "refs1-fast", solver), _arm(pool, "refs2", solver)
-    for which in (0, 1):
-        asked.clear()
-        record, sides = pool_match_game(
-            pool.reg, pool, (tested, other), seed=268, game_index=0, which=which,
-            max_turns=2,
-        )
-        assert record.rank_fill[which] == "refs1-fast"
-        assert record.rank_fill[1 - which] == "refs2"
-        assert sides["rank_fills"][which] == "refs1-fast"
-        moves = sum(d.kind == "move" for d in record.decisions)
-        assert moves > 0
-        # Two constructions per move decision, one per arm, each ranking both sides.
-        assert len(asked) == 4 * moves
-        assert sorted({(r, b == Budget.fast()) for _s, r, b in asked}) == [(1, True), (2, False)]
-        payload = record.to_json(objective="value:arm", search_limit=(2, 2))
-        assert payload["rankFill"] == record.rank_fill
-
-    # Null: identical arms build one menu per decision, at the one fill.
-    asked.clear()
-    same = _arm(pool, "refs2", solver)
-    record, _ = pool_match_game(
-        pool.reg, pool, (same, same), seed=268, game_index=0, which=0,
-        max_turns=2,
-    )
-    moves = sum(d.kind == "move" for d in record.decisions)
-    assert moves > 0 and len(asked) == 2 * moves
-    assert {r for _s, r, _b in asked} == {2}
-    assert "rankFill" not in record.to_json(objective="value:arm", search_limit=(2, 2))
-
-
 def test_the_fill_is_recorded_only_when_it_differs() -> None:
     base = dict(seat="s", leaves=("m", "m"), limits=(12, 12), rankings=("leaf", "leaf"),
                 information=("hidden-bench", "hidden-bench"))
@@ -149,5 +115,3 @@ def test_the_fill_is_recorded_only_when_it_differs() -> None:
     damage = provenance("pool-match", **{**base, "rankings": ("damage", "damage")},
                         rank_fills=("refs1", "refs1"))
     assert "/rankfill" not in agent_name(damage, 0)
-
-

@@ -36,6 +36,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 # IKA-431: OpenBLAS commits a buffer per thread it may run when it loads -- numpy's copy
@@ -154,17 +155,6 @@ def main() -> None:
         "machine is already full. Default: the environment's, else 1.",
     )
     ap.add_argument(
-        "--uniform-selection",
-        action="store_true",
-        help="both arms draw their four of six uniformly, and you mean it. Required when "
-        "no book reaches the workers, because a uniform draw is worth about -141 Elo "
-        "against the advice -- the whole distance from the parameter-free baseline to the "
-        "best agent on the scale -- and an agent measured that way is an agent playing a "
-        "selection nobody would play. `tools/generate_queue.py` has refused this since "
-        "generation 9; this wrapper never did, and every width match and several "
-        "generation matches recorded `books: [uniform, uniform]` as a result.",
-    )
-    ap.add_argument(
         "--sprt",
         nargs=2,
         type=float,
@@ -221,18 +211,15 @@ def main() -> None:
         "look whole while its clock and CPU per game were wrong (IKA-307).",
     )
     ap.add_argument(
-        "--python-worker",
-        action="store_true",
-        help="IKA-458 stage 3.7: the workers are tools/pool_match.py (Python), as before; the "
-        "default is pokeuraou-damage pool-match-worker. For the comparison only",
-    )
-    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
     )
     args = ap.parse_args()
     require_bench(args)
+    if not args.served:
+        # IKA-458 stage 3.7: the Rust board worker scores its leaves on the inference servers.
+        ap.error("the workers play the leaves of the inference servers: pass --served")
     if args.workers is None:
         # Swept on the board, width 16 against 48, startup discarded, one machine, back to
         # back:
@@ -259,7 +246,7 @@ def main() -> None:
     if args.pool is not None:
         from pokeuraou.pool import find_pool
 
-        if "--selection-book" in extra or "--roster" in extra or args.uniform_selection:
+        if "--selection-book" in extra or "--roster" in extra:
             raise SystemExit(
                 "--pool has no book, no roster and no uniform switch: each arm solves its "
                 "own selection (IKA-259)"
@@ -317,7 +304,6 @@ def main() -> None:
 
     servers: list[subprocess.Popen] = []
     server_logs: list[Path] = []
-    served_at: list[str] = []
 
     def stop_servers() -> None:
         # The server outlives every worker and is ours to end, however the run ended --
@@ -355,12 +341,27 @@ def main() -> None:
             assert process.stdout is not None
             address = process.stdout.readline().strip()
             if not address:
-                for other in servers:
-                    other.terminate()
+                stop_servers()
                 raise SystemExit(f"inference server {tag}{index} exited before naming an address; see {log}")
             found.append(address)
         return found
 
+    # From the first server on, every way out ends the servers: a failed config, an import or an
+    # OS error, Ctrl-C, or the run's own end.
+    try:
+        status = _serve_and_run(args, extra, out_dir, env, launch, server_logs, monitor)
+    finally:
+        stop_servers()
+    raise SystemExit(status)
+
+
+def _serve_and_run(  # noqa: PLR0913 - main's state
+    args: argparse.Namespace, extra: list[str], out_dir: Path, env: dict[str, str],
+    launch: Callable[..., list[str]], server_logs: list[Path], monitor: StopWhenDecided | None,
+) -> int:
+    """The servers, the Rust workers' config, and the board; its exit status. The caller ends
+    the servers however this ends."""
+    served_at: list[str] = []
     if args.served:
         for name, _model in args.q_model_named:
             if name == "q" and args.q_model is not None:
@@ -371,7 +372,7 @@ def main() -> None:
         qs = {name: model for name, model in args.q_model_named}
         if args.q_model is not None:
             qs["q"] = str(args.q_model)
-        if pool_regulation is None or args.device != "cuda":
+        if args.pool is None or args.device != "cuda":
             raise SystemExit("the inference server is the Rust one: an M-C pool match (--pool) "
                              "on CUDA (IKA-460)")
         served_at = launch(arms, qs, "", args.servers,
@@ -379,69 +380,45 @@ def main() -> None:
         print(f"  inference: {', '.join(served_at)} (workers hold no model)",
               file=sys.stderr, flush=True)
 
+    # IKA-458 stage 3.7: the workers are `pokeuraou-damage pool-match-worker`. The flags are read
+    # once, by tools/pool_match.py, into the config every worker reads. Which worker lands on
+    # which server does not affect any answer: requests are never merged.
+    if not served_at:
+        raise SystemExit("the Rust board worker plays the leaves of the inference servers: pass --served")
+    from pokeuraou import rustworker
+
+    config = out_dir / "worker-config.json"
+    flags = [
+        sys.executable, str(ROOT / "tools" / "pool_match.py"),
+        "--pool", args.pool,
+        "--seed", str(args.seed),
+        "--games", str(args.games),
+        "--games-out", str(out_dir / "games-worker0.jsonl"),
+        "--inference", served_at[0], "--inference-arm", "value",
+        *(["--baseline-inference-arm", "baseline"] if args.baseline else []),
+        *(["--q-arm", "q"] if args.q_model is not None else []),
+        *[part for name, _model in args.q_model_named for part in ("--q-arm-named", name, name)],
+        *bench_argv(args.hide_bench),
+        *extra,
+        "--rust-config", str(config),
+    ]
+    made = subprocess.run(  # noqa: S603
+        flags, env=env, cwd=str(ROOT),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+    )
+    if made.returncode != 0:
+        raise SystemExit(f"the Rust board worker's config was not written:\n{made.stdout}")
+    print(f"  workers: pokeuraou-damage {rustworker.BOARD_SUBCOMMAND} (config {config})",
+          file=sys.stderr, flush=True)
+    baseline_server = (extra[extra.index("--baseline-inference") + 1]
+                       if "--baseline-inference" in extra else None)
+
     def build(worker: int, address: str) -> list[str]:
-        command = [
-            sys.executable, str(ROOT / "tools" / "pool_match.py"),
-            "--pool", args.pool,
-            "--queue", address,
-            "--seed", str(args.seed),
-            "--games", str(args.games),
-            "--device", args.device,
-            "--torch-threads", "1",
-            "--out", str(out_dir / f"worker{worker}.jsonl"),
-            "--games-out", str(out_dir / f"games-worker{worker}.jsonl"),
-        ]
-        if served_at:
-            # Round robin. Which worker lands on which server does not affect any answer
-            # -- requests are never merged, so a batch gets the same numbers wherever it
-            # is served -- only how many threads each process has to interleave.
-            command += ["--inference", served_at[worker % len(served_at)],
-                        "--inference-arm", "value"]
-            if args.baseline:
-                command += ["--baseline-inference-arm", "baseline"]
-        else:
-            command += ["--value", *args.value]
-            if args.baseline:
-                command += ["--baseline", *args.baseline]
-        if args.q_model is not None:
-            command += ["--q-arm", "q"] if served_at else ["--q-model", str(args.q_model)]
-        for name, model in args.q_model_named:
-            command += (
-                ["--q-arm-named", name, name] if served_at else ["--q-model-named", name, model]
-            )
-        command += bench_argv(args.hide_bench)
-        return command + extra
-
-    python_build = build
-    if not args.python_worker:
-        # IKA-458 stage 3.7: the workers are `pokeuraou-damage pool-match-worker`. The flags are read
-        # once, by tools/pool_match.py, into the config every worker reads.
-        if not served_at:
-            raise SystemExit("the Rust board worker plays the leaves of the inference servers: pass --served")
-        from pokeuraou import rustworker
-
-        config = out_dir / "worker-config.json"
-        flags = python_build(0, "-")
-        at = flags.index("--queue")
-        del flags[at : at + 2]
-        made = subprocess.run(  # noqa: S603
-            [*flags, "--rust-config", str(config)], env=env, cwd=str(ROOT),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+        return rustworker.board_command(
+            config, served_at[worker % len(served_at)],
+            out_dir / f"games-worker{worker}.jsonl", out_dir / f"worker{worker}.jsonl",
+            baseline_inference=baseline_server, queue=address,
         )
-        if made.returncode != 0:
-            stop_servers()
-            raise SystemExit(f"the Rust board worker's config was not written:\n{made.stdout}")
-        print(f"  workers: pokeuraou-damage {rustworker.BOARD_SUBCOMMAND} (config {config})",
-              file=sys.stderr, flush=True)
-        baseline_server = (extra[extra.index("--baseline-inference") + 1]
-                           if "--baseline-inference" in extra else None)
-
-        def build(worker: int, address: str) -> list[str]:
-            return rustworker.board_command(
-                config, served_at[worker % len(served_at)],
-                out_dir / f"games-worker{worker}.jsonl", out_dir / f"worker{worker}.jsonl",
-                baseline_inference=baseline_server, queue=address,
-            )
 
     def written() -> int:
         return sum(
@@ -459,42 +436,38 @@ def main() -> None:
     )
     # Two seats per game, interleaved, so a straggler cannot strand half of a pair.
     outcome: dict = {}
-    try:
-        status = run_workers(
-            range(2 * args.games), build,
-            workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
-            label="match", counts=written, monitor=monitor,
-            max_failures=None if args.max_worker_failures < 0 else args.max_worker_failures,
-            server_logs=server_logs,
-            outcome=outcome,
+    status = run_workers(
+        range(2 * args.games), build,
+        workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
+        label="match", counts=written, monitor=monitor,
+        max_failures=None if args.max_worker_failures < 0 else args.max_worker_failures,
+        server_logs=server_logs,
+        outcome=outcome,
+    )
+    if outcome.get("stoppedForFailures"):
+        # Before the SPRT's line, which would otherwise read "ran to --games" (IKA-336).
+        print(
+            f"  the board STOPPED because a worker failed ({outcome['stoppedForFailures']}): "
+            f"its count and its test below are of the games before the stop, not an "
+            f"answer -> {out_dir / 'workers.json'}",
+            file=sys.stderr,
+            flush=True,
         )
-        if outcome.get("stoppedForFailures"):
-            # Before the SPRT's line, which would otherwise read "ran to --games" (IKA-336).
-            print(
-                f"  the board STOPPED because a worker failed ({outcome['stoppedForFailures']}): "
-                f"its count and its test below are of the games before the stop, not an "
-                f"answer -> {out_dir / 'workers.json'}",
-                file=sys.stderr,
-                flush=True,
-            )
-        if monitor is not None:
-            monitor.save()
-            state = monitor.state()
-            print(
-                f"  SPRT: {state['decision'] or 'no decision'} after {state['pairs']} pairs, "
-                f"LLR {state['llr']:+.3f}"
-                + ("" if state["stoppedEarly"]
-                   else " -- stopped by a failed worker, no answer"
-                   if outcome.get("stoppedForFailures")
-                   else " -- ran to --games, so the fixed count is the answer")
-                + f"\n  {json.dumps(state['counts'])} -> {out_dir / 'sprt.json'}",
-                file=sys.stderr,
-                flush=True,
-            )
-    finally:
-        stop_servers()
-    raise SystemExit(status)
-
+    if monitor is not None:
+        monitor.save()
+        state = monitor.state()
+        print(
+            f"  SPRT: {state['decision'] or 'no decision'} after {state['pairs']} pairs, "
+            f"LLR {state['llr']:+.3f}"
+            + ("" if state["stoppedEarly"]
+               else " -- stopped by a failed worker, no answer"
+               if outcome.get("stoppedForFailures")
+               else " -- ran to --games, so the fixed count is the answer")
+            + f"\n  {json.dumps(state['counts'])} -> {out_dir / 'sprt.json'}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return status
 
 if __name__ == "__main__":
     main()

@@ -39,7 +39,6 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.equilibrium import solve
 from pokeuraou.narrow import narrow, slot_options
 from pokeuraou.pool import load_pool
-from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
 from pokeuraou.port import batched_payoff
 from pokeuraou.position import Position
 from pokeuraou.provenance import LEGACY_DEEPEN, agent_name, provenance
@@ -53,7 +52,7 @@ from pokeuraou.search import (
 from pokeuraou.teams import load_roster
 
 from ._port import Budget
-from .test_poolplay import _served_stub, _stub, _variants, _write_pool
+from .test_poolplay import _variants, _write_pool
 from .test_search import LEAF, _played
 
 
@@ -384,38 +383,6 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
     loaded = load_pool(path)
     register_mega_stones(loaded.reg)
     return loaded
-
-
-def test_the_budget_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN001
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-
-    def arm(label: str) -> PoolArm:
-        return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=2,
-                       rank_by_leaf=False, deepen=label)
-
-    tested, other = arm("r30"), arm("none")
-    for which in (0, 1):
-        record, sides = pool_match_game(
-            pool.reg, pool, (tested, other), seed=33, game_index=0, which=which,
-            max_turns=2,
-        )
-        assert record.deepen[which] == "r30" and record.deepen[1 - which] == "none"
-        assert sides["deepens"][which] == "r30"
-        moves = [d for d in record.decisions if d.kind == "move"]
-        assert moves
-        # Under a hidden bench a node deepens only where no bench is hidden (late), so the
-        # short game here may hold none; where one does, only the deepening arm's side did.
-        for d in moves:
-            if d.deepened is not None:
-                assert d.deepened[1 - which] is None
-        payload = record.to_json(objective="value:arm", search_limit=(2, 2))
-        assert payload["deepen"] == record.deepen
-    same = arm("none")
-    record, _ = pool_match_game(
-        pool.reg, pool, (same, same), seed=33, game_index=0, which=0,
-        max_turns=2,
-    )
-    assert "deepen" not in record.to_json(objective="value:arm", search_limit=(2, 2))
 
 
 def test_a_deepening_agent_is_another_agent() -> None:
@@ -749,25 +716,3 @@ def test_under_a_hidden_bench_the_oracle_widens_where_it_deepens(setup, label) -
                     for key in strip:
                         side.pop(key)
         assert payload == want
-
-
-def test_the_oracle_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN001
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-
-    def arm(label: str) -> PoolArm:
-        return PoolArm(name="arm", evaluate=_served_stub, solver=solver, limit=2,
-                       rank_by_leaf=False, deepen=label)
-
-    tested, other = arm("m30oall"), arm("m30")
-    for which in (0, 1):
-        record, sides = pool_match_game(
-            pool.reg, pool, (tested, other), seed=33, game_index=0, which=which,
-            max_turns=2,
-        )
-        assert record.deepen[which] == "m30oall" and record.deepen[1 - which] == "m30"
-        moves = [d for d in record.decisions if d.kind == "move"]
-        assert moves
-        for d in moves:
-            if d.deepened is not None and d.deepened[which] is not None:
-                assert "widened" in d.deepened[which]
-                assert d.deepened[1 - which] is None or "widened" not in d.deepened[1 - which]

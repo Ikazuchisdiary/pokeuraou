@@ -227,36 +227,3 @@ def test_hidden_depth_2_needs_the_restricted_reading(roster) -> None:  # noqa: A
         _game(roster, depth=(2, 1), solve_restricted=(True, True))
     with pytest.raises(ValueError, match="hidden bench"):
         _game(roster, depth=3, solve_restricted=True)
-
-
-def test_a_pool_arm_carries_its_depth_to_its_own_side_in_both_seats(  # noqa: ANN001
-    monkeypatch, tmp_path
-) -> None:
-    """A per-arm setting must reach the arm in BOTH seats (`pool_match_game` swaps them)."""
-    from pokeuraou import poolplay
-
-    seen: list[dict] = []
-
-    def fake_play_game(*_args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        seen.append(kwargs)
-        raise RuntimeError("stop")
-
-    monkeypatch.setattr(poolplay, "play_game", fake_play_game)
-    deep = poolplay.PoolArm(name="d", evaluate=None, solver=None, limit=4,
-                            rank_by_leaf=False, depth=2, solve_restricted=True)
-    flat = poolplay.PoolArm(name="f", evaluate=None, solver=None, limit=4,
-                            rank_by_leaf=False)
-    from pokeuraou.pool import load_pool
-
-    from .test_pool_match import _variants, _write_pool
-
-    pool = load_pool(_write_pool(tmp_path / "p.json", _variants()))
-    register_mega_stones(pool.reg)
-    for which in (0, 1):
-        with pytest.raises(RuntimeError, match="stop"):
-            poolplay.pool_match_game(
-                pool.reg, pool, (deep, flat), seed=1, game_index=0, which=which,
-                max_turns=2, epsilon=0.0, temperature=1.0,
-            )
-    assert seen[0]["depth"] == (2, 1) and seen[0]["solve_restricted"] == (True, False)
-    assert seen[1]["depth"] == (1, 2) and seen[1]["solve_restricted"] == (False, True)

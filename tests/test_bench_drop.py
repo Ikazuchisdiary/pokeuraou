@@ -42,7 +42,7 @@ from pokeuraou.hidden import (
 )
 from pokeuraou.narrow import narrow
 from pokeuraou.pool import load_pool
-from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
+from pokeuraou.poolplay import PoolArm
 from pokeuraou.provenance import LEGACY_BENCH_DROP, agent_name, provenance
 from pokeuraou.regulation import load_regulation
 from pokeuraou.search import belief_solve
@@ -264,29 +264,6 @@ def _counting(monkeypatch):  # noqa: ANN001, ANN202
 
     monkeypatch.setattr(selfplay, "belief_solve", spy)
     return seen
-
-
-def test_the_drop_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN001
-    solver = SolvedSelections(pool.reg, pool.teams, _stub)
-    tested, other = _arm("w20", solver), _arm("none", solver)
-    for which in (0, 1):
-        record, sides = pool_match_game(
-            pool.reg, pool, (tested, other), seed=283, game_index=0, which=which,
-            max_turns=2,
-        )
-        assert record.bench_drop[which] == "w20"
-        assert record.bench_drop[1 - which] == "none"
-        assert sides["bench_drops"][which] == "w20"
-        payload = record.to_json(objective="value:arm", search_limit=(2, 2))
-        assert payload["benchDrop"] == record.bench_drop
-
-    # Null: identical default arms record nothing new.
-    same = _arm("none", solver)
-    record, _ = pool_match_game(
-        pool.reg, pool, (same, same), seed=283, game_index=0, which=0,
-        max_turns=2,
-    )
-    assert "benchDrop" not in record.to_json(objective="value:arm", search_limit=(2, 2))
 
 
 def _game(setup, drop):  # noqa: ANN001, ANN202

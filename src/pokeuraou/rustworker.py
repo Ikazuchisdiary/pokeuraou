@@ -1,17 +1,20 @@
-"""IKA-458 stage 3.7: the generation worker is the port's executable (`rust/src/worker.rs`).
+"""IKA-458 stage 3.7: the generation and board workers are the port's executable
+(`rust/src/worker.rs`, `rust/src/boardworker.rs`).
 
-`tools/selfplay.py --pool` played the queue's games in Python: per game it asked the port to
-prepare the game (`prepGame`), solved a new pair's selection with the leaf, asked the port to
-play it (`playGame`), wrote the record and told the queue. `pokeuraou-damage selfplay-worker`
-does all of that itself. Python keeps what is the same for the whole run and is decided by the
-flags: this module turns a worker's parsed flags into one JSON file (`build_config`) -- the pool
+`pokeuraou-damage selfplay-worker` plays a queue's games itself: per game it prepares the game
+(`prepGame`), solves a new pair's selection with the leaf, plays it (`playGame`), writes the
+record and tells the queue. The Python loop that did this (`poolplay.generate_pool`,
+`tools/pool_match.py`'s) was removed in stage 3.7. Python keeps what is the same for the whole
+run and is decided by the flags: this module turns a tool's parsed flags into one JSON file
+(`build_config`, `board_config`) -- the pool
 in the shapes the record and the store write, the seed, the exploration, the store and its tag,
 the static parts of `playGame`'s request and the record's fields that no game changes, in
 `GameRecord.to_json`'s order -- and `command` names the executable that reads it.
 
 Only the shape generation plays goes this way (the leaf and the Q on an inference server, the
 solved selection with its store, the leaf ranking by a `q-nocover` fill, no deepening, depth 1,
-every completion believed); `unsupported` says what else a flag asks for, and the launcher stops.
+every completion believed); `unsupported` and `board_unsupported` say what else the remaining
+flags ask for, and the tool stops.
 """
 
 from __future__ import annotations
@@ -38,22 +41,10 @@ def unsupported(args: Any) -> list[str]:  # noqa: ANN401 - tools/selfplay.py's n
     out = []
     if args.inference is None:
         out.append("a leaf not on an inference server (--inference)")
-    if getattr(args, "uniform_selection", False):
-        out.append("--uniform-selection")
-    if getattr(args, "no_selection_memo", False):
-        out.append("--no-selection-memo")
     if not args.rank_leaf:
         out.append("the damage ranking (no --rank-leaf)")
     elif not is_q(args.rank_fill) or rank_fill_covers(args.rank_fill):
         out.append(f"--rank-fill {args.rank_fill} (only a q-nocover fill)")
-    if args.bench_drop != DEFAULT_BENCH_DROP:
-        out.append(f"--bench-drop {args.bench_drop}")
-    if args.deepen != DEFAULT_DEEPEN:
-        out.append(f"--deepen {args.deepen}")
-    if args.depth != 1 or args.solve_restricted:
-        out.append(f"--depth {args.depth}")
-    if getattr(args, "record_rank_scores", False):
-        out.append("--record-rank-scores")
     return out
 
 
@@ -62,8 +53,8 @@ def _record_template(
 ) -> list[list[Any]]:
     """The record's keys in `GameRecord.to_json`'s order, with the values no game changes.
 
-    The record `play_game` and `generate_pool` make for the shape this worker plays, with
-    placeholders for the per-game fields (`worker.rs`'s `PER_GAME`).
+    The record the removed Python loop (`generate_pool` over `play_game`) made for the shape this
+    worker plays, with placeholders for the per-game fields (`worker.rs`'s `PER_GAME`).
     """
     from .selfplay import GameRecord
 
@@ -94,6 +85,45 @@ def _record_template(
     return [[key, value] for key, value in payload.items()]
 
 
+#: The keys of `agent_node` the board worker fills per arm itself (its servers, blocks and widths).
+BOARD_FILLS = ("server", "qServer", "widths")
+
+
+def agent_node(model: Any, limit: int, leaf: Any) -> dict[str, Any]:  # noqa: ANN401
+    """The agent of a move node, the same for generation and every board arm: `playGame`'s static
+    `node` for this Q, width and leaf (its menus, its budget, its leaf's rules).
+
+    Generation (`build_config`) and the board (`board_config`) build their agents here and
+    nowhere else; `tools/agent_drift.py --check` holds them to it."""
+    from .encode import rules_of
+    from .playgame import static_node
+    from .rootmenus import static_request
+
+    return static_node(static_request(model, (limit, limit), "qServer"), leaf, leaf.encoder,
+                       rules_of(leaf), Budget.matrix())
+
+
+def exact_budget() -> dict[str, Any]:
+    """The budget of the exact resolution that advances a game (both workers)."""
+    from .rustnode import dump_budget
+
+    return dump_budget(Budget.exact())
+
+
+def max_turns(args: Any) -> int:  # noqa: ANN401
+    """The turn cap (both workers)."""
+    from .selfplay import MAX_TURNS
+
+    return int(getattr(args, "max_turns", MAX_TURNS))
+
+
+def selection_notes() -> list[str]:
+    """The selection solve's notes (both workers)."""
+    from .selection import NOTES
+
+    return list(NOTES)
+
+
 def build_config(  # noqa: PLR0913 - the run's settings
     args: Any,  # noqa: ANN401 - tools/selfplay.py's namespace
     pool: Any,  # noqa: ANN401 - pool.Pool
@@ -109,13 +139,9 @@ def build_config(  # noqa: PLR0913 - the run's settings
     from .beliefnode import _stack_leaf
     from .encode import rules_of
     from .inference import BUFFER_BYTES
-    from .playgame import static_node
     from .qrank import Q_BUFFER_BYTES
-    from .rootmenus import static_request
-    from .rustnode import dump_budget
-    from .selection import NOTES
     from .selection_book import set_to_json
-    from .selfplay import MAX_TURNS, _HiddenBench, _self_switch_request, _set_json
+    from .selfplay import _HiddenBench, _self_switch_request, _set_json
 
     reg = pool.reg
     model = qrank.installed(qrank.q_name(args.rank_fill))
@@ -129,8 +155,7 @@ def build_config(  # noqa: PLR0913 - the run's settings
     if ready is None:
         raise SystemExit("the Rust worker needs the leaf of an inference server")
     context = ready[0]
-    limits = (args.limit, args.limit)
-    node = static_node(static_request(model, limits, "qServer"), leaf, leaf.encoder, rules, Budget.matrix())
+    node = agent_node(model, args.limit, leaf)
 
     def sheet(s: Any) -> dict[str, Any]:  # noqa: ANN401
         return {"species": s.species, "ability": s.ability, "item": s.item, "nature": s.nature,
@@ -139,13 +164,13 @@ def build_config(  # noqa: PLR0913 - the run's settings
     return {
         "regulation": str(repo_root() / "configs" / "regulations" / f"{reg.meta.format_id}.json"),
         "seed": int(args.seed),
-        "maxTurns": int(getattr(args, "max_turns", MAX_TURNS)),
+        "maxTurns": max_turns(args),
         "epsilon": float(args.explore_epsilon),
         "temperature": float(args.explore_temperature),
         "store": str(Path(store).resolve()),
         "tag": f"{pool.sha256}|{leaf_label}",
         "model": leaf_label,
-        "notes": list(NOTES),
+        "notes": selection_notes(),
         "pool": {
             "id": pool.id,
             "sha256": pool.sha256,
@@ -166,7 +191,7 @@ def build_config(  # noqa: PLR0913 - the run's settings
         "q": {"model": model.model, "bytes": int(Q_BUFFER_BYTES)},
         "context": context,
         "node": node,
-        "exactBudget": dump_budget(Budget.exact()),
+        "exactBudget": exact_budget(),
         "record": _record_template(leaf_label, args.rank_fill, args.limit, q_record),
     }
 
@@ -182,35 +207,13 @@ def board_unsupported(args: Any) -> list[str]:  # noqa: ANN401 - tools/pool_matc
 
     out = []
     if args.inference is None:
-        out.append("leaves loaded in the worker (--value, --baseline): the leaves of an inference "
-                   "server only (--inference, --baseline-inference-arm)")
+        out.append("a leaf not on an inference server (--inference)")
     for prefix, flag in (("", "--"), ("baseline_", "--baseline-")):
-        def got(name: str, prefix: str = prefix) -> Any:  # noqa: ANN401
-            return getattr(args, prefix + name)
-
-        if not got("rank_leaf"):
+        fill = getattr(args, prefix + "rank_fill")
+        if not getattr(args, prefix + "rank_leaf"):
             out.append(f"the damage ranking (no {flag}rank-leaf)")
-        elif not is_q(got("rank_fill")) or rank_fill_covers(got("rank_fill")):
-            out.append(f"{flag}rank-fill {got('rank_fill')} (only a q-nocover fill)")
-        if got("bench_drop") != DEFAULT_BENCH_DROP:
-            out.append(f"{flag}bench-drop {got('bench_drop')}")
-        if got("deepen") != DEFAULT_DEEPEN:
-            out.append(f"{flag}deepen {got('deepen')}")
-        if got("depth") != 1 or got("solve_restricted"):
-            out.append(f"{flag}depth {got('depth')}")
-        if got("eq_select") != DEFAULT_EQ_SELECT:
-            out.append(f"{flag}eq-select {got('eq_select')}")
-        for name in ("knockouts", "line1", "hold_baton", "bench_oracle", "net_scores_ends"):
-            if got(name):
-                out.append(f"{flag}{name.replace('_', '-')}")
-        if got("ally_targets") != "off":
-            out.append(f"{flag}ally-targets {got('ally_targets')}")
-    # Flags of both arms at once, with no baseline form.
-    for name in ("line1_back", "line_only_with", "ally_only_with", "drive_screens"):
-        if getattr(args, name):
-            out.append(f"--{name.replace('_', '-')} {getattr(args, name)}")
-    if args.drive_baton:
-        out.append("--drive-baton")
+        elif not is_q(fill) or rank_fill_covers(fill):
+            out.append(f"{flag}rank-fill {fill} (only a q-nocover fill)")
     return out
 
 
@@ -285,12 +288,8 @@ def board_config(  # noqa: PLR0913 - the board's settings
     from . import qrank
     from .beliefnode import _stack_leaf
     from .encode import rules_of
-    from .playgame import static_node
-    from .rootmenus import static_request
-    from .rustnode import dump_budget
-    from .selection import NOTES
     from .selection_book import set_to_json
-    from .selfplay import MAX_TURNS, _HiddenBench, _self_switch_request, _set_json
+    from .selfplay import _HiddenBench, _self_switch_request, _set_json
 
     reg = pool.reg
     ready = _self_switch_request(
@@ -312,9 +311,8 @@ def board_config(  # noqa: PLR0913 - the board's settings
             raise SystemExit("the Rust worker plays the leaves and the Qs of an inference server")
         if not any(model is seen for seen in qs):
             qs.append(model)
-        node = static_node(static_request(model, (arm.limit, arm.limit), "qServer"), leaf,
-                           leaf.encoder, rules_of(leaf), Budget.matrix())
-        for key in ("server", "qServer", "widths"):
+        node = agent_node(model, arm.limit, leaf)
+        for key in BOARD_FILLS:
             node.pop(key)
         solver = arm.solver
         arm_configs.append({
@@ -337,10 +335,10 @@ def board_config(  # noqa: PLR0913 - the board's settings
         "mode": "board",
         "regulation": str(repo_root() / "configs" / "regulations" / f"{reg.meta.format_id}.json"),
         "seed": int(args.seed),
-        "maxTurns": int(getattr(args, "max_turns", MAX_TURNS)),
+        "maxTurns": max_turns(args),
         "epsilon": float(args.explore_epsilon),
         "temperature": float(args.explore_temperature),
-        "notes": list(NOTES),
+        "notes": selection_notes(),
         "label": arm_label,
         "pool": {
             "id": pool.id,
@@ -361,7 +359,7 @@ def board_config(  # noqa: PLR0913 - the board's settings
         "servers": servers,
         "qServers": [{"model": q.model, "bytes": int(q.buffer_bytes)} for q in qs],
         "arms": arm_configs,
-        "exactBudget": dump_budget(Budget.exact()),
+        "exactBudget": exact_budget(),
         "records": [_board_template(which, arms, arm_label, pool, args, q_record) for which in (0, 1)],
     }
 

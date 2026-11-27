@@ -1,92 +1,65 @@
-"""One worker of an M-C match: two arms, both seats drawn from a pool (IKA-259).
+"""Writes the config of an M-C board's worker, `pokeuraou-damage pool-match-worker` (IKA-259, IKA-458).
 
-`tools/generation_match.py` plays one roster (our six) against a standings field with a
-selection book, which is the M-B board. M-C has no own side: generation draws both seats
-from the pool's 65 teams and solves each pair's selection with the leaf where the game
-starts (`pokeuraou.poolplay`, IKA-81). This is that game with two agents in it.
+M-C has no own side: generation draws both seats from the pool's 65 teams and solves each
+pair's selection with the leaf where the game starts (IKA-81). A board is that game with two
+agents in it. The games are played by the Rust worker (`rust/src/boardworker.rs`);
+`tools/match_queue.py` runs this once per board to turn the flags into the JSON every worker
+reads (`pokeuraou.rustworker.board_config`). The Python loop that played them here was
+removed in IKA-458 stage 3.7, with the research flags only it played (a leaf loaded here, the
+damage ranking, the deepening, depth 2, the bench drop, the knock-out branch, the ally
+targets, the equilibrium selection, line 1, the Baton hold, the bench oracle, the net's ends).
 
 What an arm is, per arm, and so in whichever seat it sits:
 
-* its leaf (`--inference-arm` / `--baseline-inference-arm` on a server, or `--value` /
-  `--baseline` loaded here; `--baseline-hp-share` plays hp-share, the M-C origin, and
-  one of the three is required -- a left-out leaf was silently hp-share until IKA-335),
-* its width (`--limit` / `--baseline-limit`) and narrowing (`--rank-leaf` /
-  `--baseline-rank-leaf`), and how its leaf ranking fills its cells (`--rank-fill` /
-  `--baseline-rank-fill`, IKA-268; a `-nocover` label builds its leaf-ranked menu without
-  the cover, IKA-323; `q` / `q-nocover` rank it by a learned Q instead, IKA-274, named by
-  `--q-arm` on the server or `--q-model` here). An arm with `--rank-leaf` and no fill named
-  plays `q-nocover` by `data/models/q-mc6.pt`, as M-C generation does, and stops without
-  that file; `refs2` is played when named (IKA-338),
-* which ally targets of `normal` moves its menus list (`--ally-targets` /
-  `--baseline-ally-targets`: off ships, benefit, all; IKA-181),
-* which point of its optimal set it plays (`--eq-select` / `--baseline-eq-select`,
-  IKA-196: lp ships; unif, ment<D>, qre<T> for measuring),
-* whether its leaf scores a finished battle by the net instead of as its result
-  (`--net-scores-ends` / `--baseline-net-scores-ends`: IKA-253 undone, for measuring it),
-* its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
-  draws its four from its side of the solve, and believes the opponent's bench from the
-  same solve. Solves are shared between workers through one directory per arm
-  (`--selection-store` / `--baseline-selection-store`), never mixed: the tag names the
-  leaf and a store solved for another leaf stops the run. An arm without a leaf draws four
-  of six uniformly and holds the uniform belief.
+* its leaf on an inference server (`--inference-arm` / `--baseline-inference-arm`, the other
+  arm's possibly on `--baseline-inference`); `--baseline-hp-share` plays hp-share, the M-C
+  origin, and one of the two is required -- a left-out leaf was silently hp-share until
+  IKA-335,
+* its width (`--limit` / `--baseline-limit`) and its leaf ranking (`--rank-leaf` /
+  `--baseline-rank-leaf`, required) by a Q (`--rank-fill` / `--baseline-rank-fill`: a
+  `q-nocover` fill; unnamed plays `q-nocover` by `data/models/q-mc6.pt`, IKA-338),
+* the port executable its move-node search reads (`--rust-binary` / `--baseline-rust-binary`,
+  IKA-413),
+* its selection: an arm with a leaf solves the pair's selection game with THAT leaf, draws its
+  four from its side of the solve, and believes the opponent's bench from the same solve.
+  Solves are shared through one directory per arm (`--selection-store` /
+  `--baseline-selection-store`), never mixed: the tag names the leaf and a store solved for
+  another leaf stops the run. hp-share draws four of six uniformly and holds the uniform belief.
 
-Index `i` is game `i // 2` with the tested arm at side `i % 2`; the pair and its seats
-come from the game's seed, so the two seats of a game are the same teams with the arms
-swapped. Records carry `gameIndex`, `seatIndex` and a provenance whose `seat` names the
-tested arm's side, which is what `pokeuraou.sprt` pairs on.
-
-Run through `tools/match_queue.py --pool`, which starts the inference servers and the
-queue. The worker prints, per arm, what it plays, and at the end what each arm did in
-each seat -- the echo that says a setting reached both seats.
+Index `i` is game `i // 2` with the tested arm at side `i % 2`; the pair and its seats come from
+the game's seed, so the two seats of a game are the same teams with the arms swapped. Records
+carry `gameIndex`, `seatIndex` and a provenance whose `seat` names the tested arm's side, which
+is what `pokeuraou.sprt` pairs on.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import sys
-import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
-# IKA-431: OpenBLAS commits a buffer per thread it may run when it loads -- numpy's copy
-# and scipy's, about 0.5 GB each on this 16-thread machine, a gigabyte in a worker that runs
-# on one core. Set before numpy loads (a launcher sets it already); no answer moves
-# (records/IKA-431.md).
+# IKA-431: OpenBLAS commits a buffer per thread it may run when it loads. Set before numpy loads.
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou import actions, eqselect, portlp, qrank, rustnode  # noqa: E402
-from pokeuraou import narrow as narrowing  # noqa: E402
-from pokeuraou.actions import ALLY_TARGET_MODES, team_ally_benefits  # noqa: E402
+from pokeuraou import qrank, rustworker  # noqa: E402
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
-from pokeuraou.deepen import DEFAULT_DEEPEN, deepen_spec, parse_deepen  # noqa: E402
-from pokeuraou.encode import Encoder, EncodingRules  # noqa: E402
-from pokeuraou.eqselect import DEFAULT_EQ_SELECT, parse_eq_select  # noqa: E402
-from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
+from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.payoff import HP_SHARE  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
-from pokeuraou.poolplay import (  # noqa: E402
-    PoolArm,
-    SolvedSelections,
-    check_hold_baton,
-    check_line1,
-    pool_match_game,
-)
-from pokeuraou.provenance import open_games, provenance, write_game  # noqa: E402
+from pokeuraou.poolplay import PoolArm, SolvedSelections  # noqa: E402
 from pokeuraou.search import (  # noqa: E402
     SHIPPED_RANK_FILL,
     parse_rank_fill,
-    rank_fill_covers,
     resolve_rank_fill,
 )
 from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
-from pokeuraou.workqueue import WorkClient  # noqa: E402
 
 #: The width M-C generation plays (IKA-77).
 GENERATION_LIMIT = 12
@@ -99,104 +72,41 @@ def leaf_name(files: Sequence[str | Path]) -> str:
 
 
 def build_leaves(
-    args: argparse.Namespace, encoder: Encoder, other_encoder: Encoder | None = None
+    args: argparse.Namespace, encoder: Encoder
 ) -> tuple[object, object | None, str, str | None]:
-    """(tested leaf, other leaf or None, their names). None is hp-share.
+    """(tested leaf, other leaf or None, their names), both on inference servers."""
+    from pokeuraou.inference import RemoteValue
 
-    `other_encoder` is the other arm's, when its rules differ (IKA-253's `net_scores_ends`):
-    the rules travel with the leaf, so the same weights under other rules are another leaf
-    object -- never the tested arm's, or both seats would play one rule.
-    """
-    other_encoder = other_encoder or encoder
-    if args.inference is not None:
-        from pokeuraou.inference import RemoteValue
-
-        value = RemoteValue(args.inference, args.inference_arm, encoder)
-        baseline = None
-        if args.baseline_inference_arm:
-            # IKA-461: the baseline arm may be on another server (`--baseline-inference`).
-            other = args.baseline_inference or args.inference
-            baseline = (
-                value
-                if args.baseline_inference_arm == args.inference_arm
-                and other_encoder is encoder
-                and other == args.inference
-                else RemoteValue(other, args.baseline_inference_arm, other_encoder)
-            )
-        # Asked of the server: a worker is told an arm's name, never what it holds.
-        names = [leaf_name(value.describe())]
-        names.append(leaf_name(baseline.describe()) if baseline is not None else None)
-        return value, baseline, names[0], names[1]
-    import torch
-
-    from pokeuraou.value import BatchedValue, load_ensemble
-
-    torch.set_num_threads(args.torch_threads)
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    nets, _ = load_ensemble(args.value, encoder)
-    value = BatchedValue([n.to(device) for n in nets], encoder, device=device)
+    value = RemoteValue(args.inference, args.inference_arm, encoder)
     baseline = None
-    if args.baseline:
-        if (
-            [p.resolve() for p in args.baseline] == [p.resolve() for p in args.value]
-            and other_encoder is encoder
-        ):
-            baseline = value
-        else:
-            base_nets, _ = load_ensemble(args.baseline, other_encoder)
-            baseline = BatchedValue(
-                [n.to(device) for n in base_nets], other_encoder, device=device
-            )
-    return (
-        value, baseline, leaf_name(args.value),
-        leaf_name(args.baseline) if args.baseline else None,
-    )
-
-
-def _ends_rule(leaf: object) -> str:
-    """How this leaf scores a finished battle: by the net (IKA-253 undone) or its result."""
-    rules = getattr(getattr(leaf, "encoder", None), "rules", None)
-    return "by the net" if getattr(rules, "net_scores_ends", False) else "as the result"
+    if args.baseline_inference_arm:
+        # IKA-461: the baseline arm may be on another server (`--baseline-inference`).
+        other = args.baseline_inference or args.inference
+        baseline = (
+            value
+            if args.baseline_inference_arm == args.inference_arm and other == args.inference
+            else RemoteValue(other, args.baseline_inference_arm, encoder)
+        )
+    # Asked of the server: a worker is told an arm's name, never what it holds.
+    names = [leaf_name(value.describe())]
+    names.append(leaf_name(baseline.describe()) if baseline is not None else None)
+    return value, baseline, names[0], names[1]
 
 
 def _install_q(
     args: argparse.Namespace, encoder: Encoder, ap: argparse.ArgumentParser
 ) -> dict[str, list[str]]:
     """The Qs the q rank fills rank by (IKA-274): installed, and what the records name
-    them by (`qrank.record_fields`): their files as the server (or this worker) holds
-    them, a named Q's (stage 3, ``q-nocover.NAME``) as ``NAME=file``, and each file's
-    sha256 (IKA-340). Empty without a q fill."""
-    for fill, leafy, label in ((args.rank_fill, args.rank_leaf, "--rank-fill"),
-                               (args.baseline_rank_fill, args.baseline_rank_leaf,
-                                "--baseline-rank-fill")):
-        if qrank.is_q(fill) and not leafy:
-            # A damage-ranked arm never reaches the ranking, so the label would be recorded
-            # and played by nobody.
-            ap.error(f"{label} {fill} ranks the leaf-ranked menu: it needs that arm's rank-leaf")
-    # A deepen label whose oracle probes by a Q (IKA-322's q<k>) wants the default Q; it
-    # is named to `install_from_args` as a q fill would be, so the flags' checks hold for it.
-    # So does one whose children's menus a Q ranks (IKA-307's c<k>).
-    probing = ["q" for label in (args.deepen, args.baseline_deepen)
-               if deepen_spec(label).q_probe is not None
-               or deepen_spec(label).child_q is not None]
+    them by (`qrank.record_fields`): their files as the server holds them, a named Q's
+    (``q-nocover.NAME``) as ``NAME=file``, and each file's sha256 (IKA-340)."""
     models = qrank.install_from_args(
-        args, encoder, (args.rank_fill, args.baseline_rank_fill, *probing), ap.error
+        args, encoder, (args.rank_fill, args.baseline_rank_fill), ap.error
     )
     if not models:
         return {}
     fields = qrank.record_fields(models)
-    print(f"  Q: {', '.join(fields['qModel'])} "
-          + (f"(served by {args.inference})" if args.inference else "(loaded here)"),
-          file=sys.stderr)
+    print(f"  Q: {', '.join(fields['qModel'])} (served by {args.inference})", file=sys.stderr)
     return fields
-
-
-def _q_delta(before: dict[str, dict[str, int]], label: str) -> tuple[int, int]:
-    """(rankings, cells) the Q ranking did under `label` since `before` (`qrank.QRANKED`)."""
-    now = qrank.QRANKED.get(label, {})
-    was = before.get(label, {})
-    return (now.get("rankings", 0) - was.get("rankings", 0),
-            now.get("cells", 0) - was.get("cells", 0))
 
 
 #: The inference server's arm that answers `payoff.HP_SHARE` (`inference-server --hp-share-arm`,
@@ -213,22 +123,15 @@ def check_other_arm(args: argparse.Namespace, error: Callable[[str], object]) ->
     against hp-share because its driver left `--baseline` out. Leaving a leaf out now
     stops the run; hp-share is `--baseline-hp-share`.
     """
-    named = args.baseline or args.baseline_inference_arm
+    named = args.baseline_inference_arm
     if args.baseline_hp_share and named:
-        error("--baseline-hp-share contradicts the baseline leaf "
-              f"{args.baseline_inference_arm or [str(p) for p in args.baseline]}: "
+        error(f"--baseline-hp-share contradicts the baseline leaf {named}: "
               "one of them is not what you meant")
     if args.baseline_hp_share:
-        if args.inference is None:
-            error("--baseline-hp-share is the server's arm "
-                  f"{HP_SHARE_ARM!r}: it needs --inference (the server started with "
-                  "--hp-share-arm)")
-        else:
-            args.baseline_inference_arm = HP_SHARE_ARM
+        args.baseline_inference_arm = HP_SHARE_ARM
     if not args.baseline_hp_share and not named:
-        error("the other arm's leaf is not named: pass --baseline (loaded here) or "
-              "--baseline-inference-arm (on a server), or --baseline-hp-share to play "
-              "hp-share and mean it (IKA-335)")
+        error("the other arm's leaf is not named: pass --baseline-inference-arm, or "
+              "--baseline-hp-share to play hp-share and mean it (IKA-335)")
 
 
 def focus_pairs(
@@ -243,15 +146,41 @@ def focus_pairs(
             or (b in focus and (field is None or a in field))]
 
 
+def board_pairs(args: argparse.Namespace, pool: object, error: Callable[[str], object]
+                ) -> list[tuple[int, int]] | None:
+    """The pairs the `--pairs-*` flags leave, or None for every pair."""
+    reg = pool.reg
+    pairs = None
+    if args.pairs_with:
+        unknown = [s for s in args.pairs_with if s not in reg.species]
+        if unknown:
+            error(f"--pairs-with: not species ids of {reg.meta.format_id}: {unknown}")
+        holding = {t for t, team in enumerate(pool.teams)
+                   if any(s.species in args.pairs_with for s in team.sets)}
+        pairs = [(a, b) for a, b in pool.pairs if a in holding or b in holding]
+        if not pairs:
+            error(f"--pairs-with {args.pairs_with}: no team of the pool has one")
+    if args.pairs_focus:
+        index = {team.id: t for t, team in enumerate(pool.teams)}
+        unknown = [i for i in [*args.pairs_focus, *(args.pairs_field or [])] if i not in index]
+        if unknown:
+            error(f"--pairs-focus / --pairs-field: not team ids of the pool: {unknown}")
+        pairs = focus_pairs(pairs if pairs is not None else pool.pairs,
+                            {index[i] for i in args.pairs_focus},
+                            {index[i] for i in args.pairs_field} if args.pairs_field else None)
+        if not pairs:
+            error("--pairs-focus: no pair left")
+    elif args.pairs_field:
+        error("--pairs-field needs --pairs-focus")
+    if args.pairs_no_mirror:
+        pairs = [(a, b) for a, b in (pairs if pairs is not None else pool.pairs) if a != b]
+    return pairs
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pool", required=True, help="data/pool/<id>.json, e.g. regmc-matchupweb")
-    ap.add_argument("--value", type=Path, nargs="+", default=None,
-                    help="the tested arm's leaf, loaded here (one model or an ensemble)")
-    ap.add_argument("--baseline", type=Path, nargs="+", default=None,
-                    help="the other arm's leaf, loaded here. One of this, "
-                    "--baseline-inference-arm or --baseline-hp-share is required")
-    ap.add_argument("--inference", default=None, metavar="HOST:PORT")
+    ap.add_argument("--inference", required=True, metavar="HOST:PORT")
     ap.add_argument("--inference-arm", default="value")
     ap.add_argument("--baseline-inference-arm", default=None,
                     help="the server's name for the other arm")
@@ -264,74 +193,21 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--limit", type=int, default=GENERATION_LIMIT)
     ap.add_argument("--baseline-limit", type=int, default=None, help="default: --limit")
     ap.add_argument("--rank-leaf", action="store_true",
-                    help="the tested arm narrows by its leaf (what M-C generation does)")
+                    help="the tested arm narrows by its leaf (what M-C generation does; required)")
     ap.add_argument("--baseline-rank-leaf", action="store_true", help="same for the other arm")
     ap.add_argument("--rank-fill", default=None,
-                    help="how the tested arm's leaf ranking fills its cells: refs<N> replies "
-                    "at the matrix budget, refs<N>-fast at Budget.fast (IKA-268); a -nocover "
-                    "suffix builds its leaf-ranked menu without the cover (IKA-323); q / "
-                    "q-nocover rank by a Q (IKA-274). Default with --rank-leaf: "
-                    f"{SHIPPED_RANK_FILL}, what M-C generation plays (IKA-338)")
+                    help="how the tested arm's leaf ranking fills its cells: a q-nocover fill "
+                    f"ranks by a Q (IKA-274). Default with --rank-leaf: {SHIPPED_RANK_FILL}, "
+                    "what M-C generation plays (IKA-338)")
     ap.add_argument("--baseline-rank-fill", default=None,
                     help="same for the other arm")
     qrank.add_q_flags(ap)
-    ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP,
-                    help="which completions of the opponent's unseen slots the tested "
-                    "arm's belief leaves out: w<P> under P%% of the weight, m<P> beyond "
-                    "the heaviest P%%; the heaviest stays (IKA-283)")
-    ap.add_argument("--baseline-bench-drop", default=DEFAULT_BENCH_DROP,
-                    help="same for the other arm")
-    ap.add_argument("--deepen", default=DEFAULT_DEEPEN,
-                    help="how the tested arm deepens each move decision best first after "
-                    "the depth-1 solve, where no bench is hidden: m<N> / r<N> spend N "
-                    "cells and read the root whole / restricted (IKA-33); m<N>o<W> / "
-                    "m<N>oall also widen the root by a double oracle over the rest of "
-                    "the width-W menu / every legal action, s<W> / sall swapping a "
-                    "weightless action out for each, b<N>... the oracle without "
-                    "deepening (IKA-293); none is off")
-    ap.add_argument("--baseline-deepen", default=DEFAULT_DEEPEN,
-                    help="same for the other arm")
-    ap.add_argument("--depth", type=int, default=1, choices=(1, 2),
-                    help="the tested arm's search depth at move nodes. 2 needs "
-                    "--solve-restricted: under a hidden bench that is the only depth-2 "
-                    "reading `belief_solve` has (IKA-111)")
-    ap.add_argument("--baseline-depth", type=int, default=1, choices=(1, 2),
-                    help="same for the other arm")
-    ap.add_argument("--solve-restricted", action="store_true",
-                    help="at depth 2, the tested arm reads its strategy off the refined "
-                    "rectangle solved as its own game (IKA-68; per completion under a "
-                    "hidden bench, IKA-111)")
-    ap.add_argument("--baseline-solve-restricted", action="store_true",
-                    help="same for the other arm")
-    ap.add_argument("--knockouts", action="store_true",
-                    help="the tested arm's matrix budget forks a hit whose knock-out the "
-                    "crit or the roll decides (Budget.enumerate_knockouts, IKA-359)")
-    ap.add_argument("--baseline-knockouts", action="store_true",
-                    help="same for the other arm")
     ap.add_argument("--rust-binary", type=Path, default=None,
                     help="the tested arm's move-node search reads the port executable at this "
                     "path (IKA-413: a port change measured against the port before it); the "
-                    "game itself, the replacements and the selection stay with the process's "
-                    "own. Default: the process's own, byte for byte")
+                    "game itself, the replacements and the selection stay with the worker's "
+                    "own. Default: the worker's own")
     ap.add_argument("--baseline-rust-binary", type=Path, default=None,
-                    help="same for the other arm")
-    ap.add_argument("--ally-targets", choices=ALLY_TARGET_MODES, default="off",
-                    help="which ally targets of `normal` moves the tested arm's menus list "
-                    "(IKA-181): off (ships), benefit (where the ally's ability or item "
-                    "gains, or the move is for an ally), all")
-    ap.add_argument("--baseline-ally-targets", choices=ALLY_TARGET_MODES, default="off",
-                    help="same for the other arm")
-    ap.add_argument("--pairs-ally-benefit", action="store_true",
-                    help="draw only the pool's pairs where either team has a member whose "
-                    "`normal` move gains on another member (`actions.team_ally_benefits`, "
-                    "IKA-181)")
-    ap.add_argument("--eq-select", default=DEFAULT_EQ_SELECT,
-                    help="which point of its optimal set the tested arm plays at its move "
-                    "and replacement nodes (IKA-196): lp, the LP's vertex (ships); unif, the "
-                    "one taking most from a uniformly replying opponent; ment<D>, the "
-                    "largest entropy within D of the value; qre<T>, the logit QRE at "
-                    "temperature T. Depth 1 without a deepening only")
-    ap.add_argument("--baseline-eq-select", default=DEFAULT_EQ_SELECT,
                     help="same for the other arm")
     ap.add_argument("--pairs-with", nargs="+", default=None, metavar="SPECIES",
                     help="draw only the pool's pairs where either team has one of these "
@@ -343,47 +219,7 @@ def main(argv: list[str] | None = None) -> None:
                     help="with --pairs-focus: the opponents (default: every team)")
     ap.add_argument("--pairs-no-mirror", action="store_true",
                     help="leave out the pairs of a team against itself (IKA-419d)")
-    ap.add_argument("--ally-only-with", nargs="+", default=None, metavar="SPECIES",
-                    help="the arms' --ally-targets apply only to the side whose six holds one of "
-                    "these species ids; the other side plays off (IKA-419d)")
-    ap.add_argument("--line1", action="store_true",
-                    help="the tested arm plays the user's line 1 (IKA-419f): leads Raichu and "
-                    "Espathra, the back two drawn from the equilibrium conditioned on the rows "
-                    "holding both (else Archaludon and Politoed), Raichu Mega Evolved at its "
-                    "first turn on the field. Only on the side `--line-only-with` names")
-    ap.add_argument("--baseline-line1", action="store_true", help="same for the other arm")
-    ap.add_argument("--line1-back", nargs=2, default=None, metavar="SPECIES",
-                    help="with --line1: the tested arm's back two are these species ids, in this "
-                    "order, and nothing is drawn from the equilibrium (IKA-419g)")
-    ap.add_argument("--hold-baton", action="store_true",
-                    help="the tested arm leaves Baton Pass out of its candidates on the side "
-                    "holding Espathra until Espathra's Special Attack and Special Defense are "
-                    "both +1 or more (IKA-419g)")
-    ap.add_argument("--baseline-hold-baton", action="store_true", help="same for the other arm")
-    ap.add_argument("--drive-baton", action="store_true",
-                    help="with a Baton hold (either arm's): the held Espathra uses Calm Mind while "
-                    "its gate is shut and Baton Pass once it is open and a teammate can receive "
-                    "it, whenever its menu has them; its partner stays free (IKA-444)")
-    ap.add_argument("--drive-screens", default=None, metavar="SPECIES",
-                    help="with a Baton hold (either arm's): on the held side, the Pokemon whose "
-                    "species id starts with this (raichu: Raichu and Mega Raichu X) sets "
-                    "Reflect and Light Screen while one is missing, whenever its menu has them "
-                    "(IKA-444)")
-    ap.add_argument("--bench-oracle", action="store_true",
-                    help="the tested arm believes the opponent's bench is the four the "
-                    "opponent really drew: a ceiling for any bench belief, not a legal "
-                    "player; its selection is unchanged (IKA-440)")
-    ap.add_argument("--baseline-bench-oracle", action="store_true",
-                    help="same for the other arm")
-    ap.add_argument("--line-only-with", nargs="+", default=None, metavar="SPECIES",
-                    help="the arms' --line1 applies only to the side whose six holds one of "
-                    "these species ids (IKA-419f)")
     add_bench_flags(ap)
-    ap.add_argument("--net-scores-ends", action="store_true",
-                    help="the tested arm's leaf scores a finished battle by the net, not as "
-                    "its result (IKA-253 undone; only for measuring the fix)")
-    ap.add_argument("--baseline-net-scores-ends", action="store_true",
-                    help="same for the other arm")
     ap.add_argument("--selection-store", type=Path, default=None,
                     help="the tested arm's shared solves. Default <games-out dir>/"
                     "selection-<leaf>")
@@ -393,32 +229,16 @@ def main(argv: list[str] | None = None) -> None:
                     "pure equilibrium, as a rating wants (generation plays 0.25)")
     ap.add_argument("--explore-temperature", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=77)
-    ap.add_argument("--games", type=int, default=100, help="games per seat, without --queue")
-    ap.add_argument("--queue", default=None)
+    ap.add_argument("--games", type=int, default=100, help="games per seat (not in the config)")
     ap.add_argument("--max-turns", type=int, default=MAX_TURNS)
-    ap.add_argument("--games-out", type=Path, default=None)
-    ap.add_argument("--out", type=Path, default=None, help="one summary line per seat")
-    ap.add_argument("--device", default=None)
-    ap.add_argument("--torch-threads", type=int, default=1)
-    ap.add_argument("--report-every", type=int, default=25)
-    ap.add_argument("--rust-config", type=Path, default=None,
+    ap.add_argument("--games-out", type=Path, default=None,
+                    help="where the games go; only places the default selection stores")
+    ap.add_argument("--rust-config", type=Path, required=True,
                     help="IKA-458 stage 3.7: write the Rust board worker's config for these flags to "
-                    "this file and play no game (tools/match_queue.py does this once per board)")
+                    "this file (tools/match_queue.py does this once per board)")
     args = ap.parse_args(argv)
     require_bench(args)
-    if (args.inference is None) == (args.value is None):
-        ap.error("one of --inference or --value names the tested arm's leaf")
-    if args.inference is not None and args.baseline:
-        ap.error("--baseline is loaded here; with --inference use --baseline-inference-arm")
     check_other_arm(args, ap.error)
-    if args.drive_baton:
-        if not (args.hold_baton or args.baseline_hold_baton):
-            ap.error("--drive-baton steers a Baton hold: give --hold-baton or --baseline-hold-baton")
-        actions.BATON_DRIVE[0] = True
-    if args.drive_screens:
-        if not (args.hold_baton or args.baseline_hold_baton):
-            ap.error("--drive-screens steers a Baton hold's side: give --hold-baton or --baseline-hold-baton")
-        actions.SCREEN_DRIVE[0] = args.drive_screens
     # Each arm's fill as generation resolves it (IKA-338): named, or q-nocover for a
     # leaf-ranked menu.
     args.rank_fill = resolve_rank_fill(args.rank_fill, args.rank_leaf)
@@ -428,75 +248,16 @@ def main(argv: list[str] | None = None) -> None:
             parse_rank_fill(fill)
         except ValueError as problem:
             ap.error(str(problem))
-    for label in (args.deepen, args.baseline_deepen):
-        try:
-            parse_deepen(label)
-        except ValueError as problem:
-            ap.error(str(problem))
-    for drop in (args.bench_drop, args.baseline_bench_drop):
-        try:
-            parse_bench_drop(drop)
-        except ValueError as problem:
-            ap.error(str(problem))
-    for label in (args.eq_select, args.baseline_eq_select):
-        try:
-            parse_eq_select(label)
-        except ValueError as problem:
-            ap.error(str(problem))
-    for depth, restricted in ((args.depth, args.solve_restricted),
-                              (args.baseline_depth, args.baseline_solve_restricted)):
-        if restricted != (depth == 2):
-            # `play_game` refuses anything else under a hidden bench; the open game would
-            # take depth 2 in the mixed reading, which this tool has no use for.
-            ap.error("--depth 2 goes with --solve-restricted and depth 1 without it "
-                     "(per arm; IKA-111)")
+    refused = rustworker.board_unsupported(args)
+    if refused:
+        ap.error(f"the Rust worker does not play {', '.join(refused)}")
 
     pool = load_pool(args.pool)
     reg = pool.reg
     register_mega_stones(reg)
-    pairs = None
-    if args.pairs_with:
-        unknown = [s for s in args.pairs_with if s not in reg.species]
-        if unknown:
-            ap.error(f"--pairs-with: not species ids of {reg.meta.format_id}: {unknown}")
-        holding = {t for t, team in enumerate(pool.teams)
-                   if any(s.species in args.pairs_with for s in team.sets)}
-        pairs = [(a, b) for a, b in pool.pairs if a in holding or b in holding]
-        if not pairs:
-            ap.error(f"--pairs-with {args.pairs_with}: no team of the pool has one")
-    if args.pairs_focus:
-        index = {team.id: t for t, team in enumerate(pool.teams)}
-        unknown = [i for i in [*args.pairs_focus, *(args.pairs_field or [])] if i not in index]
-        if unknown:
-            ap.error(f"--pairs-focus / --pairs-field: not team ids of the pool: {unknown}")
-        pairs = focus_pairs(pairs if pairs is not None else pool.pairs,
-                            {index[i] for i in args.pairs_focus},
-                            {index[i] for i in args.pairs_field} if args.pairs_field else None)
-        if not pairs:
-            ap.error("--pairs-focus: no pair left")
-    elif args.pairs_field:
-        ap.error("--pairs-field needs --pairs-focus")
-    if args.pairs_no_mirror:
-        pairs = [(a, b) for a, b in (pairs if pairs is not None else pool.pairs) if a != b]
-    if args.pairs_ally_benefit:
-        holding = {t for t, team in enumerate(pool.teams) if team_ally_benefits(reg, team.sets)}
-        pairs = [(a, b) for a, b in (pairs if pairs is not None else pool.pairs)
-                 if a in holding or b in holding]
-        if not pairs:
-            ap.error("--pairs-ally-benefit: no team of the pool has one")
-    # One encoder per arm when their rules differ: the rules travel with the leaf.
-    tested_rules = EncodingRules(net_scores_ends=args.net_scores_ends)
-    other_rules = EncodingRules(net_scores_ends=args.baseline_net_scores_ends)
-    encoder = Encoder(reg, rules=tested_rules)
-    other_encoder = (
-        encoder if other_rules == tested_rules
-        else Encoder(reg, vocab=encoder.vocab, rules=other_rules)
-    )
-    value, baseline, value_name, baseline_name = (
-        build_leaves(args, encoder)
-        if other_encoder is encoder
-        else build_leaves(args, encoder, other_encoder)
-    )
+    pairs = board_pairs(args, pool, ap.error)
+    encoder = Encoder(reg)
+    value, baseline, value_name, baseline_name = build_leaves(args, encoder)
     q_record = _install_q(args, encoder, ap)
     home = args.games_out.parent if args.games_out is not None else Path(".")
 
@@ -512,38 +273,18 @@ def main(argv: list[str] | None = None) -> None:
         name=value_name, evaluate=value,
         solver=solver_for(value, value_name, args.selection_store),
         limit=args.limit, rank_by_leaf=args.rank_leaf, rank_fill=args.rank_fill,
-        bench_drop=args.bench_drop, deepen=args.deepen, depth=args.depth,
-        solve_restricted=args.solve_restricted, knockouts=args.knockouts,
         rust_binary=args.rust_binary,
-        ally_targets=args.ally_targets,
-        eq_select=args.eq_select,
-        line1=args.line1,
-        line1_back=tuple(args.line1_back) if args.line1_back else None,
-        hold_baton=args.hold_baton,
-        bench_oracle=args.bench_oracle,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
-    if args.baseline_hp_share or baseline is None:
+    if args.baseline_hp_share:
         # The M-C origin: no leaf of its own to solve a selection with, so the selection is
         # drawn; its nodes are scored by the server's hp-share arm.
         other = PoolArm(name=HP_SHARE.name, evaluate=baseline, solver=None,
                         limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
                         rank_fill=args.baseline_rank_fill,
-                        bench_drop=args.baseline_bench_drop,
-                        deepen=args.baseline_deepen,
-                        depth=args.baseline_depth,
-                        solve_restricted=args.baseline_solve_restricted,
-                        knockouts=args.baseline_knockouts,
-                        rust_binary=args.baseline_rust_binary,
-                        ally_targets=args.baseline_ally_targets,
-                        eq_select=args.baseline_eq_select,
-                        line1=args.baseline_line1,
-                        hold_baton=args.baseline_hold_baton,
-                        bench_oracle=args.baseline_bench_oracle)
+                        rust_binary=args.baseline_rust_binary)
     else:
         assert baseline_name is not None
-        # One solver per arm even over one leaf: shared, the second arm would reuse the
-        # first one's memo and the echo could not say that each arm solved its own.
         other = PoolArm(
             name=baseline_name, evaluate=baseline,
             solver=(
@@ -553,17 +294,7 @@ def main(argv: list[str] | None = None) -> None:
             ),
             limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
             rank_fill=args.baseline_rank_fill,
-            bench_drop=args.baseline_bench_drop,
-            deepen=args.baseline_deepen,
-            depth=args.baseline_depth,
-            solve_restricted=args.baseline_solve_restricted,
-            knockouts=args.baseline_knockouts,
             rust_binary=args.baseline_rust_binary,
-            ally_targets=args.baseline_ally_targets,
-            eq_select=args.baseline_eq_select,
-            line1=args.baseline_line1,
-            hold_baton=args.baseline_hold_baton,
-            bench_oracle=args.baseline_bench_oracle,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -571,388 +302,30 @@ def main(argv: list[str] | None = None) -> None:
           f"selection eps={args.explore_epsilon}, T={args.explore_temperature}",
           file=sys.stderr)
     if pairs is not None:
-        wanted = [*(args.pairs_with or []),
-                  *([f"{len(args.pairs_focus)} focus teams"] if args.pairs_focus else []),
-                  *(["a member gaining from its ally's move"] if args.pairs_ally_benefit else [])]
-        print(f"  pairs: {len(pairs)} of {len(pool.pairs)}, those with "
-              f"{' / '.join(wanted)} in either team", file=sys.stderr)
+        print(f"  pairs: {len(pairs)} of {len(pool.pairs)}", file=sys.stderr)
     for label, arm in (("tested arm", tested), ("other arm", other)):
         store = arm.solver.store if arm.solver is not None else None
         print(
-            f"  {label}: leaf {arm.name} / width {arm.limit} / "
-            f"{'leaf' if arm.rank_by_leaf else 'damage'} ranking"
-            + (f" (fill {arm.rank_fill})" if arm.rank_by_leaf else "")
-            + f" / bench drop {arm.bench_drop}"
-            + f" / deepen {arm.deepen}"
-            + (f" / ends {_ends_rule(arm.evaluate)}" if arm.evaluate is not None else "")
-            + (f" / depth {arm.depth} restricted" if arm.depth != 1 else "")
-            + (" / knockout branch" if arm.knockouts else "")
+            f"  {label}: leaf {arm.name} / width {arm.limit} / leaf ranking (fill {arm.rank_fill})"
             + (f" / port {arm.rust_binary}" if arm.rust_binary is not None else "")
-            + (f" / ally targets {arm.ally_targets}" if arm.ally_targets != "off" else "")
-            + (f" / equilibrium {arm.eq_select}" if arm.eq_select != DEFAULT_EQ_SELECT else "")
-            + (f" / line 1 (on sides holding {args.line_only_with or 'any'})"
-               + (f", back {list(arm.line1_back)}" if arm.line1_back else "")
-               if arm.line1 else "")
-            + (" / Baton Pass held until Espathra is +1/+1 in Sp. Atk/Sp. Def"
-               + (", driven: Calm Mind, then Baton Pass" if args.drive_baton else "")
-               + (f", {args.drive_screens} sets Reflect and Light Screen" if args.drive_screens else "")
-               if arm.hold_baton else "")
-            + " / selection "
-            f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
-            + " / belief "
-            + ("ORACLE (the opponent's drawn four)" if arm.bench_oracle
-               else "solved" if arm.solver is not None else "uniform"),
+            + f" / selection {arm.selection}"
+            + (f" by its own leaf, store {store}" if store else "")
+            + " / belief " + ("solved" if arm.solver is not None else "uniform"),
             file=sys.stderr,
         )
-    ranking = tuple("leaf" if arm.rank_by_leaf else "damage" for arm in arms)
+    # The tags name what differs between the arms, as the board's records always did.
     tags = ""
     if tested.limit != other.limit:
         tags += f"@w{tested.limit}"
-    if ranking[0] != ranking[1]:
-        tags += {"leaf": "@leafrank", "damage": "@damagerank"}[ranking[0]]
-    if tested.rank_by_leaf and tested.rank_fill != other.rank_fill:
+    if tested.rank_fill != other.rank_fill:
         tags += f"@rankfill:{tested.rank_fill}"
-    if tested.bench_drop != other.bench_drop:
-        tags += f"@benchdrop:{tested.bench_drop}"
-    if tested.deepen != other.deepen:
-        tags += f"@deepen:{tested.deepen}"
-    if tested_rules != other_rules:
-        tags += f"@enc:{tested_rules.label()}"
-    if tested.depth != other.depth:
-        tags += f"@d{tested.depth}"
-    if tested.knockouts != other.knockouts:
-        tags += "@ko" if tested.knockouts else "@noko"
     if tested.rust_binary != other.rust_binary:
         tags += "@port" if tested.rust_binary is not None else "@ownport"
-    if tested.ally_targets != other.ally_targets:
-        tags += f"@ally:{tested.ally_targets}"
-    if tested.eq_select != other.eq_select:
-        tags += f"@eq:{tested.eq_select}"
-    if tested.line1 != other.line1:
-        tags += "@line1" if tested.line1 else "@noline1"
-    if tested.line1_back != other.line1_back:
-        tags += f"@back:{'+'.join(tested.line1_back or ())}"
-    if tested.hold_baton != other.hold_baton:
-        tags += "@holdbaton" if tested.hold_baton else "@noholdbaton"
-    if tested.bench_oracle != other.bench_oracle:
-        tags += "@oracle" if tested.bench_oracle else "@nooracle"
     arm_label = f"{tested.name}{tags}"
-
-    if args.rust_config is not None:
-        # IKA-458 stage 3.7: the Rust board worker's config for these flags, written once, and no game.
-        from pokeuraou import rustworker
-
-        refused = rustworker.board_unsupported(args)
-        if refused:
-            ap.error(f"the Rust worker does not play {', '.join(refused)}")
-        rustworker.write_config(
-            rustworker.board_config(args, pool, arms, arm_label, q_record, pairs), args.rust_config
-        )
-        print(f"  rust board worker config -> {args.rust_config}", file=sys.stderr)
-        return
-
-    client = WorkClient(args.queue) if args.queue else None
-    # IKA-460 step 1: the board's hidden-bench completions and the game's steps are the port's,
-    # as generation's (`tools/selfplay.py`): it holds this worker's positions by number. An arm
-    # on another executable (`--rust-binary`) is told the positions its search names the first
-    # time it sees them, and is sent a branch another process kept as text.
-    rustnode.hold_positions()
-
-    def work() -> Iterator[int]:
-        if client is None:
-            yield from range(2 * args.games)
-            return
-        while (index := client.take()) is not None:
-            yield index
-
-    games_file = open_games(args.games_out)
-    # Per seat (tested at side 0, side 1): wins, played, unfinished, seconds.
-    tally = [[0, 0, 0, 0.0], [0, 0, 0, 0.0]]
-    # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
-    echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
-              "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
-              "depth": {}, "knockouts": 0, "ports": {},
-              "ally": {}, "ally_menus": 0, "ally_played": 0,
-              "eq": {}, "line": {"games": 0, "selection": {}, "forced": {}},
-              "hold": {"games": 0, "held": 0, "held_legal": 0, "open": 0, "open_menu": 0,
-                       "baton_open": 0},
-              "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
-              "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
-             for _ in arms]
-            for _ in range(2)]
-    done = 0
-    started_all = time.perf_counter()
-    for index in work():
-        which, game_index = index % 2, index // 2
-        calls_before = [getattr(arm.evaluate, "calls", 0) for arm in arms]
-        coverless_before = {k: dict(v) for k, v in narrowing.COVERLESS.items()}
-        q_before = {k: dict(v) for k, v in qrank.QRANKED.items()}
-        started = time.perf_counter()
-        record, sides = pool_match_game(
-            reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
-            max_turns=args.max_turns,
-            epsilon=args.explore_epsilon, temperature=args.explore_temperature,
-            pairs=pairs, ally_only_with=args.ally_only_with,
-            line_only_with=args.line_only_with,
-        )
-        done += 1
-        if done % args.report_every == 0:
-            print(f"    {done} played, {(time.perf_counter() - started_all) / done:.2f} s/game",
-                  flush=True)
-        for arm_index in (0, 1):
-            side = which if arm_index == 0 else 1 - which
-            bucket = echo[which][arm_index]
-            for key, value_ in (("selection", sides["selections"][side]),
-                                ("belief", sides["beliefs"][side])):
-                bucket[key][value_] = bucket[key].get(value_, 0) + 1
-            bucket["leaf"].add(sides["leaves"][side])
-            # What `play_game` itself recorded as that side's fill, not what the arm holds:
-            # the echo has to be read off the game, or it only repeats the command line.
-            played_fill = record.rank_fill[side]
-            bucket["fill"][played_fill] = bucket["fill"].get(played_fill, 0) + 1
-            played_drop = record.bench_drop[side]
-            bucket["drop"][played_drop] = bucket["drop"].get(played_drop, 0) + 1
-            # Games this side played with the knock-out branch, read off the record.
-            bucket["knockouts"] += int(record.knockouts[side])
-            # Games this side believed by the old rule, and the beliefs it changed: the
-            # positive control that the rule reached the arm (IKA-411).
-            # Games this side's search was read through another port, by that port's
-            # fingerprint as the game recorded it (IKA-413): the positive control that the
-            # executable reached the arm, and which one.
-            if record.rust_binary[side] is not None:
-                port_key = str(record.rust_binary[side].get("sha256"))
-                bucket["ports"][port_key] = bucket["ports"].get(port_key, 0) + 1
-            # The ally targets this side's menus listed, the move decisions its menu held
-            # one at and those it played one at, read off the game (IKA-181).
-            played_ally = record.ally_targets[side]
-            bucket["ally"][played_ally] = bucket["ally"].get(played_ally, 0) + 1
-            bucket["ally_menus"] += record.ally_menus[side]
-            bucket["ally_played"] += record.ally_played[side]
-            # Which point of the optimal set this side played, read off the game (IKA-196).
-            # The positive control and the assert that line 1 reached exactly the side it
-            # was meant for, read off the game (IKA-419f).
-            check_line1(
-                record, sides, side, arms[arm_index].line1, args.line_only_with,
-                [s.species for s in pool.teams[sides["teams"][side]].sets], bucket["line"],
-                arms[arm_index].line1_back,
-            )
-            # IKA-419g: the same for the Baton hold, re-read from the recorded menus.
-            check_hold_baton(
-                record, side, arms[arm_index].hold_baton,
-                [s.species for s in pool.teams[sides["teams"][side]].sets], bucket["hold"],
-            )
-            played_eq = record.eq_select[side]
-            bucket["eq"][played_eq] = bucket["eq"].get(played_eq, 0) + 1
-            played_deepen = record.deepen[side]
-            bucket["deepen"][played_deepen] = bucket["deepen"].get(played_deepen, 0) + 1
-            # Decisions this side actually deepened, read off the game (IKA-33).
-            bucket["deepened"] += sum(
-                1 for d in record.decisions
-                if d.deepened is not None and d.deepened[side] is not None
-            )
-            # And where the root's double oracle was asked, and what it added (IKA-293).
-            for d in record.decisions:
-                got = d.deepened[side] if d.deepened is not None else None
-                if got is not None and "widened" in got:
-                    bucket["oracle"] += 1
-                    bucket["widened"] += got["widened"]
-                    bucket["swapped"] += got.get("swapped", 0)
-                    # The Q that narrowed the probe (IKA-322): inferences, full probes.
-                    bucket["qprobe"][0] += got.get("q", 0)
-                    bucket["qprobe"][1] += got.get("qfull", 0)
-                if got is not None and "childQ" in got:
-                    # The Q that ranked the children's menus (IKA-307): passes, children.
-                    bucket["childq"][0] += got["childQ"]
-                    bucket["childq"][1] += got["childRanked"]
-                if got is not None and "lines" in got:
-                    # Why each deepened line stopped, under an explicit guard (IKA-307).
-                    for key, n in got["lines"].items():
-                        bucket["lines"][key] = bucket["lines"].get(key, 0) + n
-                    bucket["lines"]["guarded"] = bucket["lines"].get("guarded", 0) + got["guarded"]
-            played_depth = (
-                f"{record.depth[side]}"
-                + ("r" if record.depth[side] != 1 and record.solve_restricted[side] else "")
-            )
-            bucket["depth"][played_depth] = bucket["depth"].get(played_depth, 0) + 1
-            if arms[0].evaluate is not arms[1].evaluate:
-                bucket["calls"] += getattr(arms[arm_index].evaluate, "calls", 0) - calls_before[
-                    arm_index]
-            # Menus this arm built without the cover, counted by `_menus` under its label
-            # (IKA-323): the positive control that -nocover reached the menu. Two arms with
-            # the same label share one count.
-            arm_fill = arms[arm_index].rank_fill
-            if arms[arm_index].rank_by_leaf and not rank_fill_covers(arm_fill):
-                now = narrowing.COVERLESS.get(arm_fill, {})
-                was = coverless_before.get(arm_fill, {})
-                for key in bucket["coverless"]:
-                    bucket["coverless"][key] += now.get(key, 0) - was.get(key, 0)
-            # Rankings this arm asked of the Q (IKA-274), under its label: the positive
-            # control that a q fill reached the menu. Two arms with one label share it.
-            if arms[arm_index].rank_by_leaf and qrank.is_q(arm_fill):
-                got = _q_delta(q_before, arm_fill)
-                bucket["q"] = [bucket["q"][0] + got[0], bucket["q"][1] + got[1]]
-        if record.outcome is None:
-            tally[which][2] += 1
-            if client is not None:
-                client.finish(index)
-            continue
-        side_leaves = sides["leaves"]
-        write_game(
-            games_file,
-            record,
-            # Side 0's leaf: `searchValue` in the body is side 0's search.
-            objective=side_leaves[0] if side_leaves[0] == HP_SHARE.name
-            else f"value:{side_leaves[0]}",
-            search_limit=sides["limits"],
-            extra={
-                "gameIndex": game_index,
-                "seatIndex": which,
-                "pool": {
-                    "id": pool.id, "sha256": pool.sha256, "pair": sides["pair"],
-                    "teams": [pool.teams[t].id for t in sides["teams"]],
-                    "mirror": sides["mirror"],
-                    "picks": [[int(i) for i in p] for p in sides["picks"]],
-                    "epsilon": args.explore_epsilon,
-                    "temperature": args.explore_temperature,
-                },
-                # The Q behind a q rank fill (IKA-274), as its holder names it, and
-                # each file's sha256 (IKA-340).
-                **q_record,
-            },
-            source=provenance(
-                "pool-match",
-                seat=f"{arm_label} = side {which}",
-                leaves=side_leaves,
-                limits=sides["limits"],
-                rankings=sides["rankings"],
-                rank_fills=sides["rank_fills"],
-                bench_drops=sides["bench_drops"],
-                deepens=sides["deepens"],
-                depths=sides["depths"],
-                solvers=sides["solvers"],
-                books=sides["selections"],
-                information=("hidden-bench", "hidden-bench"),
-                beliefs=sides["beliefs"],
-            ),
-        )
-        tally[which][1] += 1
-        tested_won = record.outcome > 0.5 if which == 0 else record.outcome < 0.5
-        tally[which][0] += int(tested_won)
-        tally[which][3] += time.perf_counter() - started
-        if client is not None:
-            client.finish(index)
-    if client is not None:
-        client.close()
-    games_file.close()
-
-    names = (f"tested {tested.name}", f"other {other.name}")
-    for which in (0, 1):
-        for arm_index in (0, 1):
-            bucket = echo[which][arm_index]
-            if not bucket["leaf"]:
-                continue
-            print(
-                f"  echo, {arm_label} = side {which}: {names[arm_index]} sat at side "
-                f"{which if arm_index == 0 else 1 - which}, leaf {sorted(bucket['leaf'])}, "
-                f"selection {bucket['selection']}, belief {bucket['belief']}, "
-                f"rank fill {bucket['fill']}, bench drop {bucket['drop']}, "
-                + (f"knockout branch in {bucket['knockouts']:,} games, "
-                   if bucket["knockouts"] else "")
-                + (f"port executable (sha256 -> games) {bucket['ports']}, "
-                   if bucket["ports"] else "")
-                + (f"ally targets {bucket['ally']} (menus holding one {bucket['ally_menus']:,}, "
-                   f"played {bucket['ally_played']:,}), "
-                   if set(bucket["ally"]) != {"off"} else "")
-                + (f"equilibrium {bucket['eq']}, "
-                   if set(bucket["eq"]) - {DEFAULT_EQ_SELECT} else "")
-                + (f"line 1 in {bucket['line']['games']:,} games (selection "
-                   f"{bucket['line']['selection']}, Mega forced {bucket['line']['forced']}), "
-                   if bucket["line"]["games"] else "")
-                + (f"Baton hold in {bucket['hold']['games']:,} games (held nodes "
-                   f"{bucket['hold']['held']:,}, of them with a Baton Pass legal "
-                   f"{bucket['hold']['held_legal']:,}; open nodes {bucket['hold']['open']:,}, "
-                   f"menu had one at {bucket['hold']['open_menu']:,}, played at "
-                   f"{bucket['hold']['baton_open']:,}), "
-                   if bucket["hold"]["games"] else "")
-                + f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
-                + (
-                    f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "
-                    f"widened, {bucket['swapped']:,} swapped out"
-                    + (
-                        f", Q probes {bucket['qprobe'][0]:,} inferences "
-                        f"({bucket['qprobe'][1]:,} steps probed in full)"
-                        if bucket["qprobe"][0]
-                        else ""
-                    )
-                    if bucket["oracle"]
-                    else ""
-                )
-                + (
-                    f", children's Q {bucket['childq'][0]:,} passes "
-                    f"({bucket['childq'][1]:,} children)"
-                    if bucket["childq"][0]
-                    else ""
-                )
-                + (f", lines {bucket['lines']}" if bucket["lines"] else "")
-                + "), "
-                f"depth {bucket['depth']}"
-                + (
-                    f", coverless menus {bucket['coverless']['menus']:,} "
-                    f"({bucket['coverless']['dropping']:,} leaving options off, "
-                    f"{bucket['coverless']['dropped']:,} options)"
-                    if bucket["coverless"]["menus"]
-                    else ""
-                )
-                + (
-                    f", Q rankings {bucket['q'][0]:,} ({bucket['q'][1]:,} cells)"
-                    if bucket["q"][0]
-                    else ""
-                )
-                + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
-                file=sys.stderr,
-            )
-    # What each arm's leaf did with the finished battles it met, counted by the leaf itself
-    # (IKA-253): the echo that says the rule reached the arm, not the command line again.
-    for arm, label in zip(arms, names, strict=True):
-        if arm.evaluate is not None:
-            print(f"  ends of {label}: {getattr(arm.evaluate, 'ended', 0):,} ended leaves, "
-                  f"scored {_ends_rule(arm.evaluate)}", file=sys.stderr)
-            if arms[0].evaluate is arms[1].evaluate:
-                break
-    # Each label's solves in this worker, counted where the strategy is chosen (IKA-196):
-    # how many there were, how many moved off the LP's vertex, fell back to it, and the time.
-    for label, stats in sorted(eqselect.STATS.items()):
-        print(f"  equilibrium {label}: {int(stats['calls']):,} solves, {int(stats['moved']):,} "
-              f"moved off the LP's vertex, {int(stats['fallbacks']):,} fell back to it, "
-              f"{stats['seconds']:.2f} s", file=sys.stderr)
-    for arm, label in zip(arms, names, strict=True):
-        if arm.solver is not None:
-            s = arm.solver
-            print(f"  selection of {label}: {s.solves} solved here, {s.loaded} read from "
-                  f"{s.store}, {s.reused} reused", file=sys.stderr)
-    wins = played = 0
-    for which in (0, 1):
-        seat_wins, seat_played, unfinished, elapsed = tally[which]
-        rate = seat_wins / seat_played if seat_played else float("nan")
-        print(f"  {arm_label} = side {which}: {seat_played} games, won {rate * 100:.1f}% "
-              f"({elapsed / max(seat_played, 1):.2f} s/game, unfinished {unfinished})",
-              flush=True)
-        if args.out is not None:
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            with args.out.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps({
-                    "seat": f"{arm_label} = side {which}", "seed": args.seed,
-                    "model": tested.name, "baseline": other.name, "pool": pool.id,
-                    "limit": tested.limit, "baselineLimit": other.limit,
-                    "played": seat_played, "wins": seat_wins, "unfinished": unfinished,
-                    "seconds": elapsed,
-                }) + "\n")
-        wins += seat_wins
-        played += seat_played
-    if played:
-        print(f"\n  both seats, {played} games: {arm_label} won {wins / played * 100:.1f}%",
-              flush=True)
-    print(f"  {portlp.echo()}", file=sys.stderr, flush=True)
+    rustworker.write_config(
+        rustworker.board_config(args, pool, arms, arm_label, q_record, pairs), args.rust_config
+    )
+    print(f"  rust board worker config -> {args.rust_config}", file=sys.stderr)
 
 
 if __name__ == "__main__":

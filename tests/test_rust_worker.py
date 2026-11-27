@@ -1,21 +1,28 @@
 """IKA-458 stage 3.7: the generation worker is `pokeuraou-damage selfplay-worker`.
 
-What these tests hold, on the tests' own inference server (a leaf and a Q of stand-ins, no GPU):
+The Python loop that played generation's games (`poolplay.generate_pool`) was removed, so these
+tests hold the Rust worker's games by themselves, on the tests' own inference server (a leaf and
+a Q of stand-ins, no GPU):
 
-- **the Rust worker writes the games the Python worker wrote**: the same seed and indices played
-  by `generate_pool` (the Python loop over `prepGame` and `playGame`) and by the Rust worker give
-  the same records, key for key and in the same key order, apart from the clocks
-  (`searchSeconds`), with the selection of every pair solved in each (a fresh store each);
-- **the Rust worker's selection solves are the Python ones**: the same pairs, the same tag and
-  teams, the same strategies and values to the last few bits (the sums run in another order);
-- **the Python worker reads a store the Rust worker wrote** and the other way round
-  (`BookEntry.from_json`; `prep.rs` read Python's files since stage 3.5);
+- **a seed is a set of games**: the same seed and indices give the same records, whether one
+  worker plays them in a row or two workers split them; another seed gives other games (the
+  control that the comparison can fail);
+- **the store changes no game**: a run that reads every pair's solve from the store another run
+  wrote solves nothing, leaves the files untouched and writes the same records;
+- **the record says solved and carries the pair**: the selection's fields, the pool's teams
+  and pair, both seats' mixtures; a pairs subset draws only its pairs and records the index in
+  `pool.pairs`;
+- **a mirror draws both seats from one mixture** at value 0.5;
 - **a flag the Rust worker does not play stops the config** (`rustworker.unsupported`).
+
+Until stage 3.7 these were `test_poolplay.py`'s tests of `generate_pool`, and this file compared
+the Rust worker's records with it key for key (records/IKA-458.md sections 16.5 and 18).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from argparse import Namespace
 from pathlib import Path
@@ -23,16 +30,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pokeuraou import qrank, rustnode, rustworker
+from pokeuraou import qrank, rustworker
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.inference import RemoteValue
 from pokeuraou.pool import load_pool
-from pokeuraou.poolplay import SolvedSelections, generate_pool
-from pokeuraou.selection_book import BookEntry
 
 from ._served import encoded_of, hp_share_model, serve
-from .test_poolplay import _variants, _write_pool
+from .test_poolplay import _roster_team, _variants, _write_pool
 from .test_q_rank import _ServedStub
 
 LEAF = "value:stub"
@@ -40,12 +45,20 @@ GAMES = 3
 WIDTH = 4
 
 
-@pytest.fixture(scope="module")
-def pool(tmp_path_factory):  # noqa: ANN001, ANN201
-    path = _write_pool(tmp_path_factory.mktemp("pool") / "p.json", _variants())
+def _loaded(path: Path):  # noqa: ANN202
     loaded = load_pool(path)
     register_mega_stones(loaded.reg)
     return loaded
+
+
+@pytest.fixture(scope="module")
+def pool(tmp_path_factory):  # noqa: ANN001, ANN201
+    return _loaded(_write_pool(tmp_path_factory.mktemp("pool") / "p.json", _variants()))
+
+
+@pytest.fixture(scope="module")
+def mirror_pool(tmp_path_factory):  # noqa: ANN001, ANN201
+    return _loaded(_write_pool(tmp_path_factory.mktemp("mirror") / "p.json", [_roster_team()]))
 
 
 def _leaf_model(encoder: Encoder):  # noqa: ANN202
@@ -77,49 +90,23 @@ def served(pool):  # noqa: ANN001, ANN201
     server.server_close()
 
 
-def _args(address: str, **changed) -> Namespace:  # noqa: ANN003
+def _args(address: str | None, **changed) -> Namespace:  # noqa: ANN003
     base = dict(
-        inference=address, rank_leaf=True, rank_fill="q-nocover", bench_drop="none",
-        deepen="none", depth=1, solve_restricted=False, seed=4581, max_turns=40,
+        inference=address, rank_leaf=True, rank_fill="q-nocover", seed=4581, max_turns=40,
         explore_epsilon=0.25, explore_temperature=0.5, limit=WIDTH,
-        uniform_selection=False, no_selection_memo=False, record_rank_scores=False,
     )
     base.update(changed)
     return Namespace(**base)
 
 
-def _python_games(pool, address: str, out: Path, store: Path) -> list[dict]:  # noqa: ANN001
-    encoder = Encoder(pool.reg)
-    leaf = RemoteValue(address, "value", encoder)
-    q = qrank.RemoteQ(address, "q", encoder)
-    qrank.install(q)
-    rustnode.hold_positions()
-    try:
-        solver = SolvedSelections(
-            pool.reg, pool.teams, leaf, model=LEAF, store=store, tag=f"{pool.sha256}|{LEAF}",
-        )
-        generate_pool(
-            pool.reg, pool, games=0, seed=4581, out=out, solver=solver, evaluate=leaf,
-            search_limit=WIDTH, max_turns=40, leaf=LEAF, rank_by_leaf=True,
-            rank_fill="q-nocover", indices=list(range(GAMES)),
-            q_record=qrank.record_fields({"": q}),
-        )
-    finally:
-        rustnode.hold_positions(False)
-        qrank._INSTALLED.pop("", None)  # noqa: SLF001
-        leaf.close()
-        q.close()
-    return [json.loads(line) for line in out.read_bytes().decode("utf-8").splitlines() if line]
-
-
-def _rust_games(pool, address: str, tmp: Path, store: Path) -> list[dict]:  # noqa: ANN001
+def _config(pool, address: str, tmp: Path, store: Path, *, pairs=None, **changed) -> Path:  # noqa: ANN001, ANN003
     encoder = Encoder(pool.reg)
     leaf = RemoteValue(address, "value", encoder)
     q = qrank.RemoteQ(address, "q", encoder)
     qrank.install(q)
     try:
         config = rustworker.build_config(
-            _args(address), pool, leaf, LEAF, qrank.record_fields({"": q}), None, store,
+            _args(address, **changed), pool, leaf, LEAF, qrank.record_fields({"": q}), pairs, store,
         )
     finally:
         qrank._INSTALLED.pop("", None)  # noqa: SLF001
@@ -127,75 +114,113 @@ def _rust_games(pool, address: str, tmp: Path, store: Path) -> list[dict]:  # no
         q.close()
     path = tmp / "worker-config.json"
     rustworker.write_config(config, path)
-    out = tmp / "rust.jsonl"
+    return path
+
+
+def _play(config: Path, address: str, out: Path, first: int, games: int) -> str:
+    """Runs the worker over games ``first..first+games``; its stdout and stderr."""
     done = subprocess.run(  # noqa: S603
-        rustworker.command(path, address, out, first_game=0, games=GAMES),
+        rustworker.command(config, address, out, first_game=first, games=games),
         capture_output=True, text=True, timeout=600, check=False,
     )
     assert done.returncode == 0, done.stderr
     assert "handoffs 0" in done.stderr, done.stderr
-    return [json.loads(line) for line in out.read_bytes().decode("utf-8").splitlines() if line]
+    return done.stdout + done.stderr
 
 
-def _without_clock(record: dict) -> dict:
-    return {k: v for k, v in record.items() if k not in ("searchSeconds", "engine")}
+def _records(out: Path) -> dict[int, dict]:
+    rows = [json.loads(line) for line in out.read_bytes().decode("utf-8").splitlines() if line]
+    return {r["gameIndex"]: {k: v for k, v in r.items() if k != "searchSeconds"} for r in rows}
 
 
-def test_the_rust_worker_writes_the_python_worker_s_games(pool, served, tmp_path) -> None:  # noqa: ANN001
-    python = _python_games(pool, served, tmp_path / "python.jsonl", tmp_path / "store-p")
-    rust = _rust_games(pool, served, tmp_path, tmp_path / "store-r")
-    assert len(python) == GAMES, "no game finished; the comparison would be vacuous"
-    by_index = {r["gameIndex"]: r for r in rust}
-    assert sorted(by_index) == [r["gameIndex"] for r in python]
-    for want in python:
-        got = by_index[want["gameIndex"]]
-        assert list(got) == list(want)
-        # The decisions, picks and outcome; the selection's mixtures to the last bits (the
-        # Rust solve sums its expected losses in another order than numpy's BLAS).
-        for key in ("ownSelectionPolicy", "foeSelectionPolicy", "ownSelectionMixture",
-                    "foeSelectionMixture"):
-            assert np.allclose(got.pop(key), want.pop(key), rtol=0, atol=1e-12), key
-        assert abs(got.pop("selectionValue") - want.pop("selectionValue")) < 1e-12
-        got_d, want_d = got.pop("decisions"), want.pop("decisions")
-        assert [(d["kind"], d["ownChosen"], d["foeChosen"]) for d in got_d] == [
-            (d["kind"], d["ownChosen"], d["foeChosen"]) for d in want_d
-        ]
-        assert _without_clock(got) == _without_clock(want)
-    # The stores: the same pairs, the same answers.
-    files = sorted(p.name for p in (tmp_path / "store-p").glob("*.json"))
-    assert files and files == sorted(p.name for p in (tmp_path / "store-r").glob("*.json"))
-    for name in files:
-        a = json.loads((tmp_path / "store-p" / name).read_bytes())
-        b = json.loads((tmp_path / "store-r" / name).read_bytes())
-        assert (a["tag"], a["pair"], a["teams"]) == (b["tag"], b["pair"], b["teams"])
-        ea, eb = BookEntry.from_json(a["entry"]), BookEntry.from_json(b["entry"])
-        assert ea.selections == eb.selections and ea.key == eb.key and ea.player == eb.player
-        assert np.allclose(ea.our_strategy, eb.our_strategy, rtol=0, atol=1e-12)
-        assert np.allclose(ea.their_strategies[0], eb.their_strategies[0], rtol=0, atol=1e-12)
-        assert np.allclose(ea.our_ev_loss, eb.our_ev_loss, rtol=0, atol=1e-12)
-        assert abs(ea.value - eb.value) < 1e-12
-        assert a["entry"]["classSets"] == b["entry"]["classSets"]
-        assert a["entry"]["notes"] == b["entry"]["notes"]
+def _solves(log: str) -> tuple[int, int]:
+    """(solved here, read from the store) off the worker's selection line."""
+    found = re.search(r"selection: (\d+) solves \((\d+) reused, (\d+) read from", log)
+    assert found, log
+    return int(found.group(1)), int(found.group(3))
 
 
-def test_each_worker_reads_the_other_s_store(pool, served, tmp_path) -> None:  # noqa: ANN001
-    """A store the Rust worker solved is read by the Python worker and the other way round: the
-    second run of each solves nothing."""
-    _rust_games(pool, served, tmp_path, tmp_path / "store")
-    solved = sorted(p.name for p in (tmp_path / "store").glob("*.json"))
-    python = _python_games(pool, served, tmp_path / "python.jsonl", tmp_path / "store")
-    assert len(python) == GAMES
-    assert sorted(p.name for p in (tmp_path / "store").glob("*.json")) == solved
-    stamps = {p.name: p.stat().st_mtime_ns for p in (tmp_path / "store").glob("*.json")}
-    _rust_games(pool, served, tmp_path, tmp_path / "store")
-    assert {p.name: p.stat().st_mtime_ns for p in (tmp_path / "store").glob("*.json")} == stamps
+def test_a_seed_and_its_indices_are_the_same_games(pool, served, tmp_path) -> None:  # noqa: ANN001
+    whole = tmp_path / "whole"
+    config = _config(pool, served, whole, whole / "store")
+    _play(config, served, whole / "g.jsonl", 0, GAMES)
+    split = tmp_path / "split"
+    config = _config(pool, served, split, split / "store")
+    _play(config, served, split / "w1.jsonl", 1, GAMES - 1)
+    _play(config, served, split / "w0.jsonl", 0, 1)
+    a = _records(whole / "g.jsonl")
+    b = {**_records(split / "w0.jsonl"), **_records(split / "w1.jsonl")}
+    assert len(a) == GAMES, "no game finished; the comparison would be vacuous"
+    assert a == b
+    # The control: another seed is other games.
+    other = tmp_path / "other"
+    config = _config(pool, served, other, other / "store", seed=4582)
+    _play(config, served, other / "g.jsonl", 0, GAMES)
+    c = _records(other / "g.jsonl")
+    assert all(c[i]["decisions"] != a[i]["decisions"] for i in a if i in c)
+
+
+def test_the_store_changes_no_game_and_is_read(pool, served, tmp_path) -> None:  # noqa: ANN001
+    store = tmp_path / "store"
+    config = _config(pool, served, tmp_path / "a", store)
+    solved, read = _solves(_play(config, served, tmp_path / "a" / "g.jsonl", 0, GAMES))
+    assert solved > 0 and read == 0
+    stamps = {p.name: p.stat().st_mtime_ns for p in store.glob("*.json")}
+    assert len(stamps) == solved
+    config = _config(pool, served, tmp_path / "b", store)
+    solved_again, read_again = _solves(_play(config, served, tmp_path / "b" / "g.jsonl", 0, GAMES))
+    assert solved_again == 0 and read_again == solved
+    assert {p.name: p.stat().st_mtime_ns for p in store.glob("*.json")} == stamps
+    assert _records(tmp_path / "a" / "g.jsonl") == _records(tmp_path / "b" / "g.jsonl")
+
+
+def test_the_record_says_solved_and_carries_the_pair(pool, served, tmp_path) -> None:  # noqa: ANN001
+    wanted = [(0, 1), (1, 2)]
+    config = _config(pool, served, tmp_path, tmp_path / "store", pairs=wanted)
+    _play(config, served, tmp_path / "g.jsonl", 0, 6)
+    records = _records(tmp_path / "g.jsonl")
+    assert len(records) == 6
+    ids = [t.id for t in pool.teams]
+    for record in records.values():
+        assert record["selectionSource"] == "solved"
+        assert record["pool"]["id"] == "test-pool"
+        a, b = (ids.index(t) for t in record["pool"]["teams"])
+        assert (min(a, b), max(a, b)) in wanted
+        assert pool.pairs[record["pool"]["pair"]] == (min(a, b), max(a, b))
+        assert record["pool"]["mirror"] == (a == b)
+        assert len(record["ownSelectionPolicy"]) == 90
+        assert sum(record["foeSelectionMixture"]) == pytest.approx(1.0)
+        assert record["qModel"] == ["stub-q.pt"]
+
+
+def test_mirror_games_draw_both_seats_from_one_mixture(mirror_pool, tmp_path) -> None:  # noqa: ANN001
+    encoder = Encoder(mirror_pool.reg)
+    server, address = serve(
+        {"value": _leaf_model(encoder)}, arms={"value": ["stub.pt"]},
+        q_models={"q": _ServedStub(encoder.vocab.fingerprint())},
+    )
+    try:
+        config = _config(mirror_pool, address, tmp_path, tmp_path / "store")
+        _play(config, address, tmp_path / "g.jsonl", 0, 2)
+    finally:
+        server.shutdown()
+        server.server_close()
+    records = _records(tmp_path / "g.jsonl")
+    assert len(records) == 2
+    for record in records.values():
+        assert record["pool"]["mirror"]
+        assert record["selectionValue"] == pytest.approx(0.5, abs=1e-9)
+        assert record["ownSelectionMixture"] == record["foeSelectionMixture"]
+        assert record["ownSelectionPolicy"] == record["foeSelectionPolicy"]
 
 
 def test_a_flag_the_rust_worker_does_not_play_is_named() -> None:
     assert rustworker.unsupported(_args("h:1")) == []
-    assert rustworker.unsupported(_args("h:1", deepen="m8")) == ["--deepen m8"]
     assert rustworker.unsupported(_args("h:1", rank_fill="refs2")) == [
         "--rank-fill refs2 (only a q-nocover fill)"
+    ]
+    assert rustworker.unsupported(_args("h:1", rank_leaf=False)) == [
+        "the damage ranking (no --rank-leaf)"
     ]
     assert rustworker.unsupported(_args(None)) == [
         "a leaf not on an inference server (--inference)"

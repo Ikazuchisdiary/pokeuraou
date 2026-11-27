@@ -110,7 +110,7 @@
 | `tools/oneshot/depth_effect.py` | 2手目の読みは答えを実際に変えるか、どのくらいの頻度で | 9/12 | — | — | **退避** |
 | `diff_damage.py` | ダメージ計算は Showdown と一致するか | 9/11 | R | `dump_damage_cases`、`dump_damage_cases_synthetic` | 現役 |
 | `diff_encode.py` | Rust のエンコーダは Python と同じ配列を出すか | 9/12 | — | — | 判断保留 |
-| `diff_generation.py` | Rust ノードの有無で、生成した対局は同一になるか | 9/13 | — | `agent_drift` | 据え置き（他ツール依存） |
+| `diff_generation.py` | Rust ノードの有無で、生成した対局は同一になるか | 9/13 | — | — | **削除**（IKA-458 段 3.7、Python のワーカーと一緒に） |
 | `diff_narrow.py` | 移植側が採点しても、候補手は同一に出るか | 9/12 | — | `agent_drift` | 据え置き（他ツール依存） |
 | `diff_node.py` | ノード全体が Rust 移植経由でも同一に出るか | 9/12 | S | `agent_drift` | 現役 |
 | `diff_order.py` | 行動順は Showdown と一致するか | 9/10 | RX | — | 現役 |
@@ -169,7 +169,7 @@
 | `seat_bias.py` | どちらかの席が構造的に有利か（対局を打たずに厳密に） | 9/11 | — | — | 判断保留 |
 | `selection.py` | 相手1チーム分の 6→4 選出を解く | 9/10 | R | — | 現役 |
 | `selection_check.py` | 選出ソルバの助言は、本当に勝率を上げるか（1チーム分で） | 9/19 | TGsRC | `book_check`、`ordering_check` | 現役 |
-| `selfplay.py` | 自己対戦を生成して JSONL で書く | 9/17 | TshRW | `agent_drift`、`generate_queue`、`profile_generation` | 現役 |
+| `selfplay.py` | 生成の Rust のワーカーの設定を書く（局は打たない。IKA-458 段 3.7）| 9/17 | TshRW | `agent_drift`、`generate_queue` | 現役 |
 | `selfplay_analyse.py` | 自己対戦データに何が入っていて、学習した価値関数にどれだけ余地があるか | 9/10 | R | — | 現役 |
 | `selfplay_budget.py` | 今の解決器で自己対戦をどれだけ賄えるか | 9/10 | RS | — | 現役 |
 | `tools/oneshot/served_matches_direct.py` | 推論サーバ経由の対戦は、経由しない対戦と同一の対局を打つか | 9/16 | — | — | **退避** |

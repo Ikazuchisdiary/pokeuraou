@@ -34,7 +34,6 @@ def namespace(**given: Any) -> argparse.Namespace:
     base = {
         "workload": "generation", "out": Path("out"), "games": 24, "first_game": None,
         "workers": None, "seed": None, "value": "v.pt", "limit": None,
-        "uniform_selection": False,
         "device": "cuda", "no_bridge": False, "served": False, "servers": 2,
         "hide_bench": False, "rest": [],
     }

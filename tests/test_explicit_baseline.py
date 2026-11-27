@@ -5,80 +5,60 @@ because its driver left `--baseline` out and `tools/pool_match.py` took that to 
 M-C origin. Both board entry points now stop instead, and hp-share is a flag that says so
 (`--baseline-hp-share`). An explicit call is unchanged.
 
-The refusals are tested where the old tools would have gone on: the worker plays its
-games with a stub leaf and a recorder, and the queue driver reaches a fake `run_workers`.
-Under the old code both calls complete, so these tests fail on them.
+The refusals are tested where the tools would otherwise go on: `tools/pool_match.py` writes
+the Rust board worker's config (IKA-458 stage 3.7) and the queue driver reaches the command
+that writes it, with stand-in servers and a fake `run_workers`.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
 
 import pytest
 
-from pokeuraou import poolplay
-
 from ._harness import load_tool
-from .test_pool_match import Counted, _recorder
-from .test_poolplay import _stub, _variants, _write_pool
+from .test_poolplay import _variants, _write_pool
 
-# ------------------------------------------------------------------ the worker
+# ------------------------------------------------------------------ the worker's config
 
 
-def _worker(tmp_path, monkeypatch):  # noqa: ANN001, ANN202
+def _worker(tmp_path):  # noqa: ANN001, ANN202
     tool = load_tool("pool_match")
-    leaf = Counted(_stub)
-    monkeypatch.setattr(tool, "build_leaves", lambda args, encoder: (leaf, None, "stub", None))
-    monkeypatch.setattr(poolplay, "play_game", _recorder([]))
-    out = tmp_path / "m" / "games-worker0.jsonl"
+    config = tmp_path / "m" / "worker-config.json"
     argv = [
         "--pool", str(_write_pool(tmp_path / "pool.json", _variants())),
-        "--value", "unused.pt", "--hide-bench", "--games", "1", "--seed", "9",
-        "--games-out", str(out), "--limit", "2",
+        "--inference", "127.0.0.1:1", "--hide-bench", "--seed", "9", "--limit", "2",
+        "--rust-config", str(config),
     ]
-    return tool, argv, out
+    return tool, argv, config
 
 
-def test_the_worker_refuses_an_unnamed_other_arm(tmp_path, monkeypatch, capsys) -> None:  # noqa: ANN001
-    tool, argv, out = _worker(tmp_path, monkeypatch)
+def test_the_worker_refuses_an_unnamed_other_arm(tmp_path, capsys) -> None:  # noqa: ANN001
+    tool, argv, config = _worker(tmp_path)
     with pytest.raises(SystemExit) as stopped:
         tool.main(argv)
     assert stopped.value.code == 2
     err = capsys.readouterr().err
-    for flag in ("--baseline", "--baseline-inference-arm", "--baseline-hp-share"):
+    for flag in ("--baseline-inference-arm", "--baseline-hp-share"):
         assert flag in err
-    # Nothing was played: the refusal comes before the first game.
-    assert not out.exists()
+    # Nothing was written: the refusal comes before any server is asked.
+    assert not config.exists()
 
 
-@pytest.mark.parametrize(
-    "named", [["--baseline", "b.pt"], ["--baseline-inference-arm", "baseline"]]
-)
-def test_the_worker_refuses_hp_share_beside_a_leaf(tmp_path, monkeypatch, capsys, named) -> None:  # noqa: ANN001
-    tool, argv, _ = _worker(tmp_path, monkeypatch)
-    if named[0] == "--baseline-inference-arm":
-        # `--baseline-inference-arm` belongs to a served worker.
-        argv = [a for a in argv if a not in ("--value", "unused.pt")] + [
-            "--inference", "127.0.0.1:1"]
+def test_the_worker_refuses_hp_share_beside_a_leaf(tmp_path, capsys) -> None:  # noqa: ANN001
+    tool, argv, _ = _worker(tmp_path)
     with pytest.raises(SystemExit) as stopped:
-        tool.main([*argv, *named, "--baseline-hp-share"])
+        tool.main([*argv, "--baseline-inference-arm", "baseline", "--baseline-hp-share"])
     assert stopped.value.code == 2
     assert "contradicts" in capsys.readouterr().err
 
 
-def test_the_worker_takes_hp_share_from_the_servers_arm(tmp_path, monkeypatch, capsys) -> None:  # noqa: ANN001
-    """IKA-460 step 4: `--baseline-hp-share` is the inference server's hp-share arm, so a worker
-    without `--inference` stops and says so; with one, the other arm is that server arm."""
-    tool, argv, out = _worker(tmp_path, monkeypatch)
-    with pytest.raises(SystemExit) as stopped:
-        tool.main([*argv, "--baseline-hp-share"])
-    assert stopped.value.code == 2
-    assert "--inference" in capsys.readouterr().err
-    assert not out.exists()
-    # With a server named, the check names the arm the baseline is read from.
+def test_the_worker_takes_hp_share_from_the_servers_arm() -> None:
+    """IKA-460 step 4: `--baseline-hp-share` is the inference server's hp-share arm."""
+    tool = load_tool("pool_match")
     args = tool.argparse.Namespace(
-        baseline=None, baseline_inference_arm=None, baseline_hp_share=True,
-        inference="127.0.0.1:1",
+        baseline_inference_arm=None, baseline_hp_share=True, inference="127.0.0.1:1",
     )
     tool.check_other_arm(args, lambda text: pytest.fail(text))
     assert args.baseline_inference_arm == tool.HP_SHARE_ARM == "hp-share"
@@ -88,22 +68,30 @@ def test_the_worker_takes_hp_share_from_the_servers_arm(tmp_path, monkeypatch, c
 
 
 def _driver(tmp_path, monkeypatch, argv):  # noqa: ANN001, ANN202
-    """Runs `match_queue.main` to its `run_workers`, and returns worker 0's command."""
+    """Runs `match_queue.main` with stand-in servers to its `run_workers`; (exit code, the
+    `tools/pool_match.py --rust-config` command it ran, the servers' hp-share arms)."""
+    from pokeuraou import rustnet
+
     match_queue = load_tool("match_queue")
-    seen: dict[str, list[str]] = {}
+    seen: dict = {"hp": []}
 
-    def fake_run_workers(indices, build, **_kwargs) -> int:  # noqa: ANN001
-        seen["command"] = build(0, "127.0.0.1:1")
-        return 0
+    def fake_server_command(regulation, arms, qs, out_dir, hp_arms=()):  # noqa: ANN001, ANN202
+        seen["hp"].append(tuple(hp_arms))
+        return [sys.executable, "-c", "print('127.0.0.1:1', flush=True)"]
 
-    monkeypatch.setattr(match_queue, "run_workers", fake_run_workers)
-    # The Python worker's command line: the Rust worker's config is written by the same flags
-    # (`tools/pool_match.py --rust-config`), which this reads without starting a server.
+    def fake_run(command, **_kwargs):  # noqa: ANN001, ANN202
+        seen["config"] = list(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(rustnet, "server_command", fake_server_command)
+    monkeypatch.setattr(match_queue.subprocess, "run", fake_run)
+    monkeypatch.setattr(match_queue, "run_workers", lambda indices, build, **_kwargs: 0)
     monkeypatch.setattr(sys, "argv", ["match_queue.py", "--out", str(tmp_path / "out"),
-                                      "--games", "1", "--value", "a.pt", "--python-worker", *argv])
+                                      "--games", "1", "--value", "a.pt", "--served",
+                                      "--servers", "1", *argv])
     with pytest.raises(SystemExit) as ended:
         match_queue.main()
-    return ended.value.code, seen.get("command")
+    return ended.value.code, seen.get("config"), seen["hp"]
 
 
 @pytest.fixture
@@ -112,60 +100,43 @@ def pool_file(tmp_path):  # noqa: ANN001, ANN201
 
 
 def test_the_driver_refuses_an_unnamed_other_arm(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
-    code, command = _driver(tmp_path, monkeypatch, ["--pool", pool_file, "--hide-bench"])
-    assert command is None, "a worker was built for a match with no named other arm"
+    code, command, servers = _driver(tmp_path, monkeypatch, ["--pool", pool_file, "--hide-bench"])
+    assert command is None and servers == [], "a board with no named other arm was started"
     assert isinstance(code, str) and "--baseline-hp-share" in code
     assert "--baseline" in code
 
 
 def test_the_driver_gives_the_servers_an_hp_share_arm(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
-    """`--baseline-hp-share` needs `--served`; with it every server is started with an hp-share
-    arm and the worker is told `--baseline-hp-share` (the control: no flag, no arm)."""
-    from pokeuraou import rustnet
-
-    code, command = _driver(tmp_path, monkeypatch,
-                            ["--pool", pool_file, "--hide-bench", "--baseline-hp-share"])
-    assert command is None
-    assert isinstance(code, str) and "--served" in code
-    seen: list[tuple[str, ...]] = []
-
-    def fake_server_command(regulation, arms, qs, out_dir, hp_arms=()):  # noqa: ANN001, ANN202
-        seen.append(tuple(hp_arms))
-        return [sys.executable, "-c", "print('127.0.0.1:1', flush=True)"]
-
-    monkeypatch.setattr(rustnet, "server_command", fake_server_command)
-    code, command = _driver(
-        tmp_path, monkeypatch, ["--pool", pool_file, "--hide-bench", "--served", "--servers", "1",
-                                "--baseline-hp-share"])
-    assert code == 0 and seen == [("hp-share",)]
+    """With `--baseline-hp-share` every server is started with an hp-share arm and the config is
+    written with `--baseline-hp-share` (the control: no flag, no arm)."""
+    code, command, servers = _driver(tmp_path, monkeypatch,
+                                     ["--pool", pool_file, "--hide-bench", "--baseline-hp-share"])
+    assert code == 0 and servers == [("hp-share",)]
     assert "--baseline-hp-share" in command and "--inference" in command
-    seen.clear()
-    code, command = _driver(
-        tmp_path, monkeypatch, ["--pool", pool_file, "--hide-bench", "--served", "--servers", "1",
-                                "--baseline", "b.pt"])
-    assert code == 0 and seen == [()] and "--baseline-hp-share" not in command
+    code, command, servers = _driver(tmp_path, monkeypatch,
+                                     ["--pool", pool_file, "--hide-bench", "--baseline", "b.pt"])
+    assert code == 0 and servers == [()] and "--baseline-hp-share" not in command
 
 
 def test_an_explicit_baseline_is_passed_as_before(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
-    code, command = _driver(tmp_path, monkeypatch,
-                            ["--pool", pool_file, "--hide-bench", "--baseline", "b.pt"])
+    code, command, _ = _driver(tmp_path, monkeypatch,
+                               ["--pool", pool_file, "--hide-bench", "--baseline", "b.pt"])
     assert code == 0
-    at = command.index("--baseline")
-    assert command[at + 1] == "b.pt" and "--baseline-hp-share" not in command
+    at = command.index("--baseline-inference-arm")
+    assert command[at + 1] == "baseline" and "--baseline-hp-share" not in command
     # A leaf named in the tail counts: a served null control names the tested arm's own
     # server arm there (`-- --baseline-inference-arm value`, as IKA-307's boards do).
-    # refs2 named: the shipped fill would want the default Q (IKA-338), not this test's point.
     tail = ["--baseline-inference-arm", "value", "--rank-leaf", "--rank-fill", "refs2"]
-    code, command = _driver(tmp_path, monkeypatch,
-                            ["--pool", pool_file, "--hide-bench", "--", *tail])
+    code, command, _ = _driver(tmp_path, monkeypatch,
+                               ["--pool", pool_file, "--hide-bench", "--", *tail])
     assert code == 0
-    assert command[-len(tail):] == tail and "--baseline-hp-share" not in command
+    assert command[-len(tail) - 2:-2] == tail and "--baseline-hp-share" not in command
 
 
 @pytest.mark.parametrize("argv", [["--baseline", "b.pt", "--baseline-hp-share"]])
 def test_the_driver_refuses_a_contradiction(tmp_path, monkeypatch, pool_file, argv) -> None:  # noqa: ANN001
-    code, command = _driver(tmp_path, monkeypatch,
-                            ["--pool", pool_file, "--hide-bench", *argv])
+    code, command, _ = _driver(tmp_path, monkeypatch,
+                               ["--pool", pool_file, "--hide-bench", *argv])
     assert command is None
     assert isinstance(code, str) and "contradicts" in code
 
@@ -205,6 +176,75 @@ def test_a_failed_worker_config_ends_the_servers(tmp_path, monkeypatch, pool_fil
             match_queue.main()
         assert isinstance(ended.value.code, str) and "config was not written" in ended.value.code
         assert len(started) == 1, "the fake server was not the one started"
+        assert started[0].poll() is not None, "the server was left running"
+    finally:
+        for process in started:
+            if process.poll() is None:
+                process.kill()
+
+
+def _recorded_servers(monkeypatch, match_queue, commands):  # noqa: ANN001, ANN202
+    """Stand-in servers, one command per server in turn; the processes started."""
+    import subprocess
+
+    from pokeuraou import rustnet
+
+    started: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+    turn = iter(commands)
+
+    def recording_popen(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        process = real_popen(*args, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(rustnet, "server_command", lambda *args, **kwargs: next(turn))
+    monkeypatch.setattr(match_queue.subprocess, "Popen", recording_popen)
+    return started
+
+
+ALIVE = [sys.executable, "-c", "import time; print('127.0.0.1:1', flush=True); time.sleep(120)"]
+SILENT = [sys.executable, "-c", "pass"]
+
+
+def test_a_server_that_names_no_address_ends_the_ones_before_it(
+    tmp_path, monkeypatch, pool_file  # noqa: ANN001
+) -> None:
+    """The second server exits without an address: the first is ended and waited for."""
+    match_queue = load_tool("match_queue")
+    started = _recorded_servers(monkeypatch, match_queue, [ALIVE, SILENT])
+    monkeypatch.setattr(sys, "argv", [
+        "match_queue.py", "--out", str(tmp_path / "out"), "--games", "1", "--value", "a.pt",
+        "--pool", pool_file, "--hide-bench", "--baseline", "b.pt", "--served", "--servers", "2"])
+    try:
+        with pytest.raises(SystemExit) as ended:
+            match_queue.main()
+        assert isinstance(ended.value.code, str) and "before naming an address" in ended.value.code
+        assert len(started) == 2
+        assert all(p.poll() is not None for p in started), "a server was left running"
+    finally:
+        for process in started:
+            if process.poll() is None:
+                process.kill()
+
+
+def test_an_error_after_the_servers_ends_them(tmp_path, monkeypatch, pool_file) -> None:  # noqa: ANN001
+    """An exception that is not SystemExit between the servers and the board (here an OSError
+    from the config's child) still ends the servers."""
+    match_queue = load_tool("match_queue")
+    started = _recorded_servers(monkeypatch, match_queue, [ALIVE])
+
+    def broken(command, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        raise OSError("no such interpreter")
+
+    monkeypatch.setattr(match_queue.subprocess, "run", broken)
+    monkeypatch.setattr(sys, "argv", [
+        "match_queue.py", "--out", str(tmp_path / "out"), "--games", "1", "--value", "a.pt",
+        "--pool", pool_file, "--hide-bench", "--baseline", "b.pt", "--served", "--servers", "1"])
+    try:
+        with pytest.raises(OSError, match="no such interpreter"):
+            match_queue.main()
+        assert len(started) == 1
         assert started[0].poll() is not None, "the server was left running"
     finally:
         for process in started:

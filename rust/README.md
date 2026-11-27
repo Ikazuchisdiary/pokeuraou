@@ -19,8 +19,7 @@ GPU で **15〜18 倍**、CPU で順伝播しても **8〜10 倍**速くなり�
  2 ゲーム / 種 11  (cpu)   python  19.6 s -> rust 2.6 s    7.6x   試合一致 2/2
 ```
 
-再現は `uv run python tools/diff_generation.py --games 3 --seed 5`、
-価値関数なら `--value data/models/value-gen234.pt` を足します。
+再現に使った `tools/diff_generation.py` は、IKA-458 段 3.7 で Python のワーカーと一緒に消しました。
 
 ## なぜ解決器だったのか
 
@@ -79,7 +78,8 @@ Showdown と直接比べます。
 - `tools/diverge_report.py`（乖離の原因を lift で並べる）・`tools/diff_replacement.py`（交代の段）
 - `tools/diff_damage.py`・`diff_speed.py`・`diff_order.py`: 残った Python のダメージ計算・素早さ
   （推論と `narrow` が使う）を Showdown と比べる
-- 同じ種の生成が変更の前後で同じか: `tools/diff_generation.py --before <別の checkout>`
+- 同じ種の生成が変更の前後で同じか: 2 つの exe で `tools/generate_queue.py` を同じ種で回し、記録を
+  `gameIndex` ごとに比べる（`searchSeconds`・`engine` を除く。IKA-458 §18）
 
 `rust/src/main.rs` の自己試験（`damage`・`turns`・`roundtrip`・`encode`）は、Python が書き出した
 既存の fixture（`cases*.json`・`turns*.json`、git 管理外）を読むだけの回帰試験として残ります。
@@ -425,9 +425,8 @@ uv run python tools/diff_turn.py --battles 400 --exes old=C:/tmp/old.exe,new   #
 uv run python tools/diverge_report.py --seeds 12 --battles 10
 uv run python tools/diff_replacement.py --battles 25
 
-# 同じ種の生成が変更の前後で同じか（2 つの checkout、同じ exe）
-uv run python tools/diff_generation.py --before C:/tmp/ikaNNN/before --work C:/tmp/ikaNNN/dg \
-    --games 20 --seed 11 -- --pool regmc-matchupweb --uniform-selection
+# 同じ種の生成が変更の前後で同じか: 2 つの checkout の exe で generate_queue.py を同じ種で回し、
+# 記録を gameIndex ごとに比べる（IKA-458 §18。diff_generation.py は段 3.7 で消した）
 
 # 手元に fixture があるなら、exe の自己試験（書き出した時点の Python の答えとの回帰試験）
 ./target/release/pokeuraou-damage damage    ../configs/regulations/gen9championsvgc2026regmc.json cases-synthetic.json

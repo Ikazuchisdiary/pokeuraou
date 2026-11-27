@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -402,13 +403,20 @@ def test_match_queue_registers_its_test_before_the_first_game(tmp_path, monkeypa
         return 0
 
     monkeypatch.setattr(match_queue, "run_workers", fake_run_workers)
+    # Stand-in servers, and the Rust workers' config command answered without running it.
+    from pokeuraou import rustnet
+
+    monkeypatch.setattr(rustnet, "server_command", lambda *args, **kwargs: [
+        sys.executable, "-c", "print('127.0.0.1:1', flush=True)"])
+    monkeypatch.setattr(match_queue.subprocess, "run", lambda command, **kwargs: (
+        subprocess.CompletedProcess(command, 0, "", "")))
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "match_queue.py", "--out", str(tmp_path), "--games", "5", "--value", "a.pt",
             "--baseline", "b.pt", "--sprt", "-5", "15", "--sprt-beta", "0.1",
-            "--pool", str(pool_file), "--hide-bench", "--python-worker", "--",
+            "--pool", str(pool_file), "--hide-bench", "--served", "--servers", "1", "--",
         ],
     )
     with pytest.raises(SystemExit) as ended:

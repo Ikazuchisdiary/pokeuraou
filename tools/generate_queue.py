@@ -51,6 +51,24 @@ from pokeuraou.benchflags import add_bench_flags, bench_argv, require_bench  # n
 from pokeuraou.workqueue import run_workers  # noqa: E402
 
 
+def config_command(
+    args: argparse.Namespace, inference: str, out_dir: Path, extra: list[str]
+) -> list[str]:
+    """`tools/selfplay.py`'s command line for this run's flags (it writes the workers' config).
+    `--out` places the default selection store, `selection-solved/` beside the games."""
+    return [
+        sys.executable, str(ROOT / "tools" / "selfplay.py"),
+        "--seed", str(args.seed),
+        "--limit", str(args.limit),
+        "--pool", args.pool,
+        *bench_argv(args.hide_bench),
+        "--out", str(out_dir / "games-worker0.jsonl"),
+        "--inference", inference, "--inference-arm", "value",
+        *(["--q-arm", "q"] if args.q_model else []),
+        *extra,
+    ]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, required=True, help="directory for the games")
@@ -159,27 +177,13 @@ def main() -> None:
         "result even though the arithmetic releases the GIL. One server is the only "
         "configuration that loses to not serving at all.",
     )
-    ap.add_argument(
-        "--uniform-selection",
-        action="store_true",
-        help="draw the four of six uniformly (a reference) instead of solving each pair's "
-        "selection with the leaf, which is what ships.",
-    )
     add_bench_flags(ap)
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
         "--pool",
         required=True,
         help="M-C generation (IKA-81): both seats from this pool (data/pool/<id>.json), "
-        "each worker solves a pair's selection with the leaf the first time it meets it. "
-        "--uniform-selection draws the fours uniformly instead.",
-    )
-    ap.add_argument(
-        "--record-rank-scores",
-        action="store_true",
-        help="with --pool and --rank-leaf after --: every worker also writes its games' leaf "
-        "rankings to rank-workerN.jsonl.gz beside its games (IKA-278, teacher data for "
-        "IKA-274). Plays the same games; the games files are byte for byte the same.",
+        "a pair's selection solved with the leaf the first time a worker meets it.",
     )
     ap.add_argument(
         "--max-worker-failures",
@@ -193,18 +197,15 @@ def main() -> None:
         "passes 0: a timing run stops at the first.",
     )
     ap.add_argument(
-        "--python-worker",
-        action="store_true",
-        help="play the games in tools/selfplay.py's Python loop instead of the Rust worker "
-        "(IKA-458 stage 3.7; kept for the comparison until it is retired)",
-    )
-    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
     )
     args = ap.parse_args()
     require_bench(args)
+    if not args.served or not args.value:
+        # IKA-458 stage 3.7: the Rust worker scores its leaves on the inference servers only.
+        ap.error("the workers play the leaf of the inference servers: pass --served and --value")
     if args.workers is None:
         # Swept on the board, width 16 against 48, startup discarded, one machine, back to
         # back:
@@ -247,10 +248,7 @@ def main() -> None:
     from pokeuraou.pool import find_pool
 
     pool_regulation = json.loads(find_pool(args.pool).read_bytes().decode("utf-8"))["regulation"]
-    if args.uniform_selection:
-        print("  selection: uniform 4-of-6, as asked", file=sys.stderr)
-    else:
-        print("  selection: solved per pair with the leaf, in each worker", file=sys.stderr)
+    print("  selection: solved per pair with the leaf, in each worker", file=sys.stderr)
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -262,8 +260,6 @@ def main() -> None:
     servers: list[subprocess.Popen] = []
     served_at: list[str] = []
     if args.served:
-        if not args.value:
-            raise SystemExit("--served needs --value: the servers hold the leaf")
         server_log = out_dir / "logs"
         server_log.mkdir(parents=True, exist_ok=True)
         for index in range(args.servers):
@@ -302,57 +298,27 @@ def main() -> None:
     # case of what `match_queue.py` does.
     numbers = range(args.first_game, args.first_game + args.games)
 
+    # IKA-458 stage 3.7: the workers are `pokeuraou-damage selfplay-worker`. The flags are read
+    # once, by tools/selfplay.py, into the config every worker reads. Which worker lands on which
+    # server changes no answer: requests are never merged.
+    from pokeuraou import rustworker
+
+    config = out_dir / "worker-config.json"
+    flags = config_command(args, served_at[0], out_dir, extra)
+    made = subprocess.run(  # noqa: S603
+        [*flags, "--rust-config", str(config)], env=env, cwd=str(ROOT),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+    )
+    if made.returncode != 0:
+        raise SystemExit(f"the Rust worker's config was not written:\n{made.stdout}")
+    print(f"  workers: pokeuraou-damage {rustworker.SUBCOMMAND} (config {config})",
+          file=sys.stderr, flush=True)
+
     def build(worker: int, address: str) -> list[str]:
-        command = [
-            sys.executable, str(ROOT / "tools" / "selfplay.py"),
-            "--queue", address,
-            "--seed", str(args.seed),
-            "--limit", str(args.limit),
-            "--device", args.device,
-            "--torch-threads", "1",
-            "--pool", args.pool,
-            *(["--uniform-selection"] if args.uniform_selection else []),
-            *bench_argv(args.hide_bench),
-            "--out", str(out_dir / f"games-worker{worker}.jsonl"),
-            *(["--record-rank-scores"] if args.record_rank_scores else []),
-        ]
-        if served_at:
-            # Which worker lands on which server changes no answer: requests are never
-            # merged, so a batch gets the same numbers wherever it is served.
-            command += ["--inference", served_at[worker % len(served_at)],
-                        "--inference-arm", "value"]
-        elif args.value:
-            command += ["--value", args.value]
-        if args.q_model:
-            command += ["--q-arm", "q"] if served_at else ["--q-model", args.q_model]
-        return command + extra
-
-    python_build = build
-    if not args.python_worker:
-        # IKA-458 stage 3.7: the workers are `pokeuraou-damage selfplay-worker`. The flags are read
-        # once, by tools/selfplay.py, into the config every worker reads.
-        if not served_at:
-            raise SystemExit("the Rust worker plays the leaf of the inference servers: pass --served")
-        from pokeuraou import rustworker
-
-        config = out_dir / "worker-config.json"
-        flags = python_build(0, "-")
-        at = flags.index("--queue")
-        del flags[at : at + 2]
-        made = subprocess.run(  # noqa: S603
-            [*flags, "--rust-config", str(config)], env=env, cwd=str(ROOT),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+        return rustworker.command(
+            config, served_at[worker % len(served_at)],
+            out_dir / f"games-worker{worker}.jsonl", queue=address,
         )
-        if made.returncode != 0:
-            raise SystemExit(f"the Rust worker's config was not written:\n{made.stdout}")
-        print(f"  workers: pokeuraou-damage {rustworker.SUBCOMMAND} (config {config})",
-              file=sys.stderr, flush=True)
-
-        def build(worker: int, address: str) -> list[str]:
-            return rustworker.command(
-                config, served_at[worker % len(served_at)],
-                out_dir / f"games-worker{worker}.jsonl", queue=address,
-            )
 
     def written() -> int:
         return sum(
@@ -369,7 +335,6 @@ def main() -> None:
         f"leaf {args.value or 'hp-share'} on {args.device}, "
         f"{'Q ' + Path(args.q_model).name + ', ' if args.q_model else ''}"
         "bench hidden"
-        f"{', rank scores recorded (rank-worker*.jsonl.gz)' if args.record_rank_scores else ''}"
         f"\n  worker failures: stop after "
         f"{'none (never)' if max_failures is None else max_failures} "
         f"(IKA-336, -> {out_dir / 'workers.json'})",

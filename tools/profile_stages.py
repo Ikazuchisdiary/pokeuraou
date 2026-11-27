@@ -60,6 +60,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -132,6 +133,8 @@ def process_role(name: str, cmdline: list[str]) -> str:
         # IKA-458 stage 3.7: the generation worker is the same exe with another command.
         if "selfplay-worker" in [str(item) for item in cmdline]:
             return "rust-selfplay-worker"
+        if "pool-match-worker" in [str(item) for item in cmdline]:
+            return "rust-pool-match-worker"
         return DAMAGE_EXE
     return name
 
@@ -458,6 +461,50 @@ def print_steady(found: dict[str, Any] | None) -> None:
             continue
         print(f"   {role:<28} {spent:8.3f} CPU s a game  {100 * spent / total:5.1f}%")
     print(f"   {'total':<28} {total:8.3f}")
+
+
+#: The last lines the Rust workers write to their logs (IKA-458 stage 3.7): generation's
+#: `selfplay-worker` and the board's `pool-match-worker`. They write no timing report; their
+#: stages are these seconds, and their CPU is the process tree's (`rust-*-worker` roles).
+RUST_SELFPLAY_LINE = re.compile(
+    r"rust worker: move nodes (\d+), replacements (\d+), self-switches (\d+), handoffs (\d+)"
+    r".*?seconds: prepare ([\d.]+), solve ([\d.]+), play ([\d.]+), write ([\d.]+)")
+RUST_BOARD_LINE = re.compile(
+    r"rust pool-match worker: ([\d.]+)s; move nodes (\d+) \((\d+) with each side's own node\), "
+    r"replacements (\d+), self-switches (\d+), handoffs (\d+).*?selection: (\d+) solved here "
+    r"\(([\d.]+)s\)")
+
+
+def rust_workers(out: Path | None) -> dict[str, Any]:
+    """The Rust workers' own last lines in ``out``/logs, summed over the workers; empty when no
+    worker log carries one."""
+    total: dict[str, float] = {}
+    workers = 0
+    for log in sorted((Path(out) / "logs").glob("worker*.log")) if out is not None else []:
+        text = log.read_bytes()[-8192:].decode("utf-8", errors="replace")
+        if (found := RUST_SELFPLAY_LINE.search(text)) is not None:
+            names = ("moves", "replacements", "selfswitches", "handoffs", "prepare", "solve",
+                     "play", "write")
+        elif (found := RUST_BOARD_LINE.search(text)) is not None:
+            names = ("seconds", "moves", "split", "replacements", "selfswitches", "handoffs",
+                     "solves", "solve")
+        else:
+            continue
+        workers += 1
+        for name, value in zip(names, found.groups(), strict=True):
+            total[name] = total.get(name, 0.0) + float(value)
+    return {"workers": workers, **total} if workers else {}
+
+
+def print_rust_workers(found: dict[str, Any]) -> None:
+    if not found:
+        return
+    seconds = ", ".join(f"{k} {found[k]:,.1f} s" for k in ("seconds", "prepare", "solve", "play",
+                                                           "write") if k in found)
+    counts = ", ".join(f"{k} {int(found[k]):,}" for k in ("moves", "split", "replacements",
+                                                         "selfswitches", "handoffs", "solves")
+                       if k in found)
+    print(f"\n  Rust workers ({found['workers']}, their own last lines): {seconds}; {counts}")
 
 
 def collect(directory: Path) -> list[dict[str, Any]]:
@@ -1176,8 +1223,7 @@ def delivery(
             value = _flag(argv, flag)
             seen.setdefault(flag, {})
             seen[flag][str(value)] = seen[flag].get(str(value), 0) + 1
-        for flag in ("--hide-bench", "--open-bench", "--rank-leaf", "--no-bridge",
-                     "--record-rank-scores"):
+        for flag in ("--hide-bench", "--open-bench", "--rank-leaf", "--no-bridge"):
             seen.setdefault(flag, {})
             present = "yes" if flag in argv else "no"
             seen[flag][present] = seen[flag].get(present, 0) + 1
@@ -1281,11 +1327,9 @@ def build(args: argparse.Namespace) -> list[str]:
             "--value", str(args.value),
             *given("--q-model", getattr(args, "q_model", None)),
             *given("--limit", args.limit),
-            *(["--uniform-selection"] if args.uniform_selection else []),
             *given("--pool", getattr(args, "pool", None)),
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
-            *(["--python-worker"] if getattr(args, "python_worker", False) else []),
             *(["--served", "--servers", str(args.servers)] if args.served else []),
             *bench_argv(args.hide_bench),
             # A timing run stops at its first failed worker (IKA-336): generation's own
@@ -1302,6 +1346,7 @@ def build(args: argparse.Namespace) -> list[str]:
             "--workers", str(args.workers or (24 if args.served else 6)),
             "--value", str(args.value),
             *given("--pool", getattr(args, "pool", None)),
+            *given("--seed", args.seed),
             "--baseline", str(args.baseline),
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
@@ -1329,8 +1374,7 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None, help="analysis: 24 when unset")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--first-game", type=int, default=None)
-    ap.add_argument("--uniform-selection", action="store_true")
-    ap.add_argument("--pool", default=None, help="generation: generate_queue.py's --pool (M-C)")
+    ap.add_argument("--pool", default=None, help="generate_queue.py's and match_queue.py's --pool (M-C)")
     ap.add_argument(
         "--no-timing",
         action="store_true",
@@ -1380,8 +1424,6 @@ def main() -> None:
     # For generation and match, passed on explicitly; one of the two is required there.
     add_bench_flags(ap)
     ap.add_argument("--no-bridge", action="store_true", help="POKEURAOU_RUST_NODE=0")
-    ap.add_argument("--python-worker", action="store_true",
-                    help="generation: generate_queue.py's --python-worker (IKA-458 stage 3.7)")
     ap.add_argument("--out", type=Path, default=None, help="where the run writes its games")
     ap.add_argument("--timing-dir", type=Path, default=None)
     ap.add_argument("--report", type=Path, default=None,
@@ -1408,10 +1450,8 @@ def main() -> None:
         argv, tail = argv[:cut], argv[cut + 1 :]
     args = ap.parse_args(argv)
     args.rest = tail
-    generation_only = {
-        "--seed": args.seed, "--first-game": args.first_game,
-        "--uniform-selection": args.uniform_selection or None, "--pool": args.pool,
-    }
+    # `--seed` and `--pool` are both drivers' (IKA-458 stage 3.7: the board's too).
+    generation_only = {"--first-game": args.first_game}
     stray = [flag for flag, value in generation_only.items() if value is not None]
     if args.workload != "generation" and stray and args.report is None:
         # Accepted and then not passed on is how a run measures an agent nobody asked for.
@@ -1421,6 +1461,10 @@ def main() -> None:
         # The driver stops without one of the two anyway; stopping here says so before a
         # timing directory is made.
         require_bench(args)
+        if not args.served:
+            # IKA-458 stage 3.7: the Rust workers score their leaves on the inference servers.
+            raise SystemExit(f"the {args.workload} workload's workers are the Rust ones: pass "
+                             "--served")
 
     if args.report is not None:
         reports = collect(args.report)
@@ -1542,6 +1586,21 @@ def main() -> None:
         return
 
     reports = collect(timing_dir)
+    rust = rust_workers(args.out) if args.workload != "analysis" else {}
+    if not reports and rust:
+        # The Rust workers write no timing report: their own seconds, the process tree and the
+        # steady state are the timing.
+        summary = {"command": command, "wall": wall, "tree": tree, "steady": found_steady,
+                   "rustWorkers": rust, "exit": code, "workers": workers_record,
+                   "failed": verdict}
+        print(f"\n  run {wall:,.1f} s of wall clock")
+        print_rust_workers(rust)
+        print_steady(found_steady)
+        target = args.json or (timing_dir / "summary.json")
+        target.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n  {target}")
+        failed_exit()
+        return
     if not reports:
         raise SystemExit(
             f"the run wrote no timing reports into {timing_dir}. Either it died before "
@@ -1567,6 +1626,8 @@ def main() -> None:
     print_rest_fit(summary["rest_fit"])
     summary["rest_by_kind"] = rest_by_kind(reports)
     print_rest_by_kind(summary["rest_by_kind"])
+    summary["rustWorkers"] = rust
+    print_rust_workers(rust)
     summary["steady"] = found_steady
     print_steady(found_steady)
     summary["repeats"] = repeats(reports)
