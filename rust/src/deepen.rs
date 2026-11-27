@@ -19,7 +19,8 @@
 //!   "levels": L, "discount": d | null, "branches": 3, "childWidth": 8, "batch": K,
 //!   "qServer": S, "properties": bool, "megaFromSlots": bool }
 //! { "kind": "deepenRun", "id": n, "ms": t?, "cells": c?, "steps": k?, "grow": [A0, A1]?,
-//!   "walk": bool? }                  // false: the lines of the last walk (default true)
+//!   "walk": bool?,                   // false: the lines of the last walk (default true)
+//!   "batch": k? }                    // this slice's steps refine at most k cells
 //! { "kind": "deepenEnd", "id": n }
 //! ```
 //!
@@ -48,7 +49,12 @@
 //! own encoder and its own block for the leaf's arrays) or, on one thread, in order. They are
 //! applied in the order picked, and the tree is solved again once: each node on a refined
 //! cell's path, deepest first, once, and the root once. A step's answer is the same at any
-//! thread count; K = 1 is the read before IKA-467.
+//! thread count; K = 1 is the read before IKA-467. Counted once a step: `rootSum` (the root's
+//! cells), `childPasses` (one Q request), `guarded` (the first pick's guard). Counted once a
+//! refined cell: `refines`, `levelSum`, `expanded`, `refused`. On a budget of counted cells a
+//! step adopts its picked cells until the budget is spent and leaves the rest (`cutSteps`), so
+//! it passes the budget by one refined cell at most, as a step of one cell does; on a priced
+//! budget the caller caps a slice's cells (`deepenRun`'s `batch`).
 //!
 //! **The priority** is `deepen.py`'s ``bern/gap`` (d(1 - d) over the two actions' regrets plus
 //! `GAP_FLOOR`), times the completion's weight at the root; below it a node's cells inherit
@@ -296,11 +302,14 @@ struct ChildFill {
 }
 
 /// A picked cell's turn (IKA-467): its kept branches and their total, or None where the cell
-/// is refused before its children (its turn refused or suspended, no branch, a menu empty).
+/// is refused before its children (its turn refused or suspended, no branch, a menu empty),
+/// and the notes its turn gave. The read takes the notes, and counts the cell, when it adopts
+/// the cell: a step stopped by its budget leaves the rest as they were.
 struct Prep {
     target: Target,
     level: usize,
     branches: Option<(Vec<(f64, Position)>, f64)>,
+    notes: Vec<String>,
 }
 
 /// The step's phases, in microseconds (`phaseUs`): picking, the turns, the children's menus,
@@ -367,8 +376,9 @@ struct Read {
     wait_us: f64,
     grown: u64,
     grown_cells: u64,
-    /// The refined cells' nodes' levels, and the root's cells at each refinement, summed
-    /// (`deepen._Meter`'s `levels` and `roots`, which a `Cost` prices).
+    /// The refined cells' nodes' levels, summed per refined cell, and the root's cells, summed
+    /// once a step that refined (the step solves the root once: IKA-467; before it a step was
+    /// one refined cell) -- `deepen._Meter`'s `levels` and `roots`, which a `Cost` prices.
     level_sum: u64,
     root_sum: u64,
     elapsed: std::time::Duration,
@@ -378,6 +388,8 @@ struct Read {
     phase_us: [f64; 6],
     /// Children filled on the cell threads (`parallelFills`, the positive control).
     parallel_fills: u64,
+    /// Steps the budget of counted cells stopped before their last picked cell (`cutSteps`).
+    cut: u64,
 }
 
 thread_local! {
@@ -387,6 +399,42 @@ thread_local! {
     /// block it stands in for: the caller's block is the asking thread's, and two threads
     /// writing one block would read each other's values.
     static OWN_BLOCKS: RefCell<Vec<(String, crate::shm::Shared)>> = const { RefCell::new(Vec::new()) };
+    /// A cell thread's encoder between steps (IKA-467), without its regulation, beside the
+    /// regulation it was built for (its address and format): its vocabulary and its caches stay.
+    static OWN_ENCODER: RefCell<Option<((usize, String), crate::encode::EncoderParts)>> = const { RefCell::new(None) };
+}
+
+/// A cell thread's encoder for one map: built on the parts the thread kept, if they are this
+/// regulation's, and given back to the thread when the map lets it go.
+struct ThreadEncoder<'a> {
+    key: (usize, String),
+    encoder: Option<crate::encode::Encoder<'a>>,
+}
+
+impl<'a> ThreadEncoder<'a> {
+    fn of(reg: &'a Reg) -> ThreadEncoder<'a> {
+        let key = (reg as *const Reg as usize, reg.format_id.clone());
+        let kept = OWN_ENCODER.with(|own| own.borrow_mut().take()).filter(|(of, _)| *of == key);
+        let encoder = match kept {
+            Some((_, parts)) => crate::encode::Encoder::from_parts(reg, parts),
+            None => crate::encode::Encoder::new(reg),
+        };
+        ThreadEncoder { key, encoder: Some(encoder) }
+    }
+
+    fn get(&self) -> &crate::encode::Encoder<'a> {
+        self.encoder.as_ref().expect("an encoder until dropped")
+    }
+}
+
+impl Drop for ThreadEncoder<'_> {
+    fn drop(&mut self) {
+        if let Some(encoder) = self.encoder.take() {
+            let parts = encoder.into_parts();
+            let key = std::mem::take(&mut self.key);
+            OWN_ENCODER.with(|own| *own.borrow_mut() = Some((key, parts)));
+        }
+    }
 }
 
 /// The cell threads' blocks made so far, for their names.
@@ -674,7 +722,9 @@ impl Read {
                 }
             }
         }
-        if blocked > best.map_or(0.0, |(s, _)| s) {
+        // Counted for a step's first pick only (IKA-467): `guarded` stays a count of steps.
+        let first = pending.root.is_empty() && pending.nodes.is_empty();
+        if first && blocked > best.map_or(0.0, |(s, _)| s) {
             self.guarded += 1;
         }
         best.map(|(_, t)| t)
@@ -690,39 +740,44 @@ impl Read {
                 (node.pos.clone(), [node.rows[i].clone(), node.cols[j].clone()], node.level)
             }
         };
-        self.spent += 1;
-        self.refines += 1;
-        self.level_sum += level as u64;
-        let refused = Prep { target, level, branches: None };
+        let mut prep = Prep { target, level, branches: None, notes: Vec::new() };
         let actions = [slot_actions(&pair[0]), slot_actions(&pair[1])];
         let result = match resolve_turn(reg, &pos, &actions, self.budget) {
             Ok(result) => result,
             Err(reason) => {
-                self.notes.insert(format!("the port refused a deepened cell's turn: {reason}"));
-                return refused;
+                prep.notes.push(format!("the port refused a deepened cell's turn: {reason}"));
+                return prep;
             }
         };
-        self.notes.extend(result.unmodelled.iter().cloned());
+        prep.notes.extend(result.unmodelled.iter().cloned());
         if !result.suspended.is_empty() || result.branches.is_empty() {
-            return refused;
+            return prep;
         }
         let mut branches: Vec<(f64, Position)> = result.branches.into_iter().map(|b| (b.probability, b.position)).collect();
         branches.sort_by(|a, b| b.0.total_cmp(&a.0));
         if branches.len() > self.branches {
             branches.truncate(self.branches);
-            self.notes.insert(format!("depth-2 kept the {} likeliest branches of a refined cell", self.branches));
+            prep.notes.push(format!("depth-2 kept the {} likeliest branches of a refined cell", self.branches));
         }
         let total: f64 = branches.iter().map(|b| b.0).sum();
         if total <= 0.0 {
-            return refused;
+            return prep;
         }
-        Prep { target, level, branches: Some((branches, total)) }
+        prep.branches = Some((branches, total));
+        prep
     }
 
     /// One step's picked cells refined (IKA-467): their turns, the children's menus in one
     /// request, the children's fills and LPs (on the cell threads where there are several and
-    /// a pool), adopted in the order picked, and the tree solved again once.
-    fn step(&mut self, reg: &Reg, encoder: &crate::encode::Encoder, targets: Vec<Target>) -> Result<(), Value> {
+    /// a pool), adopted in the order picked until the counted `cells` are spent, and the tree
+    /// solved again once.
+    fn step(
+        &mut self,
+        reg: &Reg,
+        encoder: &crate::encode::Encoder,
+        targets: Vec<Target>,
+        cells: Option<u64>,
+    ) -> Result<(), Value> {
         let clock = Instant::now();
         let mut preps: Vec<Prep> = targets.into_iter().map(|t| self.prepare(reg, t)).collect();
         // The root's cells once a step: the step solves the root once (`Cost.root`).
@@ -775,8 +830,9 @@ impl Read {
             }
             let done = pool.map_with(
                 jobs.len(),
-                || crate::encode::Encoder::new(reg),
+                || ThreadEncoder::of(reg),
                 |own_encoder, k| {
+                    let own_encoder = own_encoder.get();
                     let (_, request, rows, cols) = &jobs[k];
                     if !crate::par::on_worker() {
                         return child_fill(reg, own_encoder, request, *rows, *cols);
@@ -803,8 +859,19 @@ impl Read {
         }
         let lazy = pool.is_none();
         let mut refined: Vec<Target> = Vec::with_capacity(preps.len());
-        for ((prep, menus), ready) in preps.into_iter().zip(menus_of).zip(ready.iter_mut()) {
+        for (k, ((prep, menus), ready)) in preps.into_iter().zip(menus_of).zip(ready.iter_mut()).enumerate() {
+            // On a budget of counted cells a step stops where a step of one cell would: the
+            // cells after the budget is spent are left as they were, not counted, and their
+            // fills (made at once on the cell threads) go unused.
+            if k > 0 && cells.is_some_and(|c| self.spent >= c) {
+                self.cut += 1;
+                break;
+            }
             let target = prep.target;
+            self.spent += 1;
+            self.refines += 1;
+            self.level_sum += prep.level as u64;
+            self.notes.extend(prep.notes);
             let took = match prep.branches {
                 None => false,
                 Some((branches, total)) => {
@@ -1366,6 +1433,7 @@ impl Read {
             "batch": self.batch,
             "rootSolves": root.solves,
             "parallelFills": self.parallel_fills,
+            "cutSteps": self.cut,
             "phaseUs": PHASES.iter().zip(self.phase_us).map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
             "elapsedMs": self.elapsed.as_secs_f64() * 1e3,
             "unmodelled": self.notes.iter().collect::<Vec<_>>(),
@@ -1384,6 +1452,7 @@ impl Read {
         cells: Option<u64>,
         ms: Option<f64>,
         steps: Option<u64>,
+        cap: Option<usize>,
     ) -> Result<&'static str, Value> {
         let started = Instant::now();
         let mut taken = 0u64;
@@ -1418,19 +1487,27 @@ impl Read {
                 self.exhausted = true;
                 break "exhausted";
             };
+            let want = self.step_size(cap);
             let mut pending = Pending::default();
             pending.add(first);
             let mut targets = vec![first];
-            while targets.len() < self.batch {
+            while targets.len() < want {
                 let Some(next) = self.best(&pending) else { break };
                 pending.add(next);
                 targets.push(next);
             }
             self.phase(0, clock);
-            self.step(reg, encoder, targets)?;
+            self.step(reg, encoder, targets, cells)?;
         };
         self.elapsed += started.elapsed();
         Ok(why)
+    }
+
+    /// The cells this step picks: `batch`, at most the slice's `cap` (the caller's reading of
+    /// a priced budget, which the port does not know). A budget of counted cells is read
+    /// between the picked cells as they are adopted (`step`).
+    fn step_size(&self, cap: Option<usize>) -> usize {
+        self.batch.min(cap.unwrap_or(usize::MAX)).max(1)
     }
 }
 
@@ -1578,6 +1655,7 @@ fn start(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Result<V
         batch: value["batch"].as_u64().unwrap_or(1).max(1) as usize,
         phase_us: [0.0; 6],
         parallel_fills: 0,
+        cut: 0,
     };
     let (own, other) = (read.root.own.clone(), read.root.other.clone());
     read.root.prices = read.root_fill(reg, encoder, &own, &other)?;
@@ -1620,7 +1698,14 @@ pub fn deepen_run(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) ->
         },
     };
     let got = match grown {
-        Ok(_) => read.run(reg, encoder, value["cells"].as_u64(), value["ms"].as_f64(), value["steps"].as_u64()),
+        Ok(_) => read.run(
+            reg,
+            encoder,
+            value["cells"].as_u64(),
+            value["ms"].as_f64(),
+            value["steps"].as_u64(),
+            value["batch"].as_u64().map(|b| b.max(1) as usize),
+        ),
         Err(failed) => Err(failed),
     };
     let answer = match got {

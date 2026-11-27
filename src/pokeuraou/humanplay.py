@@ -2310,6 +2310,8 @@ def play(
         "inputs": game.inputs,
         "beliefEpsilon": belief_epsilon,
     }
+    from . import portdeepen
+
     payload["clock"] = {
         "mode": agent.clock,
         "secondsPerMove": agent.seconds,
@@ -2322,7 +2324,8 @@ def play(
            if agent.oracle is not None else {}),
         **({"maxLevels": agent.max_levels} if agent.max_levels is not None else {}),
         **({"ponder": {"seconds": agent.ponder_seconds}} if agent.ponder else {}),
-        **({"batch": agent.batch} if agent.batch is not None else {}),
+        # The cells a deepening step refines, as the game read them (IKA-467).
+        "batch": portdeepen.BATCH if agent.batch is None else agent.batch,
         "rule": {
             "widths": list(WIDTHS),
             "widthShare": WIDTH_SHARE,

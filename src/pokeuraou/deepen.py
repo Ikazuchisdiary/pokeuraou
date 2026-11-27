@@ -1,9 +1,10 @@
 """The best-first deepening's shared pieces: its budget, its report and its progress steps.
 
 The deepening itself is the port's (`portdeepen`, `rust/src/deepen.rs`, IKA-464): a move's
-root is the depth-1 node, and a budget of further cells is spent one cell at a time, best
+root is the depth-1 node, and a budget of further cells is spent a step at a time, best
 first over the whole tree (IKA-33), the root re-solved after every step, so wherever the
-budget stops the last equilibrium is an answer. The tree, the priorities (``bern/gap``,
+budget stops the last equilibrium is an answer. A step refines the `portdeepen.BATCH` best
+cells (IKA-467; one cell before it). The tree, the priorities (``bern/gap``,
 IKA-281), the depth guard (IKA-307), the depth discount (IKA-342), the root's swap oracle
 (IKA-293/310), the Bayesian root where a bench is hidden (IKA-294), the children's menus by
 the Q (IKA-307 after IKA-322 section 18) and the widening mid-read (IKA-354) are there.
@@ -66,8 +67,10 @@ class Cost:
     #: (the clocks that stand in for a `Cost` -- `humanplay.WallCost`, `analysis.StopCost`
     #: -- have neither).
     level: float = 0.0
-    #: Each cell of the root's game, a refinement (IKA-342): the root's LP is solved again
-    #: after every step, and a wide Bayesian root (menus x completions) is most of a step.
+    #: Each cell of the root's game, a step (IKA-342): the root's LP is solved again after
+    #: every step, and a wide Bayesian root (menus x completions) is most of a step. Since
+    #: IKA-467 a step refines `portdeepen.BATCH` cells and the port counts the root's cells
+    #: once a step; before, a step was one refinement.
     root: float = 0.0
 
     def ms(
@@ -110,7 +113,9 @@ class Cost:
 #: These prices were measured on Python's deepening (before IKA-464). The port's deepening
 #: reads its budget in the same units (`portdeepen`), so a count-clock move stops where the
 #: same work would have; how many cells the port reads in those milliseconds of wall time
-#: was not measured again.
+#: was not measured again. They were fitted on steps of one cell; a step of
+#: `portdeepen.BATCH` cells (IKA-467) solves the root once for all of them and fills their
+#: children at once, and the prices were not fitted again for it.
 COSTS: dict[tuple[str, int], Cost] = {
     ("local", 1): Cost(fill=4.925, refine=1.494, cell=0.0286, level=0.36, root=0.00052),
     ("served", 1): Cost(fill=4.990, refine=1.354, cell=0.1602),
@@ -162,7 +167,8 @@ class _Meter:
         self.qs = 0
         #: The refined cells' nodes' levels, summed (`Cost.level`'s count, IKA-342).
         self.levels = 0
-        #: The root game's cells at each refinement, summed (`Cost.root`'s count).
+        #: The root game's cells at each step that refined, summed (`Cost.root`'s count; at
+        #: each refinement before IKA-467, when a step was one).
         self.roots = 0
 
     def refined(self, cells: int, fills: int, level: int = 0, root: int = 0) -> None:
@@ -253,18 +259,24 @@ class Deepened:
     #: (a finished game, a node with nothing left worth a step, a node at the guard with
     #: cells still worth one, a node the budget stopped first).
     lines: tuple[int, int, int, int] = (0, 0, 0, 0)
-    #: Steps where a cell past the guard was worth more than the one taken.
+    #: Steps where a cell past the guard was worth more than the ones taken (once a step,
+    #: however many cells the step refined: IKA-467).
     guarded: int = 0
     #: Whether the children's menus came from a Q. The two below then.
     child_q: bool = False
-    #: The Q's forward passes for the children (one a refined cell) and the child
-    #: positions they ranked.
+    #: The Q's requests for the children (one a step that opened a child: a step of
+    #: ``batch`` cells asks for all of them at once, IKA-467) and the child positions they
+    #: ranked.
     child_passes: int = 0
     child_ranked: int = 0
     #: Actions the root was widened by mid-read (`grow`, IKA-354), both sides, and the
     #: cells that filled. Written only when an action was added.
     grown: int = 0
     grown_cells: int = 0
+    #: Cells a step refined (IKA-467; 1 before it) and the steps taken (an oracle's widening
+    #: is a step too). Written always.
+    batch: int = 1
+    steps: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -272,6 +284,8 @@ class Deepened:
             "cells": self.cells,
             "expanded": self.expanded,
             "depth": self.depth,
+            "batch": self.batch,
+            "steps": self.steps,
             **({"classes": self.classes} if self.classes else {}),
             **({"refused": self.refused} if self.refused else {}),
             **(

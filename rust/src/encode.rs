@@ -192,6 +192,15 @@ pub struct Encoder<'a> {
     bind_us: std::cell::Cell<f64>,
 }
 
+/// An `Encoder` without its regulation (`Encoder::into_parts`): the vocabulary, the widths and
+/// the two caches.
+pub struct EncoderParts {
+    vocab: Vocabulary,
+    widths: Widths,
+    stats: HashMap<(String, String, [i64; 6]), [f64; 6]>,
+    bind_cache: crate::bind::BindCache,
+}
+
 impl<'a> Encoder<'a> {
     pub fn new(reg: &'a Reg) -> Encoder<'a> {
         let vocab = Vocabulary::build(reg);
@@ -213,6 +222,29 @@ impl<'a> Encoder<'a> {
             widths,
             stats: Default::default(),
             bind_cache: Default::default(),
+            bind_us: Default::default(),
+        }
+    }
+
+    /// This encoder's own parts, the regulation let go (IKA-467): a cell thread keeps them from
+    /// one step of a read to the next, its caches warm, and builds its encoder on them again.
+    pub fn into_parts(self) -> EncoderParts {
+        EncoderParts {
+            vocab: self.vocab,
+            widths: self.widths,
+            stats: self.stats.into_inner(),
+            bind_cache: self.bind_cache.into_inner(),
+        }
+    }
+
+    /// An encoder of `reg` on parts an encoder of the same regulation gave up (`into_parts`).
+    pub fn from_parts(reg: &'a Reg, parts: EncoderParts) -> Encoder<'a> {
+        Encoder {
+            reg,
+            vocab: parts.vocab,
+            widths: parts.widths,
+            stats: std::cell::RefCell::new(parts.stats),
+            bind_cache: std::cell::RefCell::new(parts.bind_cache),
             bind_us: Default::default(),
         }
     }

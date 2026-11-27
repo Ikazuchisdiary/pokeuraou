@@ -15,6 +15,7 @@ the inference server's (`qrank.RemoteQ`).
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -282,6 +283,8 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
         ))
 
     wall = _is_wall(cost)
+    #: The budget's reading and the refined cells at the last slice's start (a priced step's cap).
+    last: list[float] = [0.0, 0]
     walked = [time.perf_counter()]
     snap = answer
     announce("start", snap)
@@ -305,8 +308,20 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
             # `SLICE_MIN_MS` (a pondering move's gate reads just under its budget).
             run["ms"] = max(SLICE_MIN_MS, min(SLICE_MS, float(cells) - meter(snap)))
         else:
-            # A cost's units are read before every step, as `deepen._Meter` reads them.
+            # A cost's units are read before every step, as `deepen._Meter` reads them. A
+            # step of several cells (IKA-467) takes no more of them than what is left of the
+            # budget pays for at the units a refined cell has cost: the larger of the read's
+            # mean so far (the oracle's units in it) and the last step's, since a deeper tree's
+            # cells cost more. The port cannot read these units between a step's cells.
             run["steps"] = 1
+            refines = int(snap["refines"])
+            if refines:
+                spent = meter(snap)
+                per = spent / refines
+                if refines > last[1]:
+                    per = max(per, (spent - last[0]) / (refines - last[1]))
+                run["batch"] = max(1, math.ceil((float(cells) - spent) / max(per, 1e-9)))
+                last[:] = [spent, refines]
         wanted = None if grow is None else grow(meter(snap))
         if wanted is not None:
             run["grow"] = [_codes(wanted[0]), _codes(wanted[1])]
@@ -342,6 +357,7 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
         lines=(lines[0], lines[1], lines[2], lines[3]), guarded=int(snap["guarded"]),
         child_q=True, child_passes=int(snap["childPasses"]), child_ranked=int(snap["childRanked"]),
         grown=int(snap["grown"]), grown_cells=int(snap["grownCells"]),
+        batch=int(snap["batch"]), steps=int(snap["steps"]),
     )
     announce("done", snap)
     ours_now, theirs_now = (own, other) if me == 0 else (other, own)

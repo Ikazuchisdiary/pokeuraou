@@ -136,6 +136,28 @@ def test_a_batch_reads_the_same_tree_on_one_thread_and_on_several(pool, served) 
     assert one["rootSolves"] == one["expanded"] + 1
 
 
+def test_a_batch_on_counted_cells_stops_near_its_budget(pool, served) -> None:  # noqa: ANN001, F811
+    """IKA-467: on a budget of counted cells a step adopts its picked cells until the budget is
+    spent, so a read of 8 cells a step passes its budget by one refined cell at most (its turn
+    and its children: 1 + BRANCHES x CHILD_WIDTH^2 cells), as a read of one cell a step does.
+    The positive control: steps were cut (``cutSteps``), and they are what keeps the bound: a
+    whole last step of 8 refined cells passes it."""
+    budget = 3000
+    one_cell = 1 + portdeepen.BRANCHES * portdeepen.CHILD_WIDTH ** 2
+    over: dict[int, list] = {1: [], 8: []}
+    cut = 0
+    for seed in (31, 37):
+        for pos in _positions(pool, 2, seed=seed):
+            for batch in (1, 8):
+                _got, snap = _last_snapshot(pool, pos, 0, served, budget, batch=batch)
+                over[batch].append(snap["cells"] - budget)
+                if batch == 8:
+                    assert snap["steps"] >= 2 and snap["expanded"] > snap["steps"]
+                    cut += int(snap["cutSteps"])
+    assert cut > 0, "no step was stopped by the budget"
+    assert all(0 <= v <= one_cell for v in over[1] + over[8]), over
+
+
 def test_the_swap_oracle_brings_in_actions_from_outside(pool, served) -> None:  # noqa: ANN001, F811
     from pokeuraou.actions import side_actions
 

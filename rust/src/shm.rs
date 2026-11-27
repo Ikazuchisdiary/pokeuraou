@@ -199,16 +199,29 @@ mod platform {
         file: File,
         capacity: usize,
         at: usize,
+        /// Made here (`create`): the file's name goes when this does (IKA-467). An attached
+        /// block is the maker's to remove.
+        owned: bool,
+    }
+
+    impl Drop for Shared {
+        fn drop(&mut self) {
+            if self.owned {
+                // Whoever has the file open keeps it; only the name goes.
+                let _ = std::fs::remove_file(format!("/dev/shm/{}", self.name));
+            }
+        }
     }
 
     impl Shared {
         pub fn attach(name: &str, capacity: usize) -> Option<Shared> {
             let file =
                 OpenOptions::new().read(true).write(true).open(format!("/dev/shm/{name}")).ok()?;
-            Some(Shared { name: name.to_string(), file, capacity, at: 0 })
+            Some(Shared { name: name.to_string(), file, capacity, at: 0, owned: false })
         }
 
-        /// IKA-458 stage 3.7: a new `/dev/shm` file of `capacity` bytes (left behind on exit).
+        /// IKA-458 stage 3.7: a new `/dev/shm` file of `capacity` bytes, removed when the
+        /// value is dropped (IKA-467; a process that exits without dropping it leaves it).
         pub fn create(name: &str, capacity: usize) -> Option<Shared> {
             let file = OpenOptions::new()
                 .read(true)
@@ -218,7 +231,7 @@ mod platform {
                 .open(format!("/dev/shm/{name}"))
                 .ok()?;
             file.set_len(capacity as u64).ok()?;
-            Some(Shared { name: name.to_string(), file, capacity, at: 0 })
+            Some(Shared { name: name.to_string(), file, capacity, at: 0, owned: true })
         }
 
         pub fn name(&self) -> &str {
