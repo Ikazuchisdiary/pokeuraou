@@ -221,6 +221,12 @@ def main() -> None:
         "look whole while its clock and CPU per game were wrong (IKA-307).",
     )
     ap.add_argument(
+        "--python-worker",
+        action="store_true",
+        help="IKA-458 stage 3.7: the workers are tools/pool_match.py (Python), as before; the "
+        "default is pokeuraou-damage pool-match-worker. For the comparison only",
+    )
+    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
@@ -394,6 +400,36 @@ def main() -> None:
             )
         command += bench_argv(args.hide_bench)
         return command + extra
+
+    python_build = build
+    if not args.python_worker:
+        # IKA-458 stage 3.7: the workers are `pokeuraou-damage pool-match-worker`. The flags are read
+        # once, by tools/pool_match.py, into the config every worker reads.
+        if not served_at:
+            raise SystemExit("the Rust board worker plays the leaves of the inference servers: pass --served")
+        from pokeuraou import rustworker
+
+        config = out_dir / "worker-config.json"
+        flags = python_build(0, "-")
+        at = flags.index("--queue")
+        del flags[at : at + 2]
+        made = subprocess.run(  # noqa: S603
+            [*flags, "--rust-config", str(config)], env=env, cwd=str(ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+        )
+        if made.returncode != 0:
+            raise SystemExit(f"the Rust board worker's config was not written:\n{made.stdout}")
+        print(f"  workers: pokeuraou-damage {rustworker.BOARD_SUBCOMMAND} (config {config})",
+              file=sys.stderr, flush=True)
+        baseline_server = (extra[extra.index("--baseline-inference") + 1]
+                           if "--baseline-inference" in extra else None)
+
+        def build(worker: int, address: str) -> list[str]:
+            return rustworker.board_command(
+                config, served_at[worker % len(served_at)],
+                out_dir / f"games-worker{worker}.jsonl", out_dir / f"worker{worker}.jsonl",
+                baseline_inference=baseline_server, queue=address,
+            )
 
     def written() -> int:
         return sum(

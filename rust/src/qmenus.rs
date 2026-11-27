@@ -214,6 +214,8 @@ fn top(pool: &[SideAct], scores: &[f64], width: usize) -> Vec<usize> {
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| choices[a].as_bytes().cmp(choices[b].as_bytes()))
     });
+    // The positive control of a board arm read through another executable (`armexe.rs`).
+    let width = if cfg!(feature = "ika458-arm-control") { width.saturating_sub(1).max(1) } else { width };
     order.truncate(width);
     order
 }

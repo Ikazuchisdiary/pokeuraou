@@ -28,6 +28,12 @@ ika458-phase-control = []
 ika458-play-control = []
 # IKA-458 stage 3.7's positive control: the Rust worker prepares the game after the one the queue named.
 ika458-worker-control = []
+# IKA-458 stage 3.7's positive control for a board arm on another executable: that executable's
+# `moveNode` cuts each menu one action short. The worker's own executable is built without it.
+ika458-arm-control = []
+# IKA-458 stage 3.7's positive control for the board worker: side 1 draws its four from side 0's
+# stream. Not for use; `tests/test_rust_board_worker.py` must fail against it.
+ika458-board-control = []
 # IKA-215's positive control: the trace broken on purpose -- no `acts` entry for the
 # residual phase, and no "fainted" line. Never for use; `diff_commands --events` has to
 # tell a build with it from one without.

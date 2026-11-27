@@ -97,8 +97,10 @@ def _driver(tmp_path, monkeypatch, argv):  # noqa: ANN001, ANN202
         return 0
 
     monkeypatch.setattr(match_queue, "run_workers", fake_run_workers)
+    # The Python worker's command line: the Rust worker's config is written by the same flags
+    # (`tools/pool_match.py --rust-config`), which this reads without starting a server.
     monkeypatch.setattr(sys, "argv", ["match_queue.py", "--out", str(tmp_path / "out"),
-                                      "--games", "1", "--value", "a.pt", *argv])
+                                      "--games", "1", "--value", "a.pt", "--python-worker", *argv])
     with pytest.raises(SystemExit) as ended:
         match_queue.main()
     return ended.value.code, seen.get("command")

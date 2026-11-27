@@ -46,14 +46,50 @@ struct Pool {
 }
 
 /// One pair's solve as `BookEntry` stores it, for a one-class selection game.
-struct Entry {
-    selections: Vec<Vec<usize>>,
-    our_strategy: Vec<f64>,
-    our_ev_loss: Vec<f64>,
-    their_strategy: Vec<f64>,
-    their_ev_loss: Vec<f64>,
-    class_weight: f64,
-    value: f64,
+pub(crate) struct Entry {
+    pub(crate) selections: Vec<Vec<usize>>,
+    pub(crate) our_strategy: Vec<f64>,
+    pub(crate) our_ev_loss: Vec<f64>,
+    pub(crate) their_strategy: Vec<f64>,
+    pub(crate) their_ev_loss: Vec<f64>,
+    pub(crate) class_weight: f64,
+    pub(crate) value: f64,
+}
+
+/// What a store holds for a pair (IKA-458 stage 3.7, the board's worker: each arm its own store).
+pub(crate) enum Stored {
+    /// The solve, and whether it was read from the file now (not from this process's memory).
+    Entry(Rc<Entry>, bool),
+    Unsolved,
+}
+
+/// The pair's solve with the lower index as the row player, from `store` under `tag` (`load`).
+pub(crate) fn stored(pool_id: u64, lo: usize, hi: usize, store: &str, tag: &str) -> Result<Stored, String> {
+    POOLS.with(|pools| {
+        let pools = pools.borrow();
+        let pool = pools.get(&pool_id).ok_or_else(|| format!("no pool {pool_id} is defined"))?;
+        match load(pool_id, pool, lo, hi, store, tag) {
+            Loaded::Entry(entry, read) => Ok(Stored::Entry(entry, read)),
+            Loaded::Unsolved => Ok(Stored::Unsolved),
+            Loaded::Stop(why) | Loaded::Fault(why) => Err(why),
+        }
+    })
+}
+
+/// `selection_book.explore_mixture` (`explore_mixture`), for the board's worker.
+pub(crate) fn mixture(equilibrium: &[f64], ev_loss: &[f64], epsilon: f64, temperature: f64) -> Result<Vec<f64>, String> {
+    explore_mixture(equilibrium, ev_loss, epsilon, temperature)
+}
+
+/// `selfplay.position_from_sets`: the turn-1 position of the two fours, the leads' switch-ins
+/// drawn from `rng` (`prep_game`'s own steps).
+pub(crate) fn start_position(reg: &Reg, sides: [&[&SheetSet]; 2], rng: &mut Pcg64) -> Result<Position, String> {
+    let start = opening(reg, sides)?;
+    crate::resolve::commands::lead_phase(reg, start, |weights| {
+        let total = sum_of(weights.iter().copied());
+        let p: Vec<f64> = weights.iter().map(|w| w / total).collect();
+        choose_p(&p, rng)
+    })
 }
 
 thread_local! {

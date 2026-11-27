@@ -401,6 +401,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--device", default=None)
     ap.add_argument("--torch-threads", type=int, default=1)
     ap.add_argument("--report-every", type=int, default=25)
+    ap.add_argument("--rust-config", type=Path, default=None,
+                    help="IKA-458 stage 3.7: write the Rust board worker's config for these flags to "
+                    "this file and play no game (tools/match_queue.py does this once per board)")
     args = ap.parse_args(argv)
     require_bench(args)
     if (args.inference is None) == (args.value is None):
@@ -634,6 +637,19 @@ def main(argv: list[str] | None = None) -> None:
     if tested.bench_oracle != other.bench_oracle:
         tags += "@oracle" if tested.bench_oracle else "@nooracle"
     arm_label = f"{tested.name}{tags}"
+
+    if args.rust_config is not None:
+        # IKA-458 stage 3.7: the Rust board worker's config for these flags, written once, and no game.
+        from pokeuraou import rustworker
+
+        refused = rustworker.board_unsupported(args)
+        if refused:
+            ap.error(f"the Rust worker does not play {', '.join(refused)}")
+        rustworker.write_config(
+            rustworker.board_config(args, pool, arms, arm_label, q_record, pairs), args.rust_config
+        )
+        print(f"  rust board worker config -> {args.rust_config}", file=sys.stderr)
+        return
 
     client = WorkClient(args.queue) if args.queue else None
     # IKA-460 step 1: the board's hidden-bench completions and the game's steps are the port's,

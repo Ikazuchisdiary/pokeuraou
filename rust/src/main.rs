@@ -57,6 +57,8 @@ mod playgame;
 mod replacenode;
 mod replacephase;
 mod resolve;
+mod armexe;
+mod boardworker;
 mod qfeatures;
 mod qmenus;
 mod score;
@@ -95,6 +97,8 @@ fn main() {
         Some("inference-server") => infer_server::main(&args[2..]),
         // IKA-458 stage 3.7: the generation worker.
         Some("selfplay-worker") => worker::main(&args[2..]),
+        // The board's worker (`tools/match_queue.py --pool`).
+        Some("pool-match-worker") => boardworker::main(&args[2..]),
         _ => {
             eprintln!(
                 "usage:\n  {0} damage <regulation.json> <cases.json> [repeats]\n  \

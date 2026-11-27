@@ -86,6 +86,27 @@ impl Act {
             Act::Pass { slot } => json!(["p", slot]),
         }
     }
+
+    /// `to_json` read back (IKA-458: the menus another executable built, `armexe.rs`).
+    pub fn from_json(value: &serde_json::Value) -> Option<Act> {
+        let slot = value.get(1)?.as_u64()? as usize;
+        match value.get(0)?.as_str()? {
+            "m" => Some(Act::Move {
+                slot,
+                index: value.get(2)?.as_u64()? as usize,
+                move_id: Id::new(value.get(3)?.as_str()?),
+                target: value.get(4).and_then(serde_json::Value::as_i64),
+                mega: value.get(5)?.as_bool()?,
+            }),
+            "s" => Some(Act::Switch {
+                slot,
+                party: value.get(2)?.as_u64()? as usize,
+                species: Id::new(value.get(3)?.as_str()?),
+            }),
+            "p" => Some(Act::Pass { slot }),
+            _ => None,
+        }
+    }
 }
 
 /// One side's whole choice: an `Act` per active slot.

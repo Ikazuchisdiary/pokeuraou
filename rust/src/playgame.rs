@@ -101,13 +101,42 @@ struct Node {
     asked: Value,
 }
 
+/// Which jobs and games a node request holds, and how its positions are written.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// Whose completions are jobs (`spreads[side]` completes side `side`'s own bench).
+    jobs: [bool; 2],
+    /// Whose Bayesian game the port solves.
+    solve: [bool; 2],
+    /// Positions as JSON text (for another executable, which holds none of this process's).
+    plain: bool,
+}
+
+/// One node for both sides (one leaf, one menu): every completion, both games, held positions.
+const JOINT: Shape = Shape { jobs: [true, true], solve: [true, true], plain: false };
+
 fn node_of(base: &Value, pos: &Position, spreads: [&Vec<Item>; 2]) -> Node {
-    let root = crate::held::keep(pos);
+    node_shaped(base, pos, spreads, JOINT)
+}
+
+/// `node_of` for one side's own node (`belief_solve` with two leaves or two menus).
+fn node_shaped(base: &Value, pos: &Position, spreads: [&Vec<Item>; 2], shape: Shape) -> Node {
+    let place = |p: &Position| -> Value {
+        if shape.plain {
+            p.to_json()
+        } else {
+            json!({ "held": crate::held::keep(p) })
+        }
+    };
+    let root_place = place(pos);
     let mut asked = base.clone();
-    asked["position"] = json!({ "held": root });
+    asked["position"] = root_place.clone();
     let mut jobs = Vec::new();
     let mut hidden: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
     for side in 0..2 {
+        if !shape.jobs[side] {
+            continue;
+        }
         let items = spreads[side];
         let slots: Vec<usize> = match items.first() {
             Some(first) if !first.exact => first.slots.clone(),
@@ -115,12 +144,11 @@ fn node_of(base: &Value, pos: &Position, spreads: [&Vec<Item>; 2]) -> Node {
         };
         for item in items {
             let at = jobs.len();
-            let held = if item.exact {
-                root
+            asked[format!("p{at}")] = if item.exact {
+                root_place.clone()
             } else {
-                crate::held::keep(item.position.as_ref().expect("a completion's position"))
+                place(item.position.as_ref().expect("a completion's position"))
             };
-            asked[format!("p{at}")] = json!({ "held": held });
             let pk: Value = if item.exact || item.pk.is_empty() {
                 json!(pos.sides[side]
                     .pokemon
@@ -146,7 +174,7 @@ fn node_of(base: &Value, pos: &Position, spreads: [&Vec<Item>; 2]) -> Node {
     let mut solve = Vec::new();
     for side in 0..2 {
         let items = spreads[1 - side];
-        if !items.is_empty() {
+        if shape.solve[side] && !items.is_empty() {
             let weights: Vec<u8> = items.iter().flat_map(|i| i.weight.to_le_bytes()).collect();
             solve.push(json!({ "side": side, "weights": b64_encode(&weights) }));
         }
@@ -195,7 +223,16 @@ fn run(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
     let mut rng = Pcg64::from_json(&value["rng"]).ok_or_else(|| fault("playGame without a PCG64 state".into()))?;
     let mut context = Context::from_json(&value["context"]).map_err(fault)?;
     let hidden = context.hidden.as_ref().ok_or_else(|| fault("playGame without a hidden bench".into()))?;
-    let args = MenusArgs::from_json(&value["node"])?;
+    // IKA-458 stage 3.7 (boards): `nodes` is each side's own node -- its leaf, its Q, its executable
+    // -- where the two arms of a board differ; `node` is the one both sides share.
+    let bases: [Value; 2] = match value.get("nodes").and_then(Value::as_array) {
+        Some(list) if list.len() == 2 => [list[0].clone(), list[1].clone()],
+        Some(_) => return Err(fault("playGame: `nodes` is not two nodes".into())),
+        None => [value["node"].clone(), value["node"].clone()],
+    };
+    let joint = bases[0] == bases[1] && bases[0].get("binary").is_none_or(Value::is_null);
+    let sides = [SideNode::of(&bases[0])?, SideNode::of(&bases[1])?];
+    let args = MenusArgs::from_json(&bases[0])?;
     let exact = Budget::from_json(&value["exactBudget"]);
     let steps = value["steps"].as_u64().ok_or_else(|| fault("playGame without steps".into()))? as usize;
     let mut pos = crate::held::position(&value["position"]);
@@ -217,7 +254,8 @@ fn run(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
             break;
         }
         crate::held::forget_kept();
-        match one_step(reg, encoder, &mut context, &args, &exact, game, &leads, &mut pos, &mut seen, &mut rng, &value["node"]) {
+        let deciding = if joint { Deciding::Joint(&args, &bases[0]) } else { Deciding::Sides(&sides) };
+        match one_step(reg, encoder, &mut context, deciding, &exact, game, &leads, &mut pos, &mut seen, &mut rng) {
             Ok(Done::Event(event, advanced)) => {
                 if advanced {
                     turns = Some(pos.turn);
@@ -230,6 +268,10 @@ fn run(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
                 taken += 1;
                 stop = "unresolved".into();
                 break;
+            }
+            Err(Handoff(reason)) if reason.starts_with(FATAL) => {
+                crate::held::forget_kept();
+                return Err(fault(reason[FATAL.len()..].to_string()));
             }
             Err(Handoff(reason)) => {
                 stop = "handoff".into();
@@ -291,14 +333,13 @@ fn one_step(
     reg: &Reg,
     encoder: &Encoder,
     context: &mut Context,
-    args: &MenusArgs,
+    deciding: Deciding,
     exact: &Budget,
     game: u64,
     leads: &[Option<Vec<String>>; 2],
     pos: &mut Position,
     seen: &mut [Vec<String>; 2],
     rng: &mut Pcg64,
-    base: &Value,
 ) -> Result<Done, Handoff> {
     let step = step_of(reg, game, pos, seen, leads, None).ok_or_else(|| Handoff::of(format!("no game {game} is defined")))?;
     // What a mid-turn node (a self-switch, a replacement) reads as seen is this step's.
@@ -334,21 +375,11 @@ fn one_step(
         }
     }
     let started = Instant::now();
-    let node = node_of(base, pos, [lists[0], lists[1]]);
-    let got = menus_core(reg, encoder, args, pos, [&node.views[0], &node.views[1]], node.same)
-        .map_err(|failed| Handoff::of(format!("menus: {failed}")))?;
-    let kept = got.1.clone();
-    let mut answer = move_node_over(reg, encoder, got, node.asked.clone());
-    for key in ["fault", "serverError", "refused"] {
-        if answer.get(key).is_some() {
-            return Err(Handoff::of(format!("node: {key}")));
-        }
-    }
-    if args.rules.mega_from_slots && answer["mega"] != json!(true) {
-        return Err(Handoff::of("node: the binary encoded with another can_mega rule"));
-    }
-    let (own_strategy, own_value) = solved_side(&answer, 0).map_err(Handoff::of)?;
-    let (foe_strategy, foe_value) = solved_side(&answer, 1).map_err(Handoff::of)?;
+    let Decided { kept, own_strategy, own_value, foe_strategy, foe_value, mut answer, foe_answer, notes, used, side_seconds } =
+        match deciding {
+            Deciding::Joint(args, base) => decide_joint(reg, encoder, args, base, pos, [lists[0], lists[1]])?,
+            Deciding::Sides(sides) => decide_sides(reg, encoder, sides, pos, [lists[0], lists[1]])?,
+        };
     let seconds = started.elapsed().as_secs_f64();
     if kept[0].is_empty() || kept[1].is_empty() {
         return Err(Handoff::of("a menu is empty"));
@@ -377,13 +408,17 @@ fn one_step(
     MOVES.fetch_add(1, Ordering::Relaxed);
 
     // What the caller records of the node; the matrices and the games' texts stay here.
-    let mut kept_answer = serde_json::Map::new();
-    for key in ["fills", "served", "patched", "rootMenus", "shared", "redone", "mega", "lps"] {
-        if let Some(part) = answer.get_mut(key) {
-            kept_answer.insert(key.to_string(), part.take());
+    let keep = |answer: &mut Value| -> Value {
+        let mut kept_answer = serde_json::Map::new();
+        for key in ["fills", "served", "patched", "rootMenus", "shared", "redone", "mega", "lps"] {
+            if let Some(part) = answer.get_mut(key) {
+                kept_answer.insert(key.to_string(), part.take());
+            }
         }
-    }
-    let rank_views: Vec<Value> = node.used.iter().map(|u| u.as_ref().map_or(Value::Null, |(at, species)| json!([at, species]))).collect();
+        Value::Object(kept_answer)
+    };
+    let kept_answer = keep(&mut answer);
+    let rank_views: Vec<Value> = used.iter().map(|u| u.as_ref().map_or(Value::Null, |(at, species)| json!([at, species]))).collect();
     let ours = choices(&kept[0]);
     let theirs = choices(&kept[1]);
     // The `Decision` as the record writes it (`GameRecord.to_json`), made here and only written by Python.
@@ -404,18 +439,24 @@ fn one_step(
     if rank_views.iter().any(|v| !v.is_null()) {
         decision["rankViews"] = Value::Array(rank_views);
     }
+    let hidden = json!([hidden_slots(lists[0]), hidden_slots(lists[1])]);
     let mut event = json!({
         "kind": "move",
         "stepNotes": step.notes,
         "completions": completions(&step),
-        "hiddenSlots": node.asked["hidden"].clone(),
+        "hiddenSlots": hidden,
         "decision": decision,
-        "answer": Value::Object(kept_answer),
-        "nodeNotes": answer["unmodelled"].clone(),
+        "answer": kept_answer,
+        "nodeNotes": notes,
         "advanceNotes": advanced.unmodelled,
         "index": advanced.index,
         "seconds": seconds,
     });
+    if let Some(mut other) = foe_answer {
+        // Two nodes (a board's two arms): side 1's own, and what each side spent on its search.
+        event["foeAnswer"] = keep(&mut other);
+        event["sideSeconds"] = json!(side_seconds);
+    }
     if let Some(chain) = &advanced.chain {
         event["chain"] = chain.to_json();
     }
@@ -428,4 +469,225 @@ fn one_step(
             Ok(Done::Event(event, true))
         }
     }
+}
+
+/// The slots of a side's bench that are hidden (`node_of`'s `hidden`), from its completions.
+fn hidden_slots(items: &[Item]) -> Vec<usize> {
+    match items.first() {
+        Some(first) if !first.exact => first.slots.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// The prefix of a `Handoff` that is no state of the game but a failure: `playGame` answers a fault.
+const FATAL: &str = "\u{0}fatal ";
+
+/// One side's node: the menus' and the node's static request, and the executable it is read
+/// through when that is not this one (`--rust-binary`, IKA-413).
+pub(crate) struct SideNode {
+    args: MenusArgs,
+    base: Value,
+    /// (the executable, the regulation file it loads).
+    binary: Option<(String, String)>,
+}
+
+impl SideNode {
+    fn of(base: &Value) -> Result<SideNode, Value> {
+        let fault = |e: &str| json!({ "fault": e });
+        let binary = match base.get("binary").filter(|b| !b.is_null()) {
+            None => None,
+            Some(b) => Some((
+                b.as_str().ok_or_else(|| fault("a node's `binary` is not a path"))?.to_string(),
+                base["regulation"]
+                    .as_str()
+                    .ok_or_else(|| fault("a node read through another executable names no regulation"))?
+                    .to_string(),
+            )),
+        };
+        let mut clean = base.clone();
+        if let Some(map) = clean.as_object_mut() {
+            map.remove("binary");
+            map.remove("regulation");
+        }
+        Ok(SideNode { args: MenusArgs::from_json(&clean)?, base: clean, binary })
+    }
+
+    /// What decides the menus (`rootMenus`' static request): two sides that agree build one pair.
+    fn menus_key(&self) -> Value {
+        json!([
+            self.base["widths"], self.base["properties"], self.base["megaFromSlots"], self.base["eps"],
+            self.base["qServer"]["address"], self.base["qServer"]["model"], self.binary.is_some()
+        ])
+    }
+
+    /// The leaf a node is scored with: two sides that agree share one node (`belief_solve`'s `same`).
+    fn leaf_key(&self) -> Value {
+        json!([
+            self.base["server"]["address"], self.base["server"]["model"], self.base["netScoresEnds"],
+            self.base["encoding"], self.base["budget"]
+        ])
+    }
+}
+
+/// How a move node is decided: one node for both sides, or each side its own.
+enum Deciding<'a> {
+    Joint(&'a MenusArgs, &'a Value),
+    Sides(&'a [SideNode; 2]),
+}
+
+/// A move node's menus, both strategies and values, and what the caller records of the node.
+struct Decided {
+    kept: [Vec<legal::SideAct>; 2],
+    own_strategy: Vec<f64>,
+    own_value: f64,
+    foe_strategy: Vec<f64>,
+    foe_value: f64,
+    answer: Value,
+    foe_answer: Option<Value>,
+    notes: Value,
+    used: [Option<(usize, Vec<String>)>; 2],
+    side_seconds: [f64; 2],
+}
+
+fn checked(answer: &Value, mega_from_slots: bool) -> Result<(), Handoff> {
+    for key in ["fault", "serverError", "refused"] {
+        if answer.get(key).is_some() {
+            return Err(Handoff::of(format!("node: {key}")));
+        }
+    }
+    if mega_from_slots && answer["mega"] != json!(true) {
+        return Err(Handoff::of("node: the binary encoded with another can_mega rule"));
+    }
+    Ok(())
+}
+
+fn decide_joint(
+    reg: &Reg,
+    encoder: &Encoder,
+    args: &MenusArgs,
+    base: &Value,
+    pos: &Position,
+    lists: [&Vec<Item>; 2],
+) -> Result<Decided, Handoff> {
+    let node = node_of(base, pos, lists);
+    let got = menus_core(reg, encoder, args, pos, [&node.views[0], &node.views[1]], node.same)
+        .map_err(|failed| Handoff::of(format!("menus: {failed}")))?;
+    let kept = got.1.clone();
+    let answer = move_node_over(reg, encoder, got, node.asked);
+    checked(&answer, args.rules.mega_from_slots)?;
+    let (own_strategy, own_value) = solved_side(&answer, 0).map_err(Handoff::of)?;
+    let (foe_strategy, foe_value) = solved_side(&answer, 1).map_err(Handoff::of)?;
+    let notes = answer["unmodelled"].clone();
+    Ok(Decided {
+        kept,
+        own_strategy,
+        own_value,
+        foe_strategy,
+        foe_value,
+        answer,
+        foe_answer: None,
+        notes,
+        used: node.used,
+        side_seconds: [0.0, 0.0],
+    })
+}
+
+/// IKA-458 stage 3.7: `play_game`'s node where the two agents differ (`same_menu` false). Each side
+/// builds its menus (one pair when the two would build the same: one Q, one pair of widths, this
+/// executable) and solves its own game over them with its own leaf: over the other side's
+/// completions alone when the leaves differ (`belief_solve`'s `spreads={1 - side: ...}`), over the
+/// node of both when they are one leaf. A side read through another executable asks that process
+/// for its menus and its node in one `moveNode`, the positions written out.
+fn decide_sides(
+    reg: &Reg,
+    encoder: &Encoder,
+    sides: &[SideNode; 2],
+    pos: &Position,
+    lists: [&Vec<Item>; 2],
+) -> Result<Decided, Handoff> {
+    let same_leaf = sides[0].leaf_key() == sides[1].leaf_key();
+    let mut first_menus: Option<(Value, [Vec<legal::SideAct>; 2])> = None;
+    let mut solved: Vec<(Vec<legal::SideAct>, Vec<f64>, f64, Value)> = Vec::new();
+    let mut used = [None, None];
+    let mut notes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut side_seconds = [0.0f64; 2];
+    for s in 0..2 {
+        let started = Instant::now();
+        let side = &sides[s];
+        let mut jobs = [true, true];
+        if !same_leaf {
+            jobs[s] = false;
+        }
+        let mut solve = [false, false];
+        solve[s] = true;
+        let node = node_shaped(&side.base, pos, lists, Shape { jobs, solve, plain: side.binary.is_some() });
+        if s == 0 {
+            used = node.used.clone();
+        }
+        let (mine, answer) = match &side.binary {
+            Some((exe, regulation)) => {
+                let mut asked = node.asked;
+                asked["kind"] = json!("moveNode");
+                asked["v0"] = node.views[0].to_json();
+                asked["v1"] = node.views[1].to_json();
+                asked["same"] = json!(node.same);
+                let answer = crate::armexe::ask(exe, regulation, &asked)
+                    .map_err(|why| Handoff(format!("{FATAL}the executable {exe}: {why}")))?;
+                if let Some(error) = answer.get("fault").or_else(|| answer.get("error")) {
+                    return Err(Handoff(format!("{FATAL}the executable {exe}: {error}")));
+                }
+                let read = |k: usize| -> Option<Vec<legal::SideAct>> {
+                    answer["rootMenus"]["menus"][k]
+                        .as_array()?
+                        .iter()
+                        .map(|a| a.as_array()?.iter().map(legal::Act::from_json).collect::<Option<Vec<_>>>())
+                        .collect()
+                };
+                match (read(0), read(1)) {
+                    (Some(a), Some(b)) => ([a, b], answer),
+                    _ => return Err(Handoff(format!("{FATAL}the executable {exe} answered no menus"))),
+                }
+            }
+            None => {
+                let reused = match &first_menus {
+                    Some(got) if s == 1 && sides[1].menus_key() == sides[0].menus_key() => Some(got.clone()),
+                    _ => None,
+                };
+                let got = match reused {
+                    Some(got) => got,
+                    None => menus_core(reg, encoder, &side.args, pos, [&node.views[0], &node.views[1]], node.same)
+                        .map_err(|failed| Handoff::of(format!("menus: {failed}")))?,
+                };
+                if s == 0 {
+                    first_menus = Some(got.clone());
+                }
+                let mine = got.1.clone();
+                (mine, move_node_over(reg, encoder, got, node.asked))
+            }
+        };
+        checked(&answer, side.args.rules.mega_from_slots)?;
+        let (strategy, value) = solved_side(&answer, s).map_err(Handoff::of)?;
+        for note in answer["unmodelled"].as_array().into_iter().flatten() {
+            if let Some(text) = note.as_str() {
+                notes.insert(text.to_string());
+            }
+        }
+        side_seconds[s] = started.elapsed().as_secs_f64();
+        let [ours, theirs] = mine;
+        solved.push((if s == 0 { ours } else { theirs }, strategy, value, answer));
+    }
+    let (theirs, foe_strategy, foe_value, foe_answer) = solved.pop().expect("two sides");
+    let (ours, own_strategy, own_value, answer) = solved.pop().expect("two sides");
+    Ok(Decided {
+        kept: [ours, theirs],
+        own_strategy,
+        own_value,
+        foe_strategy,
+        foe_value,
+        answer,
+        foe_answer: Some(foe_answer),
+        notes: json!(notes),
+        used,
+        side_seconds,
+    })
 }

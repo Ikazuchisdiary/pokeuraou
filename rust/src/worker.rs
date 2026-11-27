@@ -49,22 +49,42 @@ const PER_GAME: &[&str] = &[
 /// The pool's number in this process (`poolDefine`'s `id`).
 const POOL: u64 = 1;
 
-struct Team {
-    id: String,
-    name: String,
-    sets: Vec<SheetSet>,
-    species: Vec<String>,
-    record_sets: Vec<Value>,
-    book_sets: Value,
+pub(crate) struct Team {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) sets: Vec<SheetSet>,
+    pub(crate) species: Vec<String>,
+    pub(crate) record_sets: Vec<Value>,
+    pub(crate) book_sets: Value,
 }
 
-struct Queue {
+/// The config's pool's teams, in the shapes the record and the store write.
+pub(crate) fn teams_of(pool: &Value) -> Result<Vec<Team>, String> {
+    Ok(pool["teams"]
+        .as_array()
+        .ok_or("the config's pool has no teams")?
+        .iter()
+        .map(|t| Team {
+            id: t["id"].as_str().unwrap_or_default().to_string(),
+            name: t["name"].as_str().unwrap_or_default().to_string(),
+            sets: t["sets"].as_array().map(|s| s.iter().map(sheet_set).collect()).unwrap_or_default(),
+            species: t["sets"]
+                .as_array()
+                .map(|s| s.iter().map(|x| x["species"].as_str().unwrap_or_default().to_string()).collect())
+                .unwrap_or_default(),
+            record_sets: t["recordSets"].as_array().cloned().unwrap_or_default(),
+            book_sets: t["bookSets"].clone(),
+        })
+        .collect())
+}
+
+pub(crate) struct Queue {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
 }
 
 impl Queue {
-    fn connect(address: &str) -> Result<Queue, String> {
+    pub(crate) fn connect(address: &str) -> Result<Queue, String> {
         let stream = TcpStream::connect(address).map_err(|e| format!("the queue at {address}: {e}"))?;
         let _ = stream.set_nodelay(true);
         let writer = stream.try_clone().map_err(|e| e.to_string())?;
@@ -72,7 +92,7 @@ impl Queue {
     }
 
     /// `WorkClient.take`: the next game's number, or None when the queue is empty.
-    fn take(&mut self) -> Result<Option<u64>, String> {
+    pub(crate) fn take(&mut self) -> Result<Option<u64>, String> {
         self.writer.write_all(b"get\n").map_err(|e| e.to_string())?;
         let mut line = String::new();
         self.reader.read_line(&mut line).map_err(|e| e.to_string())?;
@@ -84,7 +104,7 @@ impl Queue {
     }
 
     /// `WorkClient.finish`.
-    fn finish(&mut self, index: u64) -> Result<(), String> {
+    pub(crate) fn finish(&mut self, index: u64) -> Result<(), String> {
         self.writer.write_all(format!("ok {index}\n").as_bytes()).map_err(|e| e.to_string())
     }
 }
@@ -116,7 +136,7 @@ struct Stats {
     selfswitches: u64,
 }
 
-fn arg(args: &[String], name: &str) -> Option<String> {
+pub(crate) fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|at| args.get(at + 1)).cloned()
 }
 
@@ -128,13 +148,13 @@ pub fn main(args: &[String]) {
 }
 
 /// `JSON` text of `value` with the keys in the order given, for a record that reads as Python's.
-fn ordered(pairs: &[(&str, Value)]) -> String {
+pub(crate) fn ordered(pairs: &[(&str, Value)]) -> String {
     let raw: Vec<(&str, String)> = pairs.iter().map(|(k, v)| (*k, v.to_string())).collect();
     ordered_raw(&raw)
 }
 
 /// `ordered` of values already written as JSON text.
-fn ordered_raw(pairs: &[(&str, String)]) -> String {
+pub(crate) fn ordered_raw(pairs: &[(&str, String)]) -> String {
     let mut out = String::from("{");
     for (k, (key, text)) in pairs.iter().enumerate() {
         if k > 0 {
@@ -148,7 +168,7 @@ fn ordered_raw(pairs: &[(&str, String)]) -> String {
     out
 }
 
-fn set_shm(server: &mut Value, address: &str, block: &Shared) {
+pub(crate) fn set_shm(server: &mut Value, address: &str, block: &Shared) {
     server["address"] = json!(address);
     server["shm"] = json!(block.name());
     server["bytes"] = json!(block.capacity());
@@ -192,22 +212,7 @@ fn run(args: &[String]) -> Result<(), String> {
 
     // The pool, defined once (`poolDefine`) and kept in the shapes the record and the store write.
     let pool_value = &config["pool"];
-    let teams: Vec<Team> = pool_value["teams"]
-        .as_array()
-        .ok_or("the config's pool has no teams")?
-        .iter()
-        .map(|t| Team {
-            id: t["id"].as_str().unwrap_or_default().to_string(),
-            name: t["name"].as_str().unwrap_or_default().to_string(),
-            sets: t["sets"].as_array().map(|s| s.iter().map(sheet_set).collect()).unwrap_or_default(),
-            species: t["sets"]
-                .as_array()
-                .map(|s| s.iter().map(|x| x["species"].as_str().unwrap_or_default().to_string()).collect())
-                .unwrap_or_default(),
-            record_sets: t["recordSets"].as_array().cloned().unwrap_or_default(),
-            book_sets: t["bookSets"].clone(),
-        })
-        .collect();
+    let teams = teams_of(pool_value)?;
     crate::prep::define_pool(&json!({ "id": POOL, "teams": pool_value["teams"], "pairs": pool_value["pairs"] }));
     let template: Vec<(String, Value)> = config["record"]
         .as_array()
@@ -527,7 +532,7 @@ fn play_one(
 }
 
 /// `_apply_chain`'s `Decision` of one self-switch node, as `GameRecord.to_json` writes it.
-fn self_switch_decision(step: &Value) -> Value {
+pub(crate) fn self_switch_decision(step: &Value) -> Value {
     let chooser = step["chooser"].as_u64().unwrap_or(0);
     let options: Vec<Value> = step["options"].as_array().cloned().unwrap_or_default();
     let best = step["best"].as_u64().unwrap_or(0) as usize;
