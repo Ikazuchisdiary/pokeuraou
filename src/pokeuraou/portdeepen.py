@@ -155,10 +155,12 @@ def deepen_move(  # noqa: PLR0913, PLR0915, C901 - the node, the budget and the 
     outside: tuple[Sequence[SideAction], Sequence[SideAction]] | None = None,
     progress: Callable[[Step], None] | None = None,
     hidden: bool = True,
+    grow: Callable[[float], Any] | None = None,
 ) -> Answer:
     """Side ``me``'s deepened answer on the menus ``ours`` (side 0's) x ``theirs`` over the
     other side's completions ``items`` (one exact item for an open node), the budget
-    ``cells`` read by ``cost`` as `deepen._Meter` reads it (None: counted cells)."""
+    ``cells`` read by ``cost`` as `deepen._Meter` reads it (None: counted cells). ``grow``
+    (`deepen.Grow`, IKA-354) is asked before each slice for actions to add to the root."""
     from .beliefnode import _encoder_for, node_request, served_leaf  # noqa: PLC2701
     from .deepen import MAX_LEVELS
     from .encode import rules_of
@@ -235,11 +237,18 @@ def deepen_move(  # noqa: PLR0913, PLR0915, C901 - the node, the budget and the 
             run: dict[str, Any] = {"kind": "deepenRun", "id": ident}
             if cost is None:
                 run["cells"] = int(cells)
+                if grow is not None or progress is not None:
+                    # Slices of a few steps, so the caller hears and widens as the read goes;
+                    # the steps are the same either way (the budget is read before each).
+                    run["steps"] = SLICE_STEPS
             elif wall:
                 # The wall clock: this slice, or what is left of the budget.
                 run["ms"] = max(1.0, min(SLICE_MS, float(cells) - meter(snap)))
             else:
                 run["steps"] = SLICE_STEPS
+            wanted = None if grow is None else grow(meter(snap))
+            if wanted is not None:
+                run["grow"] = [_codes(wanted[0]), _codes(wanted[1])]
             got = port.ask(reg, lambda node, run=run: node._exchange(run))  # noqa: SLF001
             if "fault" in got or "serverError" in got or "tooBig" in got:
                 raise portlp.PortFault("deepenRun", str(got))
@@ -265,6 +274,7 @@ def deepen_move(  # noqa: PLR0913, PLR0915, C901 - the node, the budget and the 
         classes=len(items) if hidden else 0, levels=levels, stop=stop,
         lines=(lines[0], lines[1], lines[2], lines[3]), guarded=int(snap["guarded"]),
         child_q=True, child_passes=int(snap["childPasses"]), child_ranked=int(snap["childRanked"]),
+        grown=int(snap["grown"]), grown_cells=int(snap["grownCells"]),
     )
     announce("done", snap)
     ours_now, theirs_now = (own, other) if me == 0 else (other, own)

@@ -118,3 +118,28 @@ def test_the_port_s_tree_is_the_python_deepening_with_the_q_s_children(pool, ser
             mixed += float(np.max(port.strategy)) < 1 - 1e-6
     assert same == 8, f"only {same} of 8 reads took the same steps"
     assert mixed >= 1, "no mixed answer"
+
+
+def test_a_read_widened_mid_way_keeps_its_tree(pool, served) -> None:  # noqa: ANN001, F811
+    """IKA-354's `grow` on the port's road (the analysis mode widens the root while it reads):
+    the actions asked for join the root once, the read goes on, and the report counts them."""
+    from pokeuraou.actions import side_actions
+
+    pos = _positions(pool, 1, seed=13)[0]
+    ours = list(narrow(pool.reg, pos, 0, limit=4).actions)
+    theirs = list(narrow(pool.reg, pos, 1, limit=4).actions)
+    extra = [a for a in side_actions(pool.reg, pos, 0) if a not in ours][:2]
+    asked: list[float] = []
+
+    def grow(spent: float):  # noqa: ANN202
+        asked.append(spent)
+        return (extra, []) if len(asked) == 2 else None
+
+    got = humanplay.solve_move(pool.reg, pos, 0, ours, theirs, None, served, budget=Budget.matrix(),
+                               exact=True, cells=3000, levels=4, road="port", grow=grow)
+    assert len(asked) >= 2 and got.deepened.grown == len(extra) == 2
+    assert got.deepened.grown_cells == 2 * len(theirs)
+    assert len(got.ours) == len(ours) + 2 and got.deepened.expanded > 0
+    plain = humanplay.solve_move(pool.reg, pos, 0, ours, theirs, None, served,
+                                 budget=Budget.matrix(), exact=True, cells=3000, levels=4, road="port")
+    assert plain.deepened.grown == 0 and len(plain.ours) == len(ours)

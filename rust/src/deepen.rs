@@ -18,7 +18,7 @@
 //!   "outside": [A0, A1] | null,      // the swap oracle's candidates (`sall`: every legal action)
 //!   "levels": L, "discount": d | null, "branches": 3, "childWidth": 8,
 //!   "qServer": S, "properties": bool, "megaFromSlots": bool }
-//! { "kind": "deepenRun", "id": n, "ms": t?, "cells": c?, "steps": k? }
+//! { "kind": "deepenRun", "id": n, "ms": t?, "cells": c?, "steps": k?, "grow": [A0, A1]? }
 //! { "kind": "deepenEnd", "id": n }
 //! ```
 //!
@@ -302,6 +302,8 @@ struct Read {
     child_passes: u64,
     child_ranked: u64,
     wait_us: f64,
+    grown: u64,
+    grown_cells: u64,
     elapsed: std::time::Duration,
 }
 
@@ -858,6 +860,67 @@ impl Read {
         Ok(true)
     }
 
+    /// Widen the root mid-read (`deepen._grow_belief`, IKA-354): `add` is side 0's and side 1's
+    /// actions; those not on the root's menus yet are appended (this side's as rows, the other
+    /// side's as columns) and filled at depth 1 in every completion, and the root is solved
+    /// again. Every refined cell keeps its index and its tree. A root the LP cannot solve is put
+    /// back whole. Returns the actions added.
+    fn grow(&mut self, reg: &Reg, encoder: &crate::encode::Encoder, add: [Vec<SideAct>; 2]) -> Result<usize, Value> {
+        let [a0, a1] = add;
+        let (mine, theirs) = if self.root.side == 0 { (a0, a1) } else { (a1, a0) };
+        let fresh = |list: Vec<SideAct>, menu: &[SideAct]| -> Vec<SideAct> {
+            let mut seen: HashSet<String> = menu.iter().map(choice).collect();
+            list.into_iter().filter(|a| seen.insert(choice(a))).collect()
+        };
+        let rows = fresh(mine, &self.root.own);
+        let cols = fresh(theirs, &self.root.other);
+        if rows.is_empty() && cols.is_empty() {
+            return Ok(0);
+        }
+        let before = (self.root.prices.clone(), self.root.eq.clone(), self.root.own.clone(), self.root.other.clone());
+        let spent = self.spent;
+        if !rows.is_empty() {
+            let other = self.root.other.clone();
+            let lines = self.root_fill(reg, encoder, &rows, &other)?;
+            for (p, line) in self.root.prices.iter_mut().zip(lines) {
+                p.extend(line);
+            }
+            self.root.own.extend(rows.iter().cloned());
+            self.spent += (rows.len() * other.len() * self.root.comps.len()) as u64;
+            self.fills += 1;
+        }
+        if !cols.is_empty() {
+            let own = self.root.own.clone();
+            let lines = self.root_fill(reg, encoder, &own, &cols)?;
+            let (m, n, c) = (own.len(), self.root.other.len(), cols.len());
+            for (p, line) in self.root.prices.iter_mut().zip(lines) {
+                let mut grown = Vec::with_capacity(m * (n + c));
+                for i in 0..m {
+                    grown.extend_from_slice(&p[i * n..(i + 1) * n]);
+                    grown.extend_from_slice(&line[i * c..(i + 1) * c]);
+                }
+                *p = grown;
+            }
+            self.root.other.extend(cols.iter().cloned());
+            self.spent += (m * c * self.root.comps.len()) as u64;
+            self.fills += 1;
+        }
+        if !self.root.solve() {
+            (self.root.prices, self.root.eq, self.root.own, self.root.other) = before;
+            self.grown_cells += self.spent - spent;
+            return Ok(0);
+        }
+        if let Some(oracle) = self.oracle.as_mut() {
+            for (role, list) in [(0, &rows), (1, &cols)] {
+                let known: HashSet<String> = oracle.candidates[role].iter().map(choice).collect();
+                oracle.candidates[role].extend(list.iter().filter(|a| !known.contains(&choice(a))).cloned());
+            }
+        }
+        self.grown += (rows.len() + cols.len()) as u64;
+        self.grown_cells += self.spent - spent;
+        Ok(rows.len() + cols.len())
+    }
+
     fn known_pair(&self, pair: &(String, String)) -> bool {
         self.oracle.as_ref().is_some_and(|o| o.known.contains_key(pair))
     }
@@ -992,6 +1055,8 @@ impl Read {
             "childPasses": self.child_passes,
             "childRanked": self.child_ranked,
             "waitUs": self.wait_us,
+            "grown": self.grown,
+            "grownCells": self.grown_cells,
             "elapsedMs": self.elapsed.as_secs_f64() * 1e3,
             "unmodelled": self.notes.iter().collect::<Vec<_>>(),
         })
@@ -1188,6 +1253,8 @@ fn start(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Result<V
         child_passes: 0,
         child_ranked: 0,
         wait_us: 0.0,
+        grown: 0,
+        grown_cells: 0,
         elapsed: std::time::Duration::ZERO,
     };
     let (own, other) = (read.root.own.clone(), read.root.other.clone());
@@ -1222,7 +1289,18 @@ pub fn deepen_run(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) ->
     let Some(mut read) = READS.with(|reads| reads.borrow_mut().remove(&id)) else {
         return json!({ "fault": format!("no deepening is held under {id} (the port restarted?)") });
     };
-    let got = read.run(reg, encoder, value["cells"].as_u64(), value["ms"].as_f64(), value["steps"].as_u64());
+    // IKA-354's widening of the root, asked before the slice (the analysis mode's `grow`).
+    let grown = match value.get("grow").and_then(Value::as_array).filter(|g| g.len() == 2) {
+        None => Ok(0),
+        Some(lists) => match (read_codes(&lists[0], "grow[0]"), read_codes(&lists[1], "grow[1]")) {
+            (Ok(a), Ok(b)) => read.grow(reg, encoder, [a, b]),
+            (Err(e), _) | (_, Err(e)) => Err(json!({ "fault": e })),
+        },
+    };
+    let got = match grown {
+        Ok(_) => read.run(reg, encoder, value["cells"].as_u64(), value["ms"].as_f64(), value["steps"].as_u64()),
+        Err(failed) => Err(failed),
+    };
     let answer = match got {
         Ok(why) => {
             let mut answer = read.snapshot();

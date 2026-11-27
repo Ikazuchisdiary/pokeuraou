@@ -1334,14 +1334,14 @@ def solve_move(
     if cells and (road or DEEPEN_ROAD) == "port":
         from . import portdeepen
 
-        if child_q is not None or grow is not None:
-            raise ValueError("the port's deepening ranks its children by the Q's 8 and does not "
-                             "grow the root: no child_q, no grow (IKA-464)")
+        if child_q is not None:
+            raise ValueError("the port's deepening ranks its children by the Q's 8: no child_q "
+                             "(IKA-464)")
         items = list(open_spreads(pos)[you] if exact else (spreads or {})[you])
         got = portdeepen.deepen_move(
             reg, pos, me, list(ours), list(theirs), items, leaf, budget=budget, cells=cells,
             cost=cost, levels=levels, discount=discount, outside=outside, progress=progress,
-            hidden=not exact,
+            hidden=not exact, grow=grow,
         )
         return SolvedMove(
             strategy=got.strategy, model=_averaged(got.replies, [item.weight for item in items]),
