@@ -777,7 +777,6 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("many") => many(reg, &value),
         // IKA-381: games solved here (HiGHS), for `portlp.py`.
         Ok(value) if value["kind"].as_str() == Some("lp") => crate::lp::lp_command(&value),
-        Ok(value) if value["kind"].as_str() == Some("lpCounts") => crate::lp::report(),
         // IKA-455: a belief node's matrices folded from the fills' span blocks and the values,
         // and its Bayesian games solved (`beliefnode.rs`; `portlp.py`, off by default).
         Ok(value) if value["kind"].as_str() == Some("beliefFold") => crate::beliefnode::belief_fold(&value),
