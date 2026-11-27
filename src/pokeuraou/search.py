@@ -805,7 +805,7 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
     gets the same menus to the bit (the Q's answer for a row moves with its batch).
     ``stack`` scores the gathered sub-games in one forward pass (`port.score_stacked`)
     instead of a pass each, and the ended branches of all the cells in one call (IKA-363):
-    not the same leaf to the last places, so only the ladder asks.
+    not the same leaf to the last places, so only the ladder asked (IKA-464 removed it).
     """
     from .narrow import narrow_many
 
@@ -957,7 +957,8 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                 sub.value = float(value)
 
     if WORK is not None:
-        # IKA-367: the work a count clock charges (`ladder`); nothing read back here.
+        # IKA-367: the work a count clock charged (the ladder's, until IKA-464); nothing read
+        # back here.
         # IKA-378: a sub-game taken from the table or from an earlier one of this call is
         # charged as if it were filled -- the count clock reads the same stages either way.
         WORK["turns"] += len(cells)
@@ -1046,12 +1047,12 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
 
 
 #: The depth-2 work `_refine_cells` has done, counted into this dict when it is one (keys
-#: ``turns``, ``subgames``, ``cells``, ``qs``): what `ladder`'s count clock charges
-#: (IKA-367). None: nothing counted, and nothing else changes either way.
+#: ``turns``, ``subgames``, ``cells``, ``qs``): what the ladder's count clock charged
+#: (IKA-367; IKA-464 removed the ladder). None: nothing counted, and nothing else changes either way.
 WORK: dict[str, int] | None = None
 
 #: IKA-378: the read's table of child sub-games (`subshare.Table` / `Local`), or None (the
-#: default, and everything but the ladder): with one, `_refine_cells` fills a sub-game --
+#: default; only the ladder set one, until IKA-464): with one, `_refine_cells` fills a sub-game --
 #: a kept branch's child with its two menus and knock-out fork, by the port's digest of the
 #: child (`rustnode.DIGESTS` must be on) -- only when neither the table nor an earlier
 #: sub-game of the same call has it, and keeps what it solves. The count clock charges a
@@ -1062,7 +1063,7 @@ WORK: dict[str, int] | None = None
 SHARE: Any = None
 
 #: IKA-374: with `WORK` counted, the same work cell by cell, appended here when it is a list
-#: (`ladder`'s reads ahead take some cells of a chunk and not others). None: not kept.
+#: (the ladder's reads ahead took some cells of a chunk and not others). None: not kept.
 WORK_CELLS: list[dict[str, int]] | None = None
 
 #: ``1`` asks the Q one child at a time in a depth-2 read (`_refine_cells`), for checking

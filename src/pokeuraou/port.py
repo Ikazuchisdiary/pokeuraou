@@ -827,7 +827,8 @@ def score_stacked(
 
     Not `score_segments`: a row's value moves with the rows that share its pass (5.96e-08 on
     the card), so this is a different leaf to the last places, and only a reading that has
-    no earlier games to keep (the ladder, off by default) takes it. What it buys is the
+    no earlier games to keep (the depth-2 refine's ``stack``; the ladder's, until IKA-464)
+    takes it. What it buys is the
     passes: a depth-3 stage's child games are a few dozen rows each, and one pass a block
     paid for the call, not the rows. A leaf with no encoded road is `score_segments`'."""
     owner = getattr(evaluate, "__self__", evaluate)

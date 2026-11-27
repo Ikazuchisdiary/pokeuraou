@@ -21,8 +21,8 @@ switch in the middle of a turn) is a dash. Names come from `configs/names/ja.jso
 **A generation game** (`selfplay_line`, `show_game.py --file ... --html`) is turned into the same
 line from its record: what happened is the port's re-resolution of each turn (`show_game.turn_trace`,
 the branch matched to the next recorded position, as the text is), the two reads are the record's
-two seats' own values (``searchValue``, ``foeSearchValue``) and mixtures. The record has no ladder
-stage, clock, per-move values or the model each seat held of the other's mixture, no condition
+two seats' own values (``searchValue``, ``foeSearchValue``) and mixtures. The record has no
+deepening, clock, per-move values or the model each seat held of the other's mixture, no condition
 name, seed or pair: the page says "生成の局" / "—" for them (``generated`` on the line and the
 reads) and does not show a table it has no rows for.
 """
@@ -160,7 +160,8 @@ class Sprites:
 
 
 def stage_depth(stage: str | None) -> int | None:
-    """The depth a ladder stage reads (``d2r12b3k16`` is depth 2), or None."""
+    """The depth a ladder stage reads (``d2r12b3k16`` is depth 2), or None. Only a record from
+    before IKA-464, which removed the ladder, names a stage."""
     got = re.match(r"^d(\d+)", stage or "")
     return int(got.group(1)) if got else None
 
@@ -171,12 +172,13 @@ def read_of(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if row is None or "value0" not in row:
         return None
     stage = None
-    #: A read with no stage finished (the ladder's first did not fit the budget) or no deepening
-    #: is the depth-1 answer: the root's matrix solved (a row with no ``value0`` has no read at all).
+    #: A read with no deepening is the depth-1 answer: the root's matrix solved (a row with no
+    #: ``value0`` has no read at all). A record from before IKA-464 may carry a ladder's stages
+    #: (``ladder``: a read with none finished is the depth-1 answer too).
     depth: int | None = None if row.get("generated") else 1
-    ladder = row.get("ladder")
-    if ladder and ladder.get("rungs"):
-        stage = ladder["rungs"][-1].get("stage")
+    staged = row.get("ladder")
+    if staged and staged.get("rungs"):
+        stage = staged["rungs"][-1].get("stage")
         depth = stage_depth(stage)
     elif isinstance(row.get("deepened"), dict):
         depth = row["deepened"].get("depth", 1)

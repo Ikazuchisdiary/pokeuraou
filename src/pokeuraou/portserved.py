@@ -1,7 +1,8 @@
 """IKA-386: a depth-2 call's sub-games filled, scored and solved in the port, which asks the
 inference server itself -- off by default.
 
-With `portlp` (IKA-381) a ladder read's sub-games crossed three times: the port filled and
+With `portlp` (IKA-381) a depth-2 call's sub-games (`search._refine_cells`; the ladder's read
+until IKA-464 removed it, and no road of a game since) crossed three times: the port filled and
 encoded each node (`port.pending_payoffs`, a crossing per `search.FILL_BATCH`), Python laid
 the arrays into its leaf's shared block and asked the server (`port.score_stacked` ->
 `RemoteValue.from_encoded`), and Python sent the span blocks and the values back to the port
@@ -15,9 +16,10 @@ back is each node's notes and counts and its value; the leaves never reach Pytho
     POKEURAOU_LADDER_PORT_SERVED=1     # on (default off; implies `portlp`'s LPs)
 
 Only where the leaf is an inference server's (`inference.RemoteValue`, unmerged or merged as
-it asks) and the sub-games are scored stacked (`ladder.STACK`); anything else takes the old
-road. The server answers a request by its rows and their count, so the same requests are the
-same values: a read is the `portlp` read to the bit.
+it asks) and the sub-games are scored stacked (`_refine_cells`' ``stack``); anything else takes
+the Python road. The server answers a request by its rows and their count, so the same requests
+are the same values: a call is the `portlp` call to the bit. The switch's name is the ladder's,
+which set it.
 """
 
 from __future__ import annotations
@@ -29,8 +31,8 @@ from typing import Any
 from . import portlp, rustnode, timing
 
 ENV = "POKEURAOU_LADDER_PORT_SERVED"
-#: Whether a ladder read's sub-games go to the port and on to the server. A list so a test
-#: (and a ladder worker, told by its reader) can turn it on in one process.
+#: Whether a depth-2 call's sub-games go to the port and on to the server. A list so a test
+#: can turn it on in one process.
 ON = [os.environ.get(ENV, "0").strip() == "1"]
 #: What went: crossings, nodes filled, the server's requests from the port and their rows
 #: (the positive control: the port asked the server).

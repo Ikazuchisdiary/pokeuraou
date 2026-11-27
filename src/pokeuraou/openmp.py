@@ -4,7 +4,8 @@ torch's CPU work runs on Intel's OpenMP (``libiomp5md``). After each parallel re
 threads do not sleep: for ``KMP_BLOCKTIME`` milliseconds (200 by default) each one spins,
 yielding, waiting for the next region. The agent a person plays (`humanplay`) wakes that
 pool many times a move -- the CPU side of every leaf block it scores -- in its own process
-and in each of the worker processes that expand the deepening's cells ahead, so seven
+and in each of the worker processes that expanded the deepening's cells ahead (Python's
+deepening, which IKA-464 removed), so seven
 threads a process spun almost all the time: measured (IKA-333, 9/27) on a person's game on
 the count clock at 4 threads, 175 CPU seconds for two games, 86 of them in the kernel (the
 yield), on the cores the reading itself needed.

@@ -448,7 +448,7 @@ def _rectangle(
     p: np.ndarray, x: np.ndarray, y: np.ndarray, count: int
 ) -> tuple[list[int], list[int]]:
     """The rows and columns of a stage: the support first, then the rows best against ``y``
-    and the columns worst against ``x`` (`ladder`'s `_order`)."""
+    and the columns worst against ``x`` (the ladder's ``_order``, before IKA-464 removed it)."""
     def order(strength: np.ndarray, value: np.ndarray, larger: bool) -> list[int]:
         support = [k for k in np.argsort(-strength) if strength[k] > 1e-6]
         rest = [k for k in np.argsort(-value if larger else value) if strength[k] <= 1e-6]

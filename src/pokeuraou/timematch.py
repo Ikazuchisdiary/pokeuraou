@@ -497,12 +497,13 @@ def probe_of(last: tuple[Any, ...], rows: Sequence[dict[str, Any]]) -> dict[str,
     """IKA-423: what one seat's read of a move decision says, for a start's selection: the
     move its answer plays most (`SideAction.to_choice`; the first of equals), that move's
     probability, the menu's size, the answer's value in side 0's units and the stage it came
-    from (the last stage of the ladder, or None)."""
-    me, mine, _other, strategy, _model, ladder = last[:6]
+    from (the last stage of a staged read; None since IKA-464 removed the ladder, the one read
+    with stages)."""
+    me, mine, _other, strategy, _model, staged = last[:6]
     x = np.asarray(strategy, dtype=np.float64)
     top = int(np.argmax(x))
     row = rows[-1] if rows else {}
-    rungs = None if ladder is None else ladder.to_json().get("rungs")
+    rungs = None if staged is None else staged.to_json().get("rungs")
     return {
         "side": me, "top": mine[top].to_choice(), "topP": round(float(x[top]), 5),
         "menu": [a.to_choice() for a in mine], "p": [round(float(v), 6) for v in x],
@@ -691,11 +692,14 @@ def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -
     """One seat's read of a move decision as a reader sees it (`--transcript`): its mixture over its
     menu (the heaviest rows, and the sum of the rest), where the move it drew stands, the other
     side's mixture it modelled (weighted over the completions of the hidden bench), and -- when the
-    read is a ladder's, which keeps the matrices at the prices in hand -- the opponent's moves
-    that took most from it against its own mixture, and the one that took most against the move
-    drawn. Values are in the read: the seat's own win rate by the matrices' cells, where a cell
-    that no stage refined keeps its depth-1 price. Not the game's real value."""
-    me, mine, other, strategy, model, ladder = last[:6]
+    read hands over the matrices at the prices in hand (``kept``: ``prices`` a completion, and
+    ``value`` and ``replies`` where it has them) -- the opponent's moves that took most from it
+    against its own mixture, and the one that took most against the move drawn. Values are in
+    the read: the seat's own win rate by the matrices' cells, where a cell that was not read
+    deeper keeps its depth-1 price. Not the game's real value. The ladder handed them over;
+    since IKA-464 removed it no read does (`HumanGame.last_read`'s sixth place is None), so a
+    transcript carries the mixtures only."""
+    me, mine, other, strategy, model, kept = last[:6]
     x = np.asarray(strategy, dtype=np.float64)
     mine_names = [a.to_choice() for a in mine]
     other_names = [a.to_choice() for a in other]
@@ -716,7 +720,7 @@ def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -
         # Every move each mixture plays (probability at least SUPPORT_MIN), heaviest first.
         "supp": _played(mine_names, x), "oppSupp": _played(other_names, y),
     }
-    prices = getattr(ladder, "prices", None)
+    prices = getattr(kept, "prices", None)
     if prices:
         w = np.asarray(weights, dtype=np.float64)
         w = w / w.sum()
@@ -732,11 +736,11 @@ def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -
             exact = float(offset + sum(
                 wk * float((x @ np.asarray(p)).min()) for wk, p in zip(w, prices, strict=True)))
             out["guarantee"] = round(exact, 6)
-            # Against the ladder's own value for the answer (the same thing, in the seat's units):
+            # Against the read's own value for the answer (the same thing, in the seat's units):
             # the record's check that the matrices kept are the ones the answer was solved on.
-            if hasattr(ladder, "value"):
-                out["guaranteeGap"] = abs(exact - (offset + float(ladder.value)))
-            replies = getattr(ladder, "replies", None)
+            if hasattr(kept, "value"):
+                out["guaranteeGap"] = abs(exact - (offset + float(kept.value)))
+            replies = getattr(kept, "replies", None)
             if replies is not None and len(replies) == len(w):
                 # The read's own value from the matrices: the seat's win rate at its answer.
                 out["eq"] = round(float(offset + sum(
@@ -759,7 +763,7 @@ def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -
                 # it), and against the other side's modelled mixture.
                 out["cols"] = other_names
                 out["vs"] = [round(float(v), 6) for v in against]
-                replies = getattr(ladder, "replies", None)
+                replies = getattr(kept, "replies", None)
                 if replies is not None and len(replies) == len(w):
                     out["chosenEv"] = round(float(offset + sum(
                         wk * float(np.asarray(p)[index] @ np.asarray(r))
@@ -778,7 +782,7 @@ def transcript_of(payload: dict[str, Any], played: TimedGame) -> dict[str, Any]:
     game drew (`TimedGame._note_turn`: its trace and where each action's part begins);
     the position the game stopped at. Nothing here is read back by a game. What the line
     does not carry is not made up: a turn that paused has the trace up to the pause only.
-    The two reads of a move decision (each seat's ladder stage, value and clock) are the
+    The two reads of a move decision (each seat's value and clock) are the
     game line's ``moves`` rows, which the reader takes from there by ``decision``.
     """
     decisions = []

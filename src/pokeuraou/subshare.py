@@ -1,13 +1,18 @@
 """IKA-378: a read's child sub-games, read once and shared by every process that reads it.
 
-A depth-2 cell of the ladder's reading (`ladder`, `search._refine_cells`) is its turn, and each
+The read this was built for, the ladder, was removed in IKA-464 (its module `ladder` with it);
+what keeps a table now is the depth-2 refine of a list of cells (`search.SHARE` in
+`search._refine_cells`), which no road of a game takes. The measurements below are the
+ladder's.
+
+A depth-2 cell of the ladder's reading (`search._refine_cells`) was its turn, and each
 kept branch's child position a sub-game: the two sides' menus there, the matrix of their
 turns scored by the leaf, and its value. Other cells reach the same children: in a
 1-process reading at 16 s (L5, count clock), 36% of the sub-games of 8 open positions and 43%
 of 8 hidden ones were a child with the same two menus and knock-out fork as one filled
 before in the same read (24% and 35% of their cells), a third of those in the same call; on
 every core most of the rest are the same stage's cells on other worker processes (IKA-375).
-A deep cell's children (depth 3 and up, `ladder._children_at_once`) are met again as often:
+A deep cell's children (depth 3 and up, the ladder's ``_children_at_once``) were met again as often:
 34-50% of them in the 1-process reads that reached depth 3.
 
 So a sub-game filled and solved is kept here under its key -- the port's digest of the
@@ -17,8 +22,8 @@ sub-game with a key already kept is not filled again; a deep cell's child likewi
 (`kid_key`), with the work its read counted (`pack_work`). Kept per read (`Table.begin`):
 a read's leaf and Q are fixed, and nothing of one read is asked by the next.
 
-`Table` is a lock-free table in shared memory for the ladder's worker processes (created
-by the reader, attached by each worker by name): fixed rows of eight 64-bit words, the last
+`Table` is a lock-free table in shared memory for a read's worker processes (the ladder's
+were created by its reader, and attached by name): fixed rows of eight 64-bit words, the last
 a check word over the others, so a row read while another process writes it -- or two
 processes writing one row at once -- fails its check and reads as absent; a row is found
 within `PROBE` slots of its key or not at all, and a full neighbourhood is overwritten. The

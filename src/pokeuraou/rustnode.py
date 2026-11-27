@@ -103,7 +103,7 @@ def binary_path() -> Path:
 _GAVE_UP = False
 
 #: IKA-370: seconds this process has waited on its ports' answers and the reads it waited
-#: on (`RustNode._with_deadline`), always kept (two clock reads a read): a ladder worker
+#: on (`RustNode._with_deadline`), always kept (two clock reads a read): a reading worker
 #: splits its time into its own CPU, its port and the inference server with it.
 PORT_WAITED = [0.0, 0]
 
@@ -1413,7 +1413,7 @@ class RustNode:
 
     @timing.timed("rust.qmenus")
     def q_menus(self, positions: Sequence[Position], extra: dict[str, Any]) -> dict[str, Any]:
-        """IKA-389 (`portmenus`): `deepen._q_menus` of ``positions`` in one crossing -- the
+        """IKA-389 (`portmenus`): `portmenus.child_menus` of ``positions`` in one crossing -- the
         pools, the Q's requests to the inference server ``extra`` names, the games and the
         menus, built in the port. Each position goes as a held one where it is held."""
         return self._exchange_list(
@@ -2098,8 +2098,8 @@ def _note_repeat(request: dict[str, Any]) -> None:
 
 _HOLD = [False]
 #: IKA-378: a full turn's branches come with the port's digest of each position
-#: (`PortBranch.digest`), by which the ladder shares a child's sub-game across its worker
-#: processes (`subshare`). Off: the requests and answers are the bytes they were.
+#: (`PortBranch.digest`), by which a depth-2 call shares a child's sub-game across worker
+#: processes (`subshare`; the ladder's, until IKA-464). Off: the requests and answers are the bytes they were.
 DIGESTS = [False]
 #: id -> (the object, its entry). The object is held so its id cannot be reused.
 _HELD: dict[int, tuple[Position, _Stored]] = {}

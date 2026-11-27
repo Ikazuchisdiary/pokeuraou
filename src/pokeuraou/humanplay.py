@@ -31,11 +31,13 @@ width first, depth with what is left:
    rows x columns x completions of the person's bench), measured here (IKA-330) per core
    count; an unmeasured count uses the nearest measured one below it, which predicts
    slow and so errs narrow.
-2. The rest of the budget deepens the root best first, hidden nodes included (the ``m``
-   reading with ``h``: `deepen.deepen_belief` / `deepen.deepen_root`), with the root's
-   swap oracle when ``Agent.oracle`` is set (IKA-307: at equal CPU, width alone beat
-   width 12 + deepening at every budget it tried, and the oracle added +14 to +23 Elo to
-   deepening; the tools set it, `PLAY_ORACLE`).
+2. The rest of the budget deepens the root best first, hidden nodes included, in the port
+   (`portdeepen`, IKA-464; the children's menus by the Q's 8), with the root's swap oracle
+   when ``Agent.oracle`` is set (IKA-307: at equal CPU, width alone beat width 12 +
+   deepening at every budget it tried, and the oracle added +14 to +23 Elo to deepening;
+   the tools set it, `PLAY_ORACLE`). The port's deepening was not weaker than Python's
+   (`deepen.py`, the children by `narrow`'s damage order) at the same time: SPRT(-10, 0)
+   H1 over 919 pairs, +12.5 Elo [-2.2, +27.2]; IKA-464 then removed Python's.
 
 **The deadline.** Two clocks, ``wall`` (the default) and ``count``:
 
@@ -477,11 +479,12 @@ PLAY_ORACLE = ALL_ACTIONS
 #: board at equal time waits for IKA-333's tools.
 PLAY_MAX_LEVELS: int | None = 16
 
-#: Threads a move spreads over (IKA-32 stage 2: the port's cells, three worker processes
-#: expanding the deepening's cells ahead, a big game's two LPs at once, the leaf's CUDA
-#: graphs). IKA-32 §12.5: steps in the same seconds were 1.41 / 1.34 / 1.15x at 4 threads
-#: and 1.33 / 1.28 / 1.12x at 8 (5 / 15 / 45 s a move), 16 slower still; 4 also leaves the
-#: other half of an 8-core machine to the analysis mode.
+#: Threads a move spreads over: the port's cell threads (`use_threads`). IKA-32 §12.5
+#: measured 4 on Python's deepening (the port's cells, three worker processes expanding the
+#: deepening's cells ahead, a big game's two LPs at once, the leaf's CUDA graphs): steps in
+#: the same seconds were 1.41 / 1.34 / 1.15x at 4 threads and 1.33 / 1.28 / 1.12x at 8
+#: (5 / 15 / 45 s a move), 16 slower still; 4 also leaves the other half of an 8-core
+#: machine to the analysis mode. The port's deepening (IKA-464) was not measured again.
 PLAY_THREADS = 4
 
 #: This process's CUDA allocator cap, and each worker process's (IKA-334's server cap: a

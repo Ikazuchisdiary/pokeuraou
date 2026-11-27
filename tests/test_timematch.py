@@ -437,7 +437,7 @@ def _action(index: int, target: int | None = None):  # noqa: ANN202
 
 def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it() -> None:
     """`read_summary`: the mixture's heaviest rows and the sum of the rest, where the drawn move
-    stands, the other side's modelled mixture, and from the ladder's matrices the opponent's moves
+    stands, the other side's modelled mixture, and from the read's matrices the opponent's moves
     that take most from the mixture (and from the drawn move). Side 1's matrices are side 0's
     negated, so its own win rate is one more than the entry (the control below breaks that)."""
     from types import SimpleNamespace
@@ -449,8 +449,8 @@ def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it()
     payoff = np.array([[0.9, 0.5, 0.2], [0.4, 0.6, 0.7], [0.5, 0.5, 0.5]])
     for me, offset in ((0, 0.0), (1, 1.0)):
         matrix = payoff if me == 0 else -payoff
-        ladder = SimpleNamespace(prices=[matrix], replies=(y,))
-        got = timematch.read_summary((me, mine, other, x, y, ladder, True), [1.0], mine[1].to_choice())
+        kept = SimpleNamespace(prices=[matrix], replies=(y,))
+        got = timematch.read_summary((me, mine, other, x, y, kept, True), [1.0], mine[1].to_choice())
         assert got["rows"][0] == [mine[0].to_choice(), 0.6] and got["chosenRank"] == 2
         assert got["chosenP"] == 0.3 and got["rowsRest"][0] == 0
         assert got["p"] == [0.6, 0.3, 0.1] and got["q"] == [0.5, 0.5, 0.0]
@@ -485,7 +485,7 @@ def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it()
     lows = [float((x @ m).min()) for m in (payoff, second)]
     assert both["guarantee"] == round(0.5 * lows[0] + 0.5 * lows[1], 6)
     assert both["hard"][0][1] > both["guarantee"]
-    # No matrices (a read without a ladder): the mixtures only, and nothing made up.
+    # No matrices (every read since IKA-464): the mixtures only, and nothing made up.
     plain = timematch.read_summary((0, mine, other, x, y, None, True), [1.0], mine[0].to_choice())
     assert plain["hard"] is None and plain["hardChosen"] is None and "eq" not in plain
     # The control: with side 1's offset dropped the number differs.

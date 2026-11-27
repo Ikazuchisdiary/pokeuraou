@@ -249,7 +249,7 @@ def counts() -> dict[str, int]:
     return dict(COUNTS)
 
 
-#: What a ladder read reports of this road (`tally`), by name.
+#: What a read reported of this road (`tally`), by name (the ladder's, until IKA-464).
 TALLY = ("portMenus", "portBare", "portWholeTurns", "portWrittenOut")
 
 

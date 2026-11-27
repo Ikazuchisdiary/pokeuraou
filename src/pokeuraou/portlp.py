@@ -1,17 +1,19 @@
 """The LPs and folds the port solves (HiGHS in Rust), and the one road a game's nodes take.
 
 `equilibrium.solve` spends more of an LP in Python than in HiGHS: building the model, handing
-it over and reading the answer (0.31 ms an LP against 0.22 ms of HiGHS, IKA-379), and a
-ladder worker solves about 110 of the Q's games and 70 sub-games a node second. The port
-solves them with the same HiGHS (1.12.0, scipy's commit), the same model and the same options
-(`rust/src/lp.rs`), so an answer is `solve`'s to the bit wherever HiGHS takes the same pivots
--- all 59,050 LPs captured from open and hidden reads did (records/IKA-381.md).
+it over and reading the answer (0.31 ms an LP against 0.22 ms of HiGHS, IKA-379), and the
+read that set this switch (the ladder, which IKA-464 removed) solved about 110 of the Q's
+games and 70 sub-games a node second in one worker. The port solves them with the same HiGHS
+(1.12.0, scipy's commit), the same model and the same options (`rust/src/lp.rs`), so an
+answer is `solve`'s to the bit wherever HiGHS takes the same pivots -- all 59,050 LPs captured
+from open and hidden reads did (records/IKA-381.md).
 
 Two roads, both one crossing for many games:
 
-* `solve_many`: the Q's games of one `deepen._q_menus` call. The port answers both LPs' values
-  and the cleaned strategies; the rest of `Equilibrium` is built here as `solve` builds it
-  (`equilibrium.assemble`), so the menus are the same menus.
+* `solve_many`: the Q's games of one `portmenus.child_menus` call behind the switch, and of a
+  menu's Q ranking (`qrank`). The port answers both LPs' values and the cleaned strategies;
+  the rest of `Equilibrium` is built here as `solve` builds it (`equilibrium.assemble`), so
+  the menus are the same menus.
 * `solve_subs`: the sub-games of one `search._refine_cells` call once their leaves are scored.
   A filled node is folded in the port from the span block its `fills` answer carried, its
   replacements' fold trees and the leaf values -- `port._folded`'s arithmetic: numpy's dot in
@@ -19,20 +21,19 @@ Two roads, both one crossing for many games:
   `fold.fold_value`'s Python sums -- and solved; a matrix already whole (the hp-share road) is
   solved as it is.
 
-IKA-387 adds the rest of the ladder's LPs, on the same `lp` command:
+`solve_subs` and `child_menus` serve the depth-2 refine of a list of cells
+(`search._refine_cells`), which no road of a game takes since IKA-464 removed the ladder and
+Python's deepening.
 
-* `solve_many` again for a deep cell's children's own matrices (`ladder._kids_fill`), all of
-  one call in one crossing;
-* `solve_bayesian_many` for their pass rectangles (`ladder._kids_solve`: a pass's children
-  in one crossing; the reader's `deep_passes` gathers the children whose pass came back in
-  one round of answers), the answer built by `equilibrium.assemble_bayesian` as
-  `solve_bayesian` builds it;
-* `solve_bayesian_one` for a stage's rectangle (`ladder.read`) and the answer a stage's
-  tail reads ahead from (`ladder._Ahead._answer`).
+IKA-387 added `solve_bayesian_many` and `solve_bayesian_one` on the same `lp` command (for the
+ladder's deep cells and stages then). `solve_bayesian_many` is asked by a side's Bayesian game
+(`search.belief_solve`) and the selection's deep reading (`selection_deep`), whatever the
+switch; `solve_bayesian_one` has no caller left. The answer is built by
+`equilibrium.assemble_bayesian` as `solve_bayesian` builds it.
 
     POKEURAOU_LADDER_PORT_LP=1     # on (default off; data generation never sets it)
 
-Off, nothing of the ladder's here runs and every answer is Python's. A game the port cannot
+Off, `solve_subs`, `solve_one` and `solve_bayesian_one` are Python's. A game the port cannot
 solve is `solve`'s error (`EquilibriumError`, or `ValueError` for a non-finite matrix), where
 `solve` would have raised it.
 
@@ -68,7 +69,8 @@ from .equilibrium import (
 )
 
 ENV = "POKEURAOU_LADDER_PORT_LP"
-#: Whether the ladder's LPs go to the port. A list so a test can turn it on in one process.
+#: Whether the depth-2 refine's LPs go to the port (the switch's name is the ladder's, which
+#: set it). A list so a test can turn it on in one process.
 ON = [os.environ.get(ENV, "0").strip() == "1"]
 #: What went: crossings, games (`solve_many`), Bayesian games (`solve_bayesian_many`),
 #: sub-games folded in the port and given whole, the LPs the port reports it solved (the
