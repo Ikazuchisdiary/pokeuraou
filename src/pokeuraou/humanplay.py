@@ -2237,8 +2237,9 @@ class HumanGame:
         draws folded at its weights (IKA-352) and the LP. Only this side's game is asked.
         A leaf that is not the inference server's stops the game with
         `beliefnode.UnservedLeaf`, and a game the LP does not solve (or a matrix it refuses)
-        stops it with `EquilibriumError` (`ValueError`) naming the phase; neither falls back
-        to a uniform mixture."""
+        stops it with `EquilibriumError` (a `RuntimeError`; a `ValueError` from the request
+        is rebuilt as one, the original kept as its `__cause__`) naming the phase; neither
+        falls back to a uniform mixture."""
         from . import replacenode
 
         reg, record = self.reg, self.record
