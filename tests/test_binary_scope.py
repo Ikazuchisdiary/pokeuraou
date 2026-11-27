@@ -71,11 +71,18 @@ def test_a_scope_asks_the_other_executable_and_hands_back(pool, copy_of_the_port
     assert rustnode.node_for(pool.reg) is own
 
 
-def test_a_scope_does_not_hold_positions(pool, copy_of_the_port) -> None:  # noqa: ANN001
+def test_a_scope_holds_positions_in_its_own_process(pool, copy_of_the_port) -> None:  # noqa: ANN001
+    """IKA-460: with positions held by number, the scope's process is told what a request names
+    (`_known` is its own set), and it forgets with the others when a decision ends."""
     rustnode.hold_positions()
     try:
-        with pytest.raises(RuntimeError, match="hold"), rustnode.binary_scope(copy_of_the_port):
-            pass
+        own = rustnode.node_for(pool.reg)
+        with rustnode.binary_scope(copy_of_the_port):
+            inside = rustnode.node_for(pool.reg)
+            assert inside is not own and inside.binary == copy_of_the_port
+            inside._known.add(2)  # noqa: SLF001
+            rustnode.hold_positions()  # a new decision: every process forgets
+            assert not inside._known and inside._forget_owed  # noqa: SLF001
     finally:
         rustnode.hold_positions(False)
 

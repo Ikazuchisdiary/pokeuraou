@@ -638,10 +638,9 @@ def main(argv: list[str] | None = None) -> None:
     client = WorkClient(args.queue) if args.queue else None
     # IKA-460 step 1: the board's hidden-bench completions and the game's steps are the port's,
     # as generation's (`tools/selfplay.py`): it holds this worker's positions by number. An arm
-    # on another executable (`--rust-binary`) reads its search from that process, which does not
-    # hold the module's table, so a board with one keeps Python's completions.
-    if args.rust_binary is None and args.baseline_rust_binary is None:
-        rustnode.hold_positions()
+    # on another executable (`--rust-binary`) is told the positions its search names the first
+    # time it sees them, and is sent a branch another process kept as text.
+    rustnode.hold_positions()
 
     def work() -> Iterator[int]:
         if client is None:

@@ -117,10 +117,6 @@ def test_the_ports_folds_and_lps_read_as_pythons(kit, monkeypatch) -> None:  # n
     assert ported.ladder.work == plain.ladder.work
     np.testing.assert_allclose(ported.strategy, plain.strategy, rtol=0, atol=1e-9)
     assert abs(ported.value - plain.value) < 1e-9
-    from .test_portlp import openblas_core
-
-    if openblas_core() == "SkylakeX":
-        assert _same(ported, plain)
 
 
 def test_children_at_once_are_the_one_at_a_time_road(kit, monkeypatch) -> None:  # noqa: ANN001

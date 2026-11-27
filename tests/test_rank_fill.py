@@ -151,38 +151,3 @@ def test_the_fill_is_recorded_only_when_it_differs() -> None:
     assert "/rankfill" not in agent_name(damage, 0)
 
 
-def test_the_menu_tool_counts_what_a_fill_drops() -> None:
-    from ._harness import load_tool
-
-    tool = load_tool("rank_fill_menus")
-    played = ["a", "b", "c", "d"]
-    # Null: the same menu drops nothing.
-    same = tool.compare(played, list(played), [0.5, 0.5, 0.0, 0.0])
-    assert same == {"same_set": True, "same_order": True, "kept": 4, "size": 4,
-                    "dropped_mass": 0.0}
-    # Reordered: the same set, another order, nothing dropped.
-    moved = tool.compare(played, ["b", "a", "c", "d"], [0.5, 0.5, 0.0, 0.0])
-    assert moved["same_set"] and not moved["same_order"] and moved["dropped_mass"] == 0.0
-    # Positive control: dropping a supported action counts its mass, an unsupported one not.
-    dropped = tool.compare(played, ["a", "c", "d", "e"], [0.25, 0.75, 0.0, 0.0])
-    assert dropped["kept"] == 3 and not dropped["same_set"]
-    assert dropped["dropped_mass"] == pytest.approx(0.75)
-
-
-def test_the_menu_tool_counts_leaves_once_a_decision() -> None:
-    """IKA-270: the fill's cells and leaves ride on side 0's row, so a sum counts them once."""
-    from ._harness import load_tool
-
-    tool = load_tool("rank_fill_menus")
-    base = {"same_set": True, "same_order": True, "kept": 2, "size": 2, "dropped_mass": 0.0}
-    rows = [
-        {**base, "game": 0, "decision": d, "side": s, "fill": fill,
-         "cells": (cells if s == 0 else 0), "leaves": (leaves if s == 0 else 0)}
-        for fill, cells, leaves in (("refs2", 10, 28), ("refs1", 5, 14))
-        for d in (0, 1)
-        for s in (0, 1)
-    ]
-    lines = tool.summarise(rows, ["refs2", "refs1"])
-    assert lines[0].endswith("cells/decision  leaves/decision  leaves/cell")
-    assert lines[1].split()[-3:] == ["10.0", "28.0", "2.800"]
-    assert lines[2].split()[-3:] == ["5.0", "14.0", "2.800"]

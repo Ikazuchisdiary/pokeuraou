@@ -562,14 +562,14 @@ def binary_scope(binary: Path | str | None):  # noqa: ANN201
     For an agent whose rules are another build's -- a match of a port change against the
     port before it, one arm's search read through each. ``None`` is no scope at all: the
     roads answer from the module's process as ever, byte for byte. The other build's
-    process is started on first use and kept (`reset` closes it). Not with positions held
-    by number (`hold_positions`): that table is the module's own process's.
+    process is started on first use and kept (`reset` closes it). With positions held by
+    number (`hold_positions`), each process is told the positions a request names the first
+    time it sees them (`_defined`), and a branch another process kept is written out for it
+    (`HeldPosition`, IKA-460).
     """
     if binary is None:
         yield
         return
-    if _HOLD[0]:
-        raise RuntimeError("a binary scope does not hold positions (hold_positions is on)")
     before = getattr(_LOCAL, "binary", None)
     _LOCAL.binary = Path(binary)
     try:
@@ -2284,7 +2284,7 @@ def _forget() -> None:
     _DELTAS.clear()
     # And the port's: a `forget` line goes ahead of the next request to each node that
     # holds anything (IKA-302).
-    for node in _NODES.values():
+    for node in (*_NODES.values(), *_BINARY_NODES.values()):
         if node is not None and node._known:  # noqa: SLF001
             node._known.clear()  # noqa: SLF001
             node._forget_owed = True  # noqa: SLF001

@@ -243,7 +243,9 @@ def test_nothing_hidden_on_either_side_is_resolved_once(setup) -> None:  # noqa:
         # Oriented to side 0 on both sides, as `BeliefNode.matrices` always is:
         # `belief_solve` is what turns side 1's into its own game, not this.
         assert node.matrices[side][0].shape == (len(ours), len(theirs))
-        np.testing.assert_allclose(node.matrices[side][0], expected, rtol=0, atol=1e-12, err_msg=f"side {side}")
+        np.testing.assert_allclose(
+            node.matrices[side][0], expected, rtol=0, atol=1e-12, err_msg=f"side {side}"
+        )
     assert reference.scores.passes == once, (once, reference.scores.passes)
     assert node.matrices[0][0] is not node.matrices[1][0], (
         "the two sides hold one array; a caller that edits its own would edit the other's"
