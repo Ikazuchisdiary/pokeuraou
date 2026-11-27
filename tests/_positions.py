@@ -1,5 +1,6 @@
-"""Positions several port tests read. They lived in `tests/test_ladder.py` and
-`tests/test_portserved.py`, which IKA-464 removed with the ladder."""
+"""Positions several port tests read. They lived in `tests/test_ladder.py`, which IKA-464
+removed with the ladder, and in a test of the depth-2 read's served fills, which IKA-464
+removed with that read."""
 
 from __future__ import annotations
 

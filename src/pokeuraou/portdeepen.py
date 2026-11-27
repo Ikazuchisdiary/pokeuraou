@@ -91,7 +91,7 @@ def _installed_q(reg: Regulation) -> Any:  # noqa: ANN401 - the installed Q
 
 
 def _q_server(reg: Regulation) -> dict[str, Any]:
-    """The installed Q's server, as `qMenus` reads it."""
+    """The installed Q's server, as the port's Q menus read it (`qmenus.rs`)."""
     from . import qrank
 
     model = _installed_q(reg)

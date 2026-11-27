@@ -1,4 +1,4 @@
-//! IKA-389 `qMenus`: a depth-2 read's children's menus by the Q, in one crossing.
+//! IKA-389: positions' menus by the Q, built in the port.
 //!
 //! `deepen._q_menus` built each child's two menus in the worker's Python: both sides' legal
 //! pools (`qhead.legal_pool`), the Q's arrays (`qrank._pool_arrays`: the position's
@@ -6,7 +6,9 @@
 //! inference server per `Q_MENU_CHUNK` children (`RemoteQ.batched`), the game on each
 //! matrix (`equilibrium.solve`, or its fallback the mean against every reply), and each
 //! side's `width` best by `narrow` (no cover): highest score first, ties by the choice text.
-//! Here the port does all of it and hands back the menus alone.
+//! Here the port does all of it: `menus_of` for the port's deepening (`deepen.rs`), and
+//! `rootMenus` / `moveNode` for a move node's own two menus. The `qMenus` request that sent
+//! the deepening's children from Python went in IKA-464.
 //!
 //! The pools are the Python's action for action (`legal.rs`), the arrays are laid byte for
 //! byte into the same block in `RemoteQ._lay`'s layout, the same requests go to the server,
@@ -23,7 +25,7 @@ use serde_json::{json, Value};
 /// Numbers per candidate the Q reads from the port (`qhead.FEATURE_WIDTH`).
 const FEATURES: usize = crate::qfeatures::WIDTH;
 
-/// The positive control and the clocks of the process's `qMenus`, for `lpCounts`-like reads.
+/// The positions this process built Q menus for (`menus_of`, `rootMenus`), a positive control.
 pub static MENUS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn align(offset: usize) -> usize {
@@ -220,69 +222,17 @@ fn top(pool: &[SideAct], scores: &[f64], width: usize) -> Vec<usize> {
     order
 }
 
-pub fn q_menus(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
-    let Some(list) = value["requests"].as_array() else {
-        return json!({ "error": "`qMenus` without a list of requests" });
-    };
-    let width = value["width"].as_u64().unwrap_or(0) as usize;
-    if width < 1 {
-        return json!({ "error": "`qMenus`: width must be at least 1" });
-    }
-    let chunk = value["chunk"].as_u64().unwrap_or(16).max(1) as usize;
-    let eps = value.get("eps").and_then(Value::as_f64).unwrap_or(1e-9);
-    let properties = value.get("properties").and_then(Value::as_bool).unwrap_or(true);
-    let rules = EncodeRules {
-        mega_from_slots: value.get("megaFromSlots").and_then(Value::as_bool).unwrap_or(false),
-    };
-    let server = match Server::from_json(&value["server"]) {
-        Err(e) => return json!({ "error": e }),
-        Ok(server) => server,
-    };
-    let positions: Vec<Position> = list.iter().map(|one| crate::held::position(&one["position"])).collect();
-    for pos in &positions {
-        if &*pos.format != reg.format_id.as_str() {
-            return json!({ "error": format!("position is {} but the regulation is {}", pos.format, reg.format_id) });
-        }
-    }
-    let lps_before = crate::lp::LPS.load(std::sync::atomic::Ordering::Relaxed);
-    let got = match menus_of(reg, encoder, &positions, width, &server, rules, properties, eps, chunk) {
-        Ok(got) => got,
-        Err(answer) => return answer,
-    };
-    let side_json = |side: &[SideAct]| -> Value {
-        Value::Array(side.iter().map(|a| Value::Array(a.iter().map(legal::Act::to_json).collect())).collect())
-    };
-    let menus: Vec<Value> = got.menus.iter().map(|[a, b]| json!([side_json(a), side_json(b)])).collect();
-    json!({
-        "kind": "qMenus",
-        "menus": menus,
-        "asked": got.asked,
-        "unsolved": got.unsolved,
-        "lps": crate::lp::LPS.load(std::sync::atomic::Ordering::Relaxed) - lps_before,
-        "served": {
-            "requests": got.stats.requests,
-            "waitUs": got.stats.wait_ns as f64 / 1e3,
-            "copyUs": got.stats.copy_ns as f64 / 1e3,
-        },
-        "legalUs": got.legal_ns as f64 / 1e3,
-        "arraysUs": got.arrays_ns as f64 / 1e3,
-    })
-}
-
 /// `menus_of`'s answer: each position's two menus (both empty where a side has no legal
-/// action), and what they cost.
+/// action), and what the server was asked.
 pub(crate) struct QMenus {
     pub(crate) menus: Vec<[Vec<SideAct>; 2]>,
-    pub(crate) asked: usize,
-    pub(crate) unsolved: u64,
     pub(crate) stats: Stats,
-    pub(crate) legal_ns: u64,
-    pub(crate) arrays_ns: u64,
 }
 
-/// `qMenus` on typed positions (IKA-464: the port's deepening asks it for a refined cell's
-/// children): each side's `width` best by the Q solved over both legal pools, no cover, one
-/// `q_batch` request per `chunk` positions. A failure is the answer `qMenus` gives for it.
+/// Menus by the Q for typed positions (IKA-464: the port's deepening asks it for a refined
+/// cell's children): each side's `width` best by the Q solved over both legal pools, no
+/// cover, one `q_batch` request per `chunk` positions. A failure comes back as the answer's
+/// fields (`invalid`, `tooBig` or `serverError`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn menus_of(
     reg: &Reg,
@@ -295,17 +245,12 @@ pub(crate) fn menus_of(
     eps: f64,
     chunk: usize,
 ) -> Result<QMenus, Value> {
-    let started = std::time::Instant::now();
     let pools: Vec<[Vec<SideAct>; 2]> =
         positions.iter().map(|pos| [legal::legal_pool(reg, pos, 0), legal::legal_pool(reg, pos, 1)]).collect();
-    let legal_ns = started.elapsed().as_nanos() as u64;
     let wanted: Vec<usize> = (0..positions.len()).filter(|&k| !pools[k][0].is_empty() && !pools[k][1].is_empty()).collect();
     let mut stats = Stats::default();
     let mut menus: Vec<[Vec<SideAct>; 2]> = vec![[Vec::new(), Vec::new()]; positions.len()];
-    let mut unsolved = 0u64;
-    let mut arrays_ns = 0u64;
     for group in wanted.chunks(chunk.max(1)) {
-        let laid = std::time::Instant::now();
         let mut arrays = Vec::with_capacity(group.len());
         for &k in group {
             match pool_arrays(reg, encoder, rules, &positions[k], &pools[k], properties) {
@@ -313,7 +258,6 @@ pub(crate) fn menus_of(
                 Err(e) => return Err(json!({ "invalid": e })),
             }
         }
-        arrays_ns += laid.elapsed().as_nanos() as u64;
         let matrices = ask_chunk(server, &arrays, &mut stats, Op::Batch).map_err(|failed| match failed {
             Failed::Refused { error, oom, cap_gb } => json!({ "serverError": error, "oom": oom, "capGb": cap_gb }),
             Failed::Broken(error) => match error.strip_prefix("\u{0}tooBig ") {
@@ -323,8 +267,7 @@ pub(crate) fn menus_of(
         })?;
         for (&k, q) in group.iter().zip(&matrices) {
             let (m, n) = (pools[k][0].len(), pools[k][1].len());
-            let (both, solved) = scores(q, m, n, eps);
-            unsolved += u64::from(!solved);
+            let (both, _solved) = scores(q, m, n, eps);
             for side in 0..2 {
                 let kept = top(&pools[k][side], &both[side], width);
                 menus[k][side] = kept.iter().map(|&i| pools[k][side][i].clone()).collect();
@@ -332,7 +275,7 @@ pub(crate) fn menus_of(
         }
     }
     MENUS.fetch_add(positions.len() as u64, std::sync::atomic::Ordering::Relaxed);
-    Ok(QMenus { menus, asked: wanted.len(), unsolved, stats, legal_ns, arrays_ns })
+    Ok(QMenus { menus, stats })
 }
 
 /// `legal`: both sides' legal pools of each position, as `qhead.legal_pool` lists them --

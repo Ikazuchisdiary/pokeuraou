@@ -954,7 +954,7 @@ class RustNode:
 
     @timing.timed("rust.lp")
     def lp(self, request: dict[str, Any]) -> dict[str, Any]:
-        """IKA-381: an `lp` or `folds` request (`portlp`), its one header line back."""
+        """IKA-381: an `lp` request (`portlp`), its one header line back."""
         return self._exchange(request)
 
     @timing.timed("rust.fill")
@@ -1106,8 +1106,8 @@ class RustNode:
         Each request is written as `_payload` writes it alone -- a held position's text
         where its dict would be -- so each is the question its own line would have asked
         (`payloads`, when the caller has written them already). One header line comes
-        back; `many` carries every answer in it, `fills` names each node's header and the
-        body follows as one.
+        back, and it carries every answer (`many`) or the lists asked for (`legal`,
+        `qArrays`).
         """
         with timing.stage("rust.ask"):
             head = json.dumps({"kind": kind, **(extra or {})}, ensure_ascii=False)
@@ -1206,7 +1206,7 @@ class RustNode:
         """`turn` for many (position, actions) in one crossing (IKA-295). A refused turn is
         its refusal's text in place of the answer, where `turn` would have returned None."""
         # IKA-302: with positions held, the port keeps every branch it writes under a
-        # number, and a sub-game's `score` and `fills` name it instead of sending it back.
+        # number, and a later request names it instead of sending it back.
         refs = {"refs": True} if _HOLD[0] and full else {}
         answers = self._many(
             [

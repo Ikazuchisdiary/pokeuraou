@@ -8,12 +8,10 @@
 //! residual check (`_check_result`, 1e-9). The strategies are cleaned as `_clean` cleans
 //! them with a plain sum (IKA-460 dropped numpy's pairwise sum and OpenBLAS's dot order).
 //!
-//! Two commands use it, both off unless a caller asks (`portlp.py`):
+//! The port's own requests (belief nodes, replacements, selection, the deepening) call
+//! `solve` and `solve_bayesian` directly. One command reaches it from Python (`portlp.py`):
 //! * `lp` -- a list of games (a matrix, or a Bayesian game's matrices and weights), each
 //!   answered with both LPs' values and the cleaned strategies.
-//! * `folds` -- sub-games whose leaves a caller has scored: each matrix folded from its
-//!   node's spans (the bytes `fills` sent) and the leaf values, the way `port._folded` folds
-//!   it (a weighted sum of its leaves), then solved; the value.
 
 use serde_json::{json, Value};
 use std::os::raw::{c_char, c_int, c_void};
@@ -71,9 +69,8 @@ const SIMPLEX_DUAL: HighsInt = 1;
 
 /// LPs solved by this process (the positive control: a caller's LPs went through here).
 pub static LPS: AtomicU64 = AtomicU64::new(0);
-/// Games (`lp`) and sub-games (`folds`) answered.
+/// Games answered (`lp`).
 pub static GAMES: AtomicU64 = AtomicU64::new(0);
-pub static FOLDS: AtomicU64 = AtomicU64::new(0);
 
 /// Nanoseconds in making instances, passing models, running and reading solutions (a probe).
 pub static NS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
@@ -504,6 +501,8 @@ pub fn dot(x: &[f64], y: &[f64]) -> f64 {
 /// A sub-game's matrix from its node's spans (`encoded_node::write_body`'s span block:
 /// every span's weights, then rows, columns and lengths, then every span's leaf indices)
 /// and the leaves' values, as `port._folded` builds it (a span with no weights stays 0).
+/// IKA-464: only the tests use it now, as the reference a belief node's folds are held to.
+#[cfg(test)]
 pub fn fold(
     block: &[u8],
     count: usize,
@@ -755,32 +754,6 @@ pub fn fold_tree_from_value(value: &Value) -> Result<FoldTree, String> {
     Ok(FoldTree::Avg(out))
 }
 
-/// IKA-386: a sub-game's matrix from its node as the port filled it -- the span block and the
-/// replacement cells' trees (`[[row, column, tree], ...]`) -- and its leaves' values, and its
-/// solved value: `folds`' answer for the node, without the crossing.
-pub fn fold_and_solve(
-    block: &[u8],
-    count: usize,
-    total: usize,
-    folded: &[Value],
-    values: &[f64],
-    m: usize,
-    n: usize,
-) -> Result<Result<Solved, Unsolved>, String> {
-    FOLDS.fetch_add(1, Ordering::Relaxed);
-    let mut payoff = fold(block, count, total, values, m, n)?;
-    for cell in folded {
-        let parts = cell.as_array().filter(|p| p.len() == 3).ok_or("a folded cell is not [row, column, tree]")?;
-        let i = parts[0].as_u64().ok_or("a folded cell's row")? as usize;
-        let j = parts[1].as_u64().ok_or("a folded cell's column")? as usize;
-        if i >= m || j >= n {
-            return Err("a folded cell outside its node".into());
-        }
-        payoff[i * n + j] = fold_value(&fold_tree_from_value(&parts[2])?, values)?;
-    }
-    Ok(solve(&payoff, m, n, 1e-9))
-}
-
 /// The sum of some floats, in order (0.0 when there are none).
 pub fn sum_of(items: impl IntoIterator<Item = f64>) -> f64 {
     items.into_iter().fold(0.0, |s, v| s + v)
@@ -943,58 +916,11 @@ pub fn lp_command(value: &Value) -> Value {
     json!({ "kind": "lp", "answers": answers, "lps": LPS.load(Ordering::Relaxed) - before })
 }
 
-/// `folds`: each sub-game folded from its spans and leaf values (or given whole, `data`) and
-/// solved; its value (`solve(payoff).value`).
-pub fn folds_command(value: &Value) -> Value {
-    let Some(nodes) = value["nodes"].as_array() else {
-        return json!({ "fault": "`folds` without a list of nodes" });
-    };
-    let before = LPS.load(Ordering::Relaxed);
-    let mut answers = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        FOLDS.fetch_add(1, Ordering::Relaxed);
-        let read = || -> Result<(Vec<f64>, usize, usize), String> {
-            if node.get("data").is_some() {
-                // A matrix already whole (no forward pass to share, or a cell folded from a
-                // replacement's tree): solved as it is.
-                return matrix(node);
-            }
-            let m = node["rows"].as_u64().ok_or("a node without rows")? as usize;
-            let n = node["cols"].as_u64().ok_or("a node without cols")? as usize;
-            let count = node["spanCount"].as_u64().ok_or("a node without spanCount")? as usize;
-            let total = node["spanLeaves"].as_u64().ok_or("a node without spanLeaves")? as usize;
-            let block = b64_decode(node["spans"].as_str().ok_or("a node without spans")?)?;
-            let values = f64s(&node["values"])?;
-            let mut payoff = fold(&block, count, total, &values, m, n)?;
-            // `port._folded`: the cells a replacement stopped, after the spans.
-            if let Some(text) = node.get("folded").and_then(Value::as_str) {
-                for (i, j, tree) in folded_cells(text)? {
-                    if i >= m || j >= n {
-                        return Err("a folded cell outside its node".into());
-                    }
-                    payoff[i * n + j] = fold_value(&tree, &values)?;
-                }
-            }
-            Ok((payoff, m, n))
-        };
-        let (payoff, m, n) = match read() {
-            Ok(got) => got,
-            Err(e) => return json!({ "fault": e }),
-        };
-        answers.push(match solve(&payoff, m, n, 1e-9) {
-            Ok(s) => json!({ "value": s.value() }),
-            Err(why) => unsolved_json(why),
-        });
-    }
-    json!({ "kind": "folds", "answers": answers, "lps": LPS.load(Ordering::Relaxed) - before })
-}
-
 /// The counters, for `parallel`'s report and the tests.
 pub fn report() -> Value {
     json!({
         "lps": LPS.load(Ordering::Relaxed),
         "games": GAMES.load(Ordering::Relaxed),
-        "folds": FOLDS.load(Ordering::Relaxed),
         "ns": NS.iter().map(|n| n.load(Ordering::Relaxed)).collect::<Vec<_>>(),
     })
 }

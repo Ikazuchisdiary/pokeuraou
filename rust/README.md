@@ -289,8 +289,10 @@ uv run python tools/generate_queue.py --pool regmc-matchupweb --served --value <
 
 ### 作るのに要るもの：HiGHS（IKA-381、9/29 から）
 
-port は均衡の LP を自分で解けます（`src/lp.rs`、`lp` と `folds` の 2 つの命令。使うのは
-`POKEURAOU_LADDER_PORT_LP=1` のときの読みだけで、既定はオフ。生成は使いません）。LP は
+port は均衡の LP を自分で解きます（`src/lp.rs`）。LP を解くのは、深さ 1 のノード・深掘り・
+選出・交代のノードの要求です。どの要求にも切り替えはありません。Python からは
+`lp` の命令で解けます（`portlp.py`）。IKA-464 で `folds` の命令と切り替えの
+`POKEURAOU_LADDER_PORT_LP` を消しました。LP は
 scipy 1.18.1 と同じ HiGHS 1.12.0 で、`vendor/HiGHS`（scipy/HiGHS 4f96ee8 を固定した
 submodule）を `build.rs` が cmake で静的ライブラリにします。C API の数個の関数は `lp.rs` に
 手で書いてあり、bindgen（libclang）は要りません。`highs-sys` を使わないのは、どのバージョンも
@@ -1042,7 +1044,7 @@ torch は列生成のプロセスの 34.2% なので、その 87% は**プロセ
 * 選び方: `node <regulation.json> --threads N`、無ければ環境変数 `POKEURAOU_PORT_THREADS`、無ければ 1。
   Python からは `rustnode.set_port_threads(n)`（または `RustNode(reg, threads=n)`）、道具では
   `cli.py --port-threads`・`tools/match_queue.py --port-threads`。**生成は 1 のまま**です（CPU は埋まっています）
-* 割るもの: `fill`（目的関数の行列）、符号化ノード（`fill_shared`、`fills` の各ノードも）の各セルの
+* 割るもの: `fill`（目的関数の行列）、符号化ノード（`encoded_node::fill`）の各セルの
   `resolve_turn` と、その交代の中断の再開（`resume_all`）。`many` は要求ごと。葉の共有・符号化・ヘッダは
   今までどおり 1 スレッドで、セルの順に行います（IKA-32 の記録の「S1r」）
 * バイトが同じである理由: 各セルの答えは局面と 2 つの行動だけで決まり、どのスレッドが解いても同じです。

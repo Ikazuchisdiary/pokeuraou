@@ -180,7 +180,7 @@ def turn_in_completion(
             or after.pokemon[slot].slot != slot
         ):
             return None
-    outcomes: list[port.PortBranch] = []
+    outcomes: list[PortBranch] = []
     for branch in turn.outcomes:
         mine = branch.position.sides[side]
         if mine.mega_capable_slots != before.mega_capable_slots:

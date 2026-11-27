@@ -42,10 +42,6 @@ pub struct Request {
     /// Which encoding rule the asking leaf wants (`EncodingRules`, IKA-141). Absent means
     /// the current one, which is what every caller but a fix-measuring match sends.
     pub encoding: crate::encode::EncodeRules,
-    /// The two action lists as the request wrote them, for a `fills` node that reads its
-    /// cells off another's by their actions (IKA-295). Empty everywhere else.
-    pub ours_json: Vec<Value>,
-    pub theirs_json: Vec<Value>,
     /// The position as the request wrote it, for the cell threads to parse their own
     /// copies from (IKA-32: a `Position` holds `Rc`s and cannot be shared between
     /// threads). `Null` when there is no pool, which is every run at one thread.
@@ -121,8 +117,6 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
     };
     Ok(Request {
         json_spans: value.get("jsonSpans").and_then(Value::as_bool).unwrap_or(false),
-        ours_json: Vec::new(),
-        theirs_json: Vec::new(),
         position_json,
         encoding,
         encode,
@@ -664,8 +658,7 @@ fn place_body<R: BufRead, W: Write>(
 ///
 /// Each is answered by the function that answers it alone, in the order sent, so an answer
 /// is the one its own line would have had. What goes is the wait between one answer and
-/// the next request: a depth-2 pass asked for a turn per refined cell and two scores per
-/// sub-game, a line each. A panic on one refuses that one, as it would have refused its
+/// the next request, a line each. A panic on one refuses that one, as it would have refused its
 /// own line, and the rest are answered.
 fn many(reg: &Reg, value: &Value) -> Value {
     let Some(list) = value["requests"].as_array() else {
@@ -708,451 +701,6 @@ fn many(reg: &Reg, value: &Value) -> Value {
         _ => list.iter().map(answer_one).collect(),
     };
     json!({ "kind": "many", "answers": answers })
-}
-
-/// Several encoded nodes in one crossing (IKA-295): one header line naming each node's own
-/// header, and one body that is their bodies one after another.
-///
-/// Every node is `encoded_node::fill` of its own request, so its arrays are the bytes its
-/// own crossing would have carried; the reader cuts the body at each node's `bytes`. Only
-/// encoded nodes are taken (a depth-2 pass's sub-games), and a request that would have been
-/// an error alone makes the whole line an error, which the caller treats as it treated one.
-fn fills<R: BufRead, W: Write>(
-    reg: &Reg,
-    encoder: &crate::encode::Encoder,
-    shared: &mut shm::Cache,
-    input: &mut R,
-    stdout: &mut W,
-    value: &Value,
-    parse_us: f64,
-) -> std::io::Result<()> {
-    let fail = |stdout: &mut W, reason: String| -> std::io::Result<()> {
-        writeln!(stdout, "{}", json!({ "error": reason }))?;
-        stdout.flush()
-    };
-    let Some(list) = value["requests"].as_array() else {
-        return fail(stdout, "`fills` without a list of requests".into());
-    };
-    let (headers, bodies) = match fill_list(reg, encoder, list) {
-        Err(reason) => return fail(stdout, reason),
-        Ok(filled) => filled,
-    };
-    let total: usize = headers.iter().map(|h| h["bytes"].as_u64().unwrap_or(0) as usize).sum();
-    let write_all = |sink: &mut dyn Write| -> std::io::Result<()> {
-        for (encoded, leaf_values, spans) in &bodies {
-            crate::encoded_node::write_body(sink, encoded, leaf_values, spans)?;
-        }
-        Ok(())
-    };
-    let mut header = json!({ "kind": "encodedMany", "nodes": headers, "bytes": total });
-    let target = value.get("shm").map(|block| shm::Target {
-        name: block.get("name").and_then(Value::as_str).map(String::from),
-        capacity: block.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
-    });
-    let Some(target) = target else {
-        header["via"] = json!("pipe");
-        writeln!(stdout, "{}", with_timings(&header, parse_us))?;
-        write_all(stdout)?;
-        return stdout.flush();
-    };
-    // `place_body`'s three roads, for a body written by `write_all`.
-    if shm::place(shared, &target, total, |sink| write_all(sink)).is_some() {
-        header["via"] = json!("shm");
-        writeln!(stdout, "{}", with_timings(&header, parse_us))?;
-        return stdout.flush();
-    }
-    header["via"] = json!("grow");
-    writeln!(stdout, "{}", with_timings(&header, parse_us))?;
-    stdout.flush()?;
-    let mut reply = String::new();
-    if input.read_line(&mut reply)? == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "the caller was asked for a block and went away",
-        ));
-    }
-    let offered: Value = serde_json::from_str(reply.trim()).unwrap_or(Value::Null);
-    let grown = shm::Target {
-        name: offered.get("name").and_then(Value::as_str).map(String::from),
-        capacity: offered.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
-    };
-    if shm::place(shared, &grown, total, |sink| write_all(sink)).is_some() {
-        writeln!(stdout, "{}", json!({ "via": "shm" }))?;
-        return stdout.flush();
-    }
-    writeln!(stdout, "{}", json!({ "via": "pipe" }))?;
-    write_all(stdout)?;
-    stdout.flush()
-}
-
-/// A filled node waiting for its leaves' values (`fills_served`).
-struct Waiting {
-    index: usize,
-    encoded: crate::encode::Encoded,
-    rows: usize,
-    spans: Vec<u8>,
-    span_count: usize,
-    span_leaves: usize,
-    folded: Vec<Value>,
-    decided: Vec<(usize, f64)>,
-}
-
-/// A node scored and not solved yet: its spans, trees and leaves' values.
-struct Scored {
-    index: usize,
-    spans: Vec<u8>,
-    span_count: usize,
-    span_leaves: usize,
-    folded: Vec<Value>,
-    values: Vec<f64>,
-}
-
-/// What `fills_served` holds between its crossings: the nodes waiting to be scored, the batch
-/// the server is scoring, and the nodes scored and not solved.
-struct ServedCall<'a> {
-    server: crate::served::Server,
-    widths: &'a crate::encode::Widths,
-    net_scores_ends: bool,
-    shapes: Vec<(usize, usize)>,
-    stats: crate::served::Stats,
-    ended: u64,
-    waiting: Vec<Waiting>,
-    /// The batch sent and its nodes (their arrays dropped once sent).
-    flight: Option<(crate::served::Batch, Vec<Waiting>)>,
-    scored: Vec<Scored>,
-    /// Read each batch's last answer at once rather than after the next crossing's fill
-    /// (`POKEURAOU_SERVED_OVERLAP=0`, for measuring what the overlap buys).
-    serial: bool,
-}
-
-fn server_failed(failed: crate::served::Failed) -> Value {
-    match failed {
-        crate::served::Failed::Refused { error, oom, cap_gb } => {
-            json!({ "serverError": error, "oom": oom, "capGb": cap_gb })
-        }
-        crate::served::Failed::Broken(error) => json!({ "serverError": error }),
-    }
-}
-
-impl ServedCall<'_> {
-    /// `_refine_cells`' `score()`: every waiting node's rows sent as one batch. The batch
-    /// before it is landed first (the block is the server's until then), and the nodes
-    /// scored so far are solved while the server scores this one.
-    fn score(&mut self, answers: &mut [Value]) -> Result<(), Value> {
-        self.land()?;
-        if self.waiting.is_empty() {
-            return Ok(());
-        }
-        let blocks: Vec<&crate::encode::Encoded> = self.waiting.iter().map(|w| &w.encoded).collect();
-        let rows: Vec<usize> = self.waiting.iter().map(|w| w.rows).collect();
-        let batch = crate::served::begin(&self.server, self.widths, &blocks, &rows, &mut self.stats)
-            .map_err(server_failed)?;
-        let mut nodes: Vec<Waiting> = self.waiting.drain(..).collect();
-        for node in &mut nodes {
-            node.encoded = crate::encode::Encoded::default();
-        }
-        self.flight = Some((batch, nodes));
-        if self.serial {
-            self.land()?;
-        }
-        self.solve(answers)
-    }
-
-    /// The batch in flight's values, each node's with its ended leaves settled.
-    fn land(&mut self) -> Result<(), Value> {
-        let Some((batch, nodes)) = self.flight.take() else {
-            return Ok(());
-        };
-        let values = crate::served::finish(&self.server, batch, &mut self.stats).map_err(server_failed)?;
-        let mut at = 0;
-        for w in nodes {
-            let mut mine = values[at..at + w.rows].to_vec();
-            at += w.rows;
-            // `encode.settle`: an ended leaf is its result, after the pass.
-            for &(i, v) in &w.decided {
-                if i < mine.len() {
-                    self.ended += 1;
-                    if !self.net_scores_ends {
-                        mine[i] = v;
-                    }
-                }
-            }
-            self.scored.push(Scored {
-                index: w.index,
-                spans: w.spans,
-                span_count: w.span_count,
-                span_leaves: w.span_leaves,
-                folded: w.folded,
-                values: mine,
-            });
-        }
-        Ok(())
-    }
-
-    /// Every scored node folded and solved (`folds`), its value into its answer.
-    fn solve(&mut self, answers: &mut [Value]) -> Result<(), Value> {
-        for node in self.scored.drain(..) {
-            let (m, n) = self.shapes[node.index];
-            let solved = crate::lp::fold_and_solve(
-                &node.spans, node.span_count, node.span_leaves, &node.folded, &node.values, m, n,
-            );
-            let answer = &mut answers[node.index];
-            match solved {
-                Err(e) => return Err(json!({ "error": e })),
-                Ok(Ok(s)) => answer["value"] = json!(s.value()),
-                Ok(Err(why)) => {
-                    for (key, text) in crate::lp::unsolved_json(why).as_object().unwrap() {
-                        answer[key.as_str()] = text.clone();
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// IKA-386 `fillsServed`: a depth-2 call's sub-games filled (`fills`, crossing by crossing as
-/// `chunks` cuts `requests`), their leaves scored by the inference server as
-/// `search._refine_cells` scores them with `stack` (every node waiting scored as one batch
-/// once `gather` rows wait after a crossing, and the rest at the end), and each node folded
-/// and solved (`folds`). Each node's answer is its header's notes and counts and its value
-/// (`value`, or `failed` / `invalid` as `folds` says them); a node with refused cells is
-/// neither scored nor solved, as Python leaves it. `served` is what the server was asked.
-fn fills_served(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Value {
-    let Some(list) = value["requests"].as_array() else {
-        return json!({ "error": "`fillsServed` without a list of requests" });
-    };
-    let sizes: Vec<usize> = value["chunks"]
-        .as_array()
-        .map(|a| a.iter().filter_map(Value::as_u64).map(|n| n as usize).collect())
-        .unwrap_or_default();
-    let shapes: Vec<(usize, usize)> = value["shapes"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| Some((s.get(0)?.as_u64()? as usize, s.get(1)?.as_u64()? as usize)))
-                .collect()
-        })
-        .unwrap_or_default();
-    if sizes.iter().sum::<usize>() != list.len() || shapes.len() != list.len() {
-        return json!({ "error": "`fillsServed`: the chunks or shapes do not cover the requests" });
-    }
-    let server = match crate::served::Server::from_json(&value["server"]) {
-        Err(e) => return json!({ "error": e }),
-        Ok(server) => server,
-    };
-    let gather = value.get("gather").and_then(Value::as_u64).unwrap_or(4096) as usize;
-    let net_scores_ends = value.get("netScoresEnds").and_then(Value::as_bool).unwrap_or(false);
-    let lps_before = crate::lp::LPS.load(std::sync::atomic::Ordering::Relaxed);
-    let mut answers: Vec<Value> = vec![Value::Null; list.len()];
-    let mut call = ServedCall {
-        server,
-        widths: &encoder.widths,
-        net_scores_ends,
-        shapes,
-        stats: crate::served::Stats::default(),
-        ended: 0,
-        waiting: Vec::new(),
-        flight: None,
-        scored: Vec::new(),
-        serial: std::env::var("POKEURAOU_SERVED_OVERLAP").is_ok_and(|v| v == "0"),
-    };
-    let mut held = 0usize;
-    let mut at = 0usize;
-    for size in sizes {
-        let (headers, bodies) = match fill_list(reg, encoder, &list[at..at + size]) {
-            Err(reason) => return json!({ "error": reason }),
-            Ok(filled) => filled,
-        };
-        for (k, (header, (encoded, _leaf_values, spans))) in headers.into_iter().zip(bodies).enumerate() {
-            let index = at + k;
-            let mut answer = json!({
-                "leaves": header["leaves"],
-                "offered": header["offered"],
-                "refused": header["refused"],
-                "unmodelled": header["unmodelled"],
-                "megaFromSlots": header["encoding"]["megaFromSlots"],
-                "resolveUs": header["resolveUs"],
-                "encodeUs": header["encodeUs"],
-                "bindUs": header["bindUs"],
-            });
-            if let Some(read_off) = header.get("readOff") {
-                answer["readOff"] = read_off.clone();
-            }
-            let refused = header["refused"].as_array().is_some_and(|r| !r.is_empty());
-            answers[index] = answer;
-            if refused {
-                continue;
-            }
-            let rows = header["leaves"].as_u64().unwrap_or(0) as usize;
-            let decided: Vec<(usize, f64)> = header["decided"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|p| Some((p.get(0)?.as_u64()? as usize, p.get(1)?.as_f64()?)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            call.waiting.push(Waiting {
-                index,
-                encoded,
-                rows,
-                spans,
-                span_count: header["spanCount"].as_u64().unwrap_or(0) as usize,
-                span_leaves: header["spanLeaves"].as_u64().unwrap_or(0) as usize,
-                folded: header["folded"].as_array().cloned().unwrap_or_default(),
-                decided,
-            });
-            held += rows;
-        }
-        at += size;
-        if held >= gather {
-            if let Err(failed) = call.score(&mut answers) {
-                return failed;
-            }
-            held = 0;
-        }
-    }
-    let finished = call.score(&mut answers).and_then(|()| call.land()).and_then(|()| call.solve(&mut answers));
-    if let Err(failed) = finished {
-        return failed;
-    }
-    let (stats, ended) = (call.stats, call.ended);
-    json!({
-        "kind": "fillsServed",
-        "nodes": answers,
-        "lps": crate::lp::LPS.load(std::sync::atomic::Ordering::Relaxed) - lps_before,
-        "served": {
-            "requests": stats.requests,
-            "rows": stats.rows,
-            "ended": ended,
-            "waitUs": stats.wait_ns as f64 / 1e3,
-            "copyUs": stats.copy_ns as f64 / 1e3,
-        },
-    })
-}
-
-/// `fills`' nodes, each `encoded_node::fill` of its own request (the headers, and the bodies
-/// in order), or the reason the whole crossing is an error. IKA-386: `fillsServed` fills
-/// each of its crossings here too.
-pub fn fill_list(
-    reg: &Reg,
-    encoder: &crate::encode::Encoder,
-    list: &[Value],
-) -> Result<(Vec<Value>, Vec<(crate::encode::Encoded, Vec<f64>, Vec<u8>)>), String> {
-    let mut headers: Vec<Value> = Vec::with_capacity(list.len());
-    let mut bodies: Vec<(crate::encode::Encoded, Vec<f64>, Vec<u8>)> =
-        Vec::with_capacity(list.len());
-    // A node another node of this crossing reads its turns off (`like`), by index.
-    let mut kept: Vec<Option<crate::encoded_node::Kept>> = Vec::with_capacity(list.len());
-    // IKA-32 stage 2: plain nodes -- none keeps its turns for another or reads another's --
-    // go one per pool thread, each resolved and encoded there whole (no pool inside it),
-    // with that thread's own encoder, and come back in the order sent. A node's bytes are
-    // what its own crossing would have carried (the cells, the shared leaves and the
-    // encoding are the node's alone), so the body is the same; what spreads is a crossing
-    // of many small nodes -- the deepening's children, 8 x 8 each -- that the cell pool
-    // could only split into a few cells a thread.
-    let plain = list.len() > 1
-        && list.iter().all(|one| {
-            !one.get("keep").and_then(Value::as_bool).unwrap_or(false)
-                && one.get("like").is_none_or(Value::is_null)
-        });
-    if let (Some(pool), true) = (crate::par::Pool::global(), plain) {
-        let owned: Vec<Value> = list
-            .iter()
-            .map(|one| {
-                let mut one = one.clone();
-                // A pool thread cannot see this thread's held positions (IKA-302).
-                if crate::held::held_id(&one["position"]).is_some() {
-                    one["position"] = crate::held::json(&one["position"]);
-                }
-                one
-            })
-            .collect();
-        let format = reg.format_id.as_str();
-        type Node = (Value, crate::encode::Encoded, Vec<f64>, Vec<u8>);
-        let answers: Vec<Result<Node, String>> = pool.map_with(
-            owned.len(),
-            || crate::encode::Encoder::new(reg),
-            |encoder, k| {
-                let request = parse_request(&owned[k])?;
-                if &*request.position.format != format {
-                    return Err(format!(
-                        "position is {} but the regulation is {}",
-                        request.position.format, format
-                    ));
-                }
-                if !request.encode {
-                    return Err("`fills` answers encoded nodes only".into());
-                }
-                let (header, encoded, leaf_values, spans, _kept) =
-                    crate::encoded_node::fill_shared_on(reg, encoder, &request, None, false, None);
-                Ok((header, encoded, leaf_values, spans))
-            },
-        );
-        for answer in answers {
-            match answer {
-                Err(reason) => return Err(reason),
-                Ok((header, encoded, leaf_values, spans)) => {
-                    headers.push(header);
-                    bodies.push((encoded, leaf_values, spans));
-                }
-            }
-        }
-        crate::par::count_node_items(list.len());
-    }
-    for one in if bodies.is_empty() { &list[..] } else { &list[..0] } {
-        let mut request = match parse_request(one) {
-            Err(reason) => return Err(reason),
-            Ok(request) => request,
-        };
-        let listed = |key: &str| one[key].as_array().cloned().unwrap_or_default();
-        let like_of = one.get("like").filter(|l| !l.is_null());
-        let keep = one.get("keep").and_then(Value::as_bool).unwrap_or(false);
-        if keep || like_of.is_some() {
-            request.ours_json = listed("ours");
-            request.theirs_json = listed("theirs");
-        }
-        if &*request.position.format != reg.format_id.as_str() {
-            return Err(format!(
-                "position is {} but the regulation is {}",
-                request.position.format, reg.format_id
-            ));
-        }
-        if !request.encode {
-            return Err("`fills` answers encoded nodes only".into());
-        }
-        // Only an earlier node, and only one that was kept; anything else resolves.
-        let like = like_of.and_then(|spec| {
-            let index = spec.get("node")?.as_u64()? as usize;
-            let side = spec.get("side")?.as_u64()? as usize;
-            let slots: Vec<usize> = spec
-                .get("slots")?
-                .as_array()?
-                .iter()
-                .filter_map(|s| s.as_u64().map(|s| s as usize))
-                .collect();
-            let earlier = kept.get(index)?.as_ref()?;
-            crate::encoded_node::Like::new(
-                earlier,
-                &request.position,
-                side,
-                slots,
-                request.ours_json.clone(),
-                request.theirs_json.clone(),
-            )
-        });
-        let (mut header, encoded, leaf_values, spans, keeping) =
-            crate::encoded_node::fill_shared(reg, encoder, &request, like.as_ref(), keep);
-        if like_of.is_some() && like.is_none() {
-            // Asked to read off a node and could not: said, so the caller can count it.
-            header["readOff"] = json!(null);
-        }
-        headers.push(header);
-        bodies.push((encoded, leaf_values, spans));
-        kept.push(keeping);
-    }
-    Ok((headers, bodies))
 }
 
 /// Answers one request onto `stdout`. `Err` means the pipe is gone and serving is over.
@@ -1227,10 +775,8 @@ fn answer<R: BufRead, W: Write>(
         // IKA-429: the bind columns of positions, for `encode.py` (which has no calculator).
         Ok(value) if value["kind"].as_str() == Some("bind") => bind_command(reg, encoder, &value),
         Ok(value) if value["kind"].as_str() == Some("many") => many(reg, &value),
-        // IKA-381: games solved here (HiGHS), and sub-games folded from their leaves' values
-        // and solved; only when a caller asks (`portlp.py`, off by default).
+        // IKA-381: games solved here (HiGHS), for `portlp.py`.
         Ok(value) if value["kind"].as_str() == Some("lp") => crate::lp::lp_command(&value),
-        Ok(value) if value["kind"].as_str() == Some("folds") => crate::lp::folds_command(&value),
         Ok(value) if value["kind"].as_str() == Some("lpCounts") => crate::lp::report(),
         // IKA-455: a belief node's matrices folded from the fills' span blocks and the values,
         // and its Bayesian games solved (`beliefnode.rs`; `portlp.py`, off by default).
@@ -1271,33 +817,16 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("beliefServed") => {
             crate::beliefnode::belief_served(&encoder.widths, &value)
         }
-        // IKA-386: a depth-2 call's sub-games filled, scored by the inference server and
-        // solved here, in one crossing (`portserved.py`, off by default).
-        Ok(value) if value["kind"].as_str() == Some("fillsServed") => fills_served(reg, encoder, &value),
-        // IKA-389: a read's children's menus by the Q, built and ranked here in one crossing
-        // (`portmenus.py`, off by default); and the pieces, for the checks that hold them to
-        // the Python's.
-        Ok(value) if value["kind"].as_str() == Some("qMenus") => crate::qmenus::q_menus(reg, encoder, &value),
         // IKA-457 stage 2.3: a move node's two menus by the Q in one crossing (`rootMenus`).
         Ok(value) if value["kind"].as_str() == Some("rootMenus") => crate::qmenus::root_menus(reg, encoder, &value),
         // IKA-457 stage 2.4: those menus and the hidden bench's node over them in one request.
         Ok(value) if value["kind"].as_str() == Some("moveNode") => crate::qmenus::move_node(reg, encoder, &value),
-        // IKA-389: held positions written out, for a caller that kept only their numbers
-        // (a `bare` turn's branches) and needs one whole.
-        Ok(value) if value["kind"].as_str() == Some("positions") => json!({
-            "positions": value["ids"]
-                .as_array()
-                .map(|ids| ids.iter().map(|id| crate::held::json(&json!({ "held": id }))).collect::<Vec<_>>())
-                .unwrap_or_default(),
-        }),
+        // IKA-389: the Q menus' pieces, for the checks that hold them to the Python's.
         Ok(value) if value["kind"].as_str() == Some("legal") => crate::qmenus::legal_command(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("qArrays") => crate::qmenus::arrays_command(reg, encoder, &value),
         Ok(value) if value["kind"].as_str() == Some("qScores") => crate::qmenus::scores_command(&value),
         // The cell threads' own account (IKA-32): how many, and how much ran on them.
         Ok(value) if value["kind"].as_str() == Some("parallel") => crate::par::report(),
-        Ok(value) if value["kind"].as_str() == Some("fills") => {
-            return fills(reg, encoder, shared, input, stdout, &value, parse_us);
-        }
         // A pause's replacements with their leaves encoded (IKA-209): the arrays take the
         // same roads as an encoded node's.
         Ok(value) if value["kind"].as_str() == Some("alternativesEncoded") => {
