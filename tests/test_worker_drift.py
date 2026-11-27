@@ -145,6 +145,13 @@ def test_the_servers_the_game_reads_are_compared(stand_in, tmp_path) -> None:  #
          "context.servers[leaf].batch"),
         (changed(generation, lambda g: g["value"].update(bytes=1024)), board, "value.bytes"),
         (changed(generation, lambda g: g["q"].update(model="other-q")), board, "q.model"),
+        # The review of 996e827: a new key in generation's context or q, and a context server
+        # its leaf does not name.
+        (changed(generation, lambda g: g["context"].update(patience=3)), board,
+         ".context.patience (only in generation)"),
+        (changed(generation, lambda g: g["q"].update(batch=2)), board, "q.batch (only in generation)"),
+        (changed(generation, lambda g: g["context"]["servers"].append({"model": "spare"})), board,
+         "context.servers (not the leaf)"),
     )
     for mine, theirs, said in cases:
         problems = agent_differences(mine, theirs)

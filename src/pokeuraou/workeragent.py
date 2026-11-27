@@ -59,9 +59,10 @@ ALLOWED_DIFFERENT = {
     "arms": "each arm is compared as a whole (`board_view`)",
     # `context.hidden` is a placeholder both workers rebuild per game (the game's number, the
     # seen identities, the leads); `context.leaf` names a server by its place in a list the two
-    # configs order differently. The servers themselves are compared (`_context_view`).
+    # configs order differently. The servers themselves are compared per side (`_side_view`:
+    # the one the side's leaf names and the others), and the rest of the context is compared.
     "context.hidden": "rebuilt by each worker per game",
-    "context.leaf": "a place in a list; the server it names is compared",
+    "context.leaf": "a place in a list; the server it names and the others are compared",
 }
 
 
@@ -212,35 +213,40 @@ def _server(server: Any) -> Any:  # noqa: ANN401
     return {k: v for k, v in server.items() if k not in PER_RUN}
 
 
-def _context_view(leaf_server: Any, q_server: Any) -> dict[str, Any]:  # noqa: ANN401
+def _at(items: list[Any], index: Any) -> Any:  # noqa: ANN401
+    """``items[index]`` when ``index`` names one, else None."""
+    return items[index] if isinstance(index, int) and 0 <= index < len(items) else None
+
+
+def _side_view(leaf_server: Any, others: list[Any], value: Any, q: Any) -> dict[str, Any]:  # noqa: ANN401
     """The servers a side plays on, as `playGame`'s context and the config's `value` and `q` hand
     them over: the leaf server whole but the keys of the run (its `netScoresEnds` and `encoding`
-    are read by the replacement and self-switch nodes, `replacenode.rs` and `selfswitch.rs`), and
-    the model and buffer size of the leaf and the Q."""
-    leaf = _server(leaf_server)
-    q = _server(q_server)
+    are read by the replacement and self-switch nodes, `replacenode.rs` and `selfswitch.rs`), the
+    context's other servers (those the side's leaf does not name), the leaf's buffer (`value`) and
+    the Q's server (`q`), each whole but the keys of the run."""
     return {
-        "context.servers[leaf]": leaf,
-        "value": None if not isinstance(leaf, dict) else
-        {"model": leaf.get("model"), "bytes": leaf.get("bytes")},
-        "q": None if not isinstance(q, dict) else {"model": q.get("model"), "bytes": q.get("bytes")},
+        "context.servers[leaf]": _server(leaf_server),
+        "context.servers (not the leaf)": [_server(s) for s in others],
+        "value": _server(value),
+        "q": _server(q),
     }
 
 
 def generation_view(generation: dict[str, Any]) -> dict[str, Any]:
-    """Generation's config without the keys compared nowhere, its node's servers as an agent
-    sees them, and its context's leaf servers (one per side) and its `value` and `q`."""
+    """Generation's config without the keys compared nowhere: its node's servers as an agent sees
+    them, per side the servers its context hands `playGame` with its `value` and `q`, and the rest
+    of its context but `hidden`, `leaf` and `servers` (`ALLOWED_DIFFERENT`; the servers are in the
+    sides)."""
     view = {k: v for k, v in generation.items()
             if k not in ALLOWED_DIFFERENT and k not in ("context", "value", "q")}
     context = generation.get("context") or {}
+    view["context"] = {k: v for k, v in context.items() if k not in ("hidden", "leaf", "servers")}
     servers, leaves = context.get("servers") or [], context.get("leaf") or []
     for side in (0, 1):
-        leaf = leaves[side] if side < len(leaves) else None
-        server = servers[leaf] if isinstance(leaf, int) and leaf < len(servers) else None
-        # Generation's `value` and `q` are the buffer each worker allocates for the server.
-        mine = _context_view(server, generation.get("q"))
-        mine["value"] = generation.get("value")
-        view[f"side {side}"] = mine
+        leaf = _at(leaves, side)
+        others = [s for i, s in enumerate(servers) if i != leaf]
+        view[f"side {side}"] = _side_view(_at(servers, leaf), others, generation.get("value"),
+                                          generation.get("q"))
     node = dict(view.get("node") or {})
     for key in ("server", "qServer"):
         if key in node:
@@ -250,31 +256,31 @@ def generation_view(generation: dict[str, Any]) -> dict[str, Any]:
 
 
 def board_view(board: dict[str, Any], k: int) -> dict[str, Any]:
-    """Board arm ``k`` in generation's shape: the board's keys without those compared nowhere, the
-    arm's node filled as `boardworker.rs` fills it (its leaf's and Q's servers, its width in both
-    seats; the leaf server without `netScoresEnds` and `encoding`, which the worker drops), and
-    the arm's selection store and tag."""
+    """Board arm ``k`` in generation's shape: the board's keys without those compared nowhere, per
+    side the servers `boardworker.rs` hands `playGame` (the config's servers, the arm's leaf; the
+    leaf's buffer as `value`, the arm's Q server as `q`), the arm's node filled as the worker fills
+    it (its leaf's and Q's servers, its width in both seats; the leaf server without
+    `netScoresEnds` and `encoding`, which the worker drops), and the arm's selection store and tag.
+    The board has no context of its own beyond the servers: its rest is empty."""
     view = {key: v for key, v in board.items() if key not in ALLOWED_DIFFERENT}
+    view["context"] = {}
     arm = board["arms"][k]
-    servers_, qs_ = board.get("servers") or [], board.get("qServers") or []
-    leaf_, q_ = arm.get("leaf"), arm.get("q")
-    side = _context_view(
-        servers_[leaf_] if isinstance(leaf_, int) and leaf_ < len(servers_) else None,
-        qs_[q_] if isinstance(q_, int) and q_ < len(qs_) else None,
-    )
-    # The arm plays the same servers in either seat (`boardworker.rs` hands `playGame` the
-    # config's servers and each side's arm's leaf).
+    servers, qs = board.get("servers") or [], board.get("qServers") or []
+    leaf, q = arm.get("leaf"), arm.get("q")
+    leaf_server, q_server = _at(servers, leaf), _at(qs, q)
+    value = None if not isinstance(leaf_server, dict) else {
+        "model": leaf_server.get("model"), "bytes": leaf_server.get("bytes")}
+    # The arm plays the same servers in either seat.
+    side = _side_view(leaf_server, [s for i, s in enumerate(servers) if i != leaf], value, q_server)
     view["side 0"] = side
     view["side 1"] = side
     node = dict(arm.get("node") or {})
-    servers, qs = board.get("servers") or [], board.get("qServers") or []
-    leaf, q = arm.get("leaf"), arm.get("q")
-    server = _server(servers[leaf]) if isinstance(leaf, int) and leaf < len(servers) else None
+    server = _server(leaf_server)
     if isinstance(server, dict):
         # `boardworker.rs` drops these two from the leaf server it puts into the node.
         server = {key: v for key, v in server.items() if key not in ("netScoresEnds", "encoding")}
     node["server"] = server
-    node["qServer"] = _server(qs[q]) if isinstance(q, int) and q < len(qs) else None
+    node["qServer"] = _server(q_server)
     node["widths"] = [arm.get("limit"), arm.get("limit")]
     if arm.get("binary") is not None:
         node["binary"] = arm["binary"]
