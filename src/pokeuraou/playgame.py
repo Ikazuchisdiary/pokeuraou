@@ -72,7 +72,7 @@ def prepare(  # noqa: PLR0913 - the loop's settings
     """The game's shared part, or None where the port does not play its steps (any road
     `_decide`, `fused_node` and `_self_switch_request` would not take either)."""
     from . import beliefnode, rootmenus
-    from .encode import HP_SCALE, rules_of
+    from .encode import rules_of
     from .selfplay import _HiddenBench, _self_switch_request
 
     if game is None or timing.DUPES or rank_scores._SINK.get() is not None:  # noqa: SLF001
@@ -100,9 +100,22 @@ def prepare(  # noqa: PLR0913 - the loop's settings
     setup.context, setup.owners = ready
     setup.plan = planned
     setup.leaf, setup.encoder, setup.rules = leaf, encoder, rules
+    setup.node = static_node(
+        {key: planned.request[key] for key in ("widths", "properties", "megaFromSlots", "qServer")},
+        leaf, encoder, rules, budget,
+    )
+    return setup
+
+
+def static_node(menus: dict[str, Any], leaf: Any, encoder: Any, rules: Any, budget: Any) -> dict[str, Any]:  # noqa: ANN401
+    """`playGame`'s ``node``: the menus' static request (`rootmenus.static_request`), the matrix
+    budget, the leaf's server and the encoder's columns the node patches. The same for every
+    position of a game; the Rust worker's config carries it (`rustworker`)."""
+    from .encode import HP_SCALE
+
     mon_k = {name: k for k, name in enumerate(encoder.mon_names)}
     side_k = {name: k for k, name in enumerate(encoder.side_names)}
-    node = {key: planned.request[key] for key in ("widths", "properties", "megaFromSlots", "qServer")}
+    node = dict(menus)
     node["budget"] = rustnode.dump_budget(budget)
     node["server"] = {
         "address": leaf.address,
@@ -125,8 +138,7 @@ def prepare(  # noqa: PLR0913 - the loop's settings
     }
     if rules.mega_from_slots:
         node["encoding"] = rules.to_request()
-    setup.node = node
-    return setup
+    return node
 
 
 def play(  # noqa: PLR0913 - the loop's state
@@ -188,6 +200,10 @@ def play(  # noqa: PLR0913 - the loop's state
     if answer["stop"] == "handoff":
         # A state of the game the port leaves to the loop (see the module's words), not a fault.
         portlp.COUNTS["handoffs"] += 1
+        import sys
+
+        print(f"  handoff at turn {answer['position'].get('turn')}: {answer.get('why')}",
+              file=sys.stderr)
     played = Played(answer)
     if played.turns is not None:
         record.turns = played.turns

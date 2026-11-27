@@ -713,6 +713,37 @@ pub fn lead_phase(
     }
 }
 
+/// The leads' switch-ins of a turn-1 position with every draw read every way, breadth first, at
+/// its weight: `RustNode.lead_branches` (`_phase_branches`) in one go, for the selection solve
+/// of the Rust worker (IKA-458 stage 3.7). One `(1.0, position)` for a phase that draws nothing.
+pub fn lead_branches(reg: &Reg, position: &Position) -> Result<Vec<(f64, Position)>, String> {
+    if &*position.format != reg.format_id.as_str() {
+        return Err("position is for another regulation".into());
+    }
+    let mut out = Vec::new();
+    let mut pending: std::collections::VecDeque<(Vec<usize>, f64)> = std::collections::VecDeque::new();
+    pending.push_back((Vec::new(), 1.0));
+    while let Some((presets, weight)) = pending.pop_front() {
+        let value = json!({ "presets": presets });
+        let (after, _notes, opened, _log) =
+            phase_position(reg, position.clone(), &value, Phase::Leads, [Vec::new(), Vec::new()])?;
+        match opened.first() {
+            Some(weights) if !weights.is_empty() => {
+                let total = crate::lp::sum_of(weights.iter().copied());
+                for (i, w) in weights.iter().enumerate() {
+                    if *w > 0.0 {
+                        let mut next = presets.clone();
+                        next.push(i);
+                        pending.push_back((next, weight * w / total));
+                    }
+                }
+            }
+            _ => out.push((weight, after)),
+        }
+    }
+    Ok(out)
+}
+
 /// `resolve_replacements` with each draw it opens answered by `draw` (the weights in, the index
 /// out), the phase replayed with the answers so far as `RustNode._phase` does over the pipe
 /// (IKA-458 stage 3.6a). The position and the notes of the last replay.

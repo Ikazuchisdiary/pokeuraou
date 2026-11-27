@@ -193,6 +193,12 @@ def main() -> None:
         "passes 0: a timing run stops at the first.",
     )
     ap.add_argument(
+        "--python-worker",
+        action="store_true",
+        help="play the games in tools/selfplay.py's Python loop instead of the Rust worker "
+        "(IKA-458 stage 3.7; kept for the comparison until it is retired)",
+    )
+    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
@@ -320,6 +326,33 @@ def main() -> None:
         if args.q_model:
             command += ["--q-arm", "q"] if served_at else ["--q-model", args.q_model]
         return command + extra
+
+    python_build = build
+    if not args.python_worker:
+        # IKA-458 stage 3.7: the workers are `pokeuraou-damage selfplay-worker`. The flags are read
+        # once, by tools/selfplay.py, into the config every worker reads.
+        if not served_at:
+            raise SystemExit("the Rust worker plays the leaf of the inference servers: pass --served")
+        from pokeuraou import rustworker
+
+        config = out_dir / "worker-config.json"
+        flags = python_build(0, "-")
+        at = flags.index("--queue")
+        del flags[at : at + 2]
+        made = subprocess.run(  # noqa: S603
+            [*flags, "--rust-config", str(config)], env=env, cwd=str(ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+        )
+        if made.returncode != 0:
+            raise SystemExit(f"the Rust worker's config was not written:\n{made.stdout}")
+        print(f"  workers: pokeuraou-damage {rustworker.SUBCOMMAND} (config {config})",
+              file=sys.stderr, flush=True)
+
+        def build(worker: int, address: str) -> list[str]:
+            return rustworker.command(
+                config, served_at[worker % len(served_at)],
+                out_dir / f"games-worker{worker}.jsonl", queue=address,
+            )
 
     def written() -> int:
         return sum(

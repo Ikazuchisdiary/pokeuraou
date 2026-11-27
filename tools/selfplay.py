@@ -241,6 +241,19 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         drawn = from_queue(client)
     out = args.out or selfplay_dir() / f"pool-{pool.id}-seed{args.seed}.jsonl"
     store = args.selection_store or out.parent / "selection-solved"
+    if args.rust_config is not None:
+        # IKA-458 stage 3.7: the Rust worker's config for these flags, written once, and no game.
+        from pokeuraou import rustworker
+
+        refused = rustworker.unsupported(args)
+        if refused:
+            ap.error(f"the Rust worker does not play {', '.join(refused)}")
+        rustworker.write_config(
+            rustworker.build_config(args, pool, evaluate, leaf_label, q_record, pairs, store),
+            args.rust_config,
+        )
+        print(f"  rust worker config -> {args.rust_config}", file=sys.stderr)
+        return
     ranks_out = rank_scores_path(args, ap, out)
     if ranks_out is not None:
         # The worker log's own echo, which is what says the run recorded (IKA-278).
@@ -404,6 +417,13 @@ def main() -> None:
         "reaches. inf spreads it uniformly.",
     )
     add_pool_flags(ap)
+    ap.add_argument(
+        "--rust-config",
+        type=Path,
+        default=None,
+        help="write the config `pokeuraou-damage selfplay-worker` reads for these flags and "
+        "stop, playing no game (IKA-458 stage 3.7; tools/generate_queue.py does this once a run)",
+    )
     args = ap.parse_args()
     if args.pool is None:
         ap.error("--pool is required: M-B's roster path was removed (IKA-460)")

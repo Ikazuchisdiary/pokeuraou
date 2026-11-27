@@ -127,12 +127,12 @@ fn shows_itself(mon: &Pokemon) -> bool {
         || mon.is_mega
 }
 
-fn identity(mon: &Pokemon) -> String {
+pub(crate) fn identity(mon: &Pokemon) -> String {
     to_id(mon.base_species.as_str())
 }
 
 /// `hidden.shown_species`: the ids a side has revealed, each Mega's base form alongside.
-fn shown_species(position: &Position, side: usize, shown: &BTreeSet<usize>) -> HashSet<String> {
+pub(crate) fn shown_species(position: &Position, side: usize, shown: &BTreeSet<usize>) -> HashSet<String> {
     let mut out = HashSet::new();
     for mon in &position.sides[side].pokemon {
         if !shown.contains(&mon.slot) {

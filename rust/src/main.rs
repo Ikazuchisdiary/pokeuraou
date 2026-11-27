@@ -60,6 +60,7 @@ mod resolve;
 mod qfeatures;
 mod qmenus;
 mod score;
+mod selection;
 mod selfswitch;
 mod semi_invulnerable;
 mod served;
@@ -70,6 +71,7 @@ mod steel_beam;
 mod terrain;
 mod transform;
 mod wire;
+mod worker;
 
 #[cfg(feature = "count-allocations")]
 #[global_allocator]
@@ -91,6 +93,8 @@ fn main() {
         Some("bind-bench") => bind_bench_main(&args[2..]),
         Some("residual-features") => residual::main(&args[2..]),
         Some("inference-server") => infer_server::main(&args[2..]),
+        // IKA-458 stage 3.7: the generation worker.
+        Some("selfplay-worker") => worker::main(&args[2..]),
         _ => {
             eprintln!(
                 "usage:\n  {0} damage <regulation.json> <cases.json> [repeats]\n  \

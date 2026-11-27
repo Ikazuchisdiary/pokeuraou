@@ -40,6 +40,14 @@ mod platform {
     #[link(name = "kernel32")]
     extern "system" {
         fn OpenFileMappingW(access: u32, inherit: i32, name: *const u16) -> *mut c_void;
+        fn CreateFileMappingW(
+            file: *mut c_void,
+            attributes: *const c_void,
+            protect: u32,
+            size_high: u32,
+            size_low: u32,
+            name: *const u16,
+        ) -> *mut c_void;
         fn MapViewOfFile(
             mapping: *mut c_void,
             access: u32,
@@ -67,6 +75,38 @@ mod platform {
             // SAFETY: `wide` is a NUL-terminated UTF-16 string that outlives the call, and
             // the handle is checked before it is mapped.
             let mapping = unsafe { OpenFileMappingW(FILE_MAP_WRITE, 0, wide.as_ptr()) };
+            if mapping.is_null() {
+                return None;
+            }
+            // SAFETY: `mapping` is a live handle; 0 bytes means "the whole block".
+            let base = unsafe { MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, 0) } as *mut u8;
+            if base.is_null() {
+                // SAFETY: the handle is live and is not used again.
+                unsafe { CloseHandle(mapping) };
+                return None;
+            }
+            Some(Shared { name: name.to_string(), mapping, base, capacity, at: 0 })
+        }
+
+        /// IKA-458 stage 3.7: a new block of `capacity` bytes under `name`, backed by the paging
+        /// file, as `multiprocessing.shared_memory.SharedMemory(create=True)` makes one. The Rust
+        /// worker owns its leaf's and its Q's blocks the way the Python leaf did; the mapping
+        /// lives while this value does.
+        pub fn create(name: &str, capacity: usize) -> Option<Shared> {
+            const PAGE_READWRITE: u32 = 0x04;
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let size = capacity as u64;
+            // SAFETY: INVALID_HANDLE_VALUE (-1) asks for the paging file; `wide` outlives the call.
+            let mapping = unsafe {
+                CreateFileMappingW(
+                    usize::MAX as *mut c_void,
+                    std::ptr::null(),
+                    PAGE_READWRITE,
+                    (size >> 32) as u32,
+                    size as u32,
+                    wide.as_ptr(),
+                )
+            };
             if mapping.is_null() {
                 return None;
             }
@@ -168,6 +208,19 @@ mod platform {
             Some(Shared { name: name.to_string(), file, capacity, at: 0 })
         }
 
+        /// IKA-458 stage 3.7: a new `/dev/shm` file of `capacity` bytes (left behind on exit).
+        pub fn create(name: &str, capacity: usize) -> Option<Shared> {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(format!("/dev/shm/{name}"))
+                .ok()?;
+            file.set_len(capacity as u64).ok()?;
+            Some(Shared { name: name.to_string(), file, capacity, at: 0 })
+        }
+
         pub fn name(&self) -> &str {
             &self.name
         }
@@ -233,6 +286,10 @@ mod platform {
 
     impl Shared {
         pub fn attach(_name: &str, _capacity: usize) -> Option<Shared> {
+            None
+        }
+
+        pub fn create(_name: &str, _capacity: usize) -> Option<Shared> {
             None
         }
 

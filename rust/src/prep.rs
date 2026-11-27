@@ -242,7 +242,7 @@ fn load(pool_id: u64, pool: &Pool, lo: usize, hi: usize, store: &str, tag: &str)
 }
 
 /// `selfplay._opening`: the turn-1 position before the leads' switch-ins.
-fn opening(reg: &Reg, sides: [&[&SheetSet]; 2]) -> Result<Position, String> {
+pub(crate) fn opening(reg: &Reg, sides: [&[&SheetSet]; 2]) -> Result<Position, String> {
     let mut built = Vec::new();
     for (index, sets) in sides.iter().enumerate() {
         let mut party: Vec<Rc<crate::position::Pokemon>> = Vec::new();

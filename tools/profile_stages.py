@@ -129,6 +129,9 @@ def process_role(name: str, cmdline: list[str]) -> str:
         # IKA-461: the Rust inference server is the same exe with another command.
         if "inference-server" in [str(item) for item in cmdline]:
             return "rust-inference-server"
+        # IKA-458 stage 3.7: the generation worker is the same exe with another command.
+        if "selfplay-worker" in [str(item) for item in cmdline]:
+            return "rust-selfplay-worker"
         return DAMAGE_EXE
     return name
 
@@ -1282,6 +1285,7 @@ def build(args: argparse.Namespace) -> list[str]:
             *given("--pool", getattr(args, "pool", None)),
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
+            *(["--python-worker"] if getattr(args, "python_worker", False) else []),
             *(["--served", "--servers", str(args.servers)] if args.served else []),
             *bench_argv(args.hide_bench),
             # A timing run stops at its first failed worker (IKA-336): generation's own
@@ -1376,6 +1380,8 @@ def main() -> None:
     # For generation and match, passed on explicitly; one of the two is required there.
     add_bench_flags(ap)
     ap.add_argument("--no-bridge", action="store_true", help="POKEURAOU_RUST_NODE=0")
+    ap.add_argument("--python-worker", action="store_true",
+                    help="generation: generate_queue.py's --python-worker (IKA-458 stage 3.7)")
     ap.add_argument("--out", type=Path, default=None, help="where the run writes its games")
     ap.add_argument("--timing-dir", type=Path, default=None)
     ap.add_argument("--report", type=Path, default=None,

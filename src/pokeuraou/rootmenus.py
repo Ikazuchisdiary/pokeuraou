@@ -32,6 +32,22 @@ from .position import Position
 from .regulation import Regulation
 
 
+def static_request(model: Any, limits: Sequence[int], server_key: str) -> dict[str, Any]:  # noqa: ANN401
+    """The menus' request that no position changes: the widths, the Q's properties and
+    `can_mega` rule and its server (`Plan`, and the Rust worker's config, `rustworker`)."""
+    return {
+        "widths": [int(limits[0]), int(limits[1])],
+        "properties": bool(model.properties),
+        "megaFromSlots": bool(model.encoder.rules.mega_from_slots),
+        server_key: {
+            "address": model.address,
+            "model": model.model,
+            "shm": model._block.name,  # noqa: SLF001 - the Q's own block, idle while the port asks
+            "bytes": int(model.buffer_bytes),
+        },
+    }
+
+
 class Plan:
     """The menus' request and what is done with its answer, for `menus` and for `moveNode`."""
 
@@ -41,21 +57,12 @@ class Plan:
     ) -> None:
         self.rank_fill = rank_fill
         self.model = model
-        encoder = model.encoder
         self.request: dict[str, Any] = {
             "position": rustnode._position(pos),  # noqa: SLF001
             "v0": rustnode._position(views[0]),  # noqa: SLF001
             "v1": rustnode._position(views[1]),  # noqa: SLF001
             "same": views[0] is views[1],
-            "widths": [int(limits[0]), int(limits[1])],
-            "properties": bool(model.properties),
-            "megaFromSlots": bool(encoder.rules.mega_from_slots),
-            server_key: {
-                "address": model.address,
-                "model": model.model,
-                "shm": model._block.name,  # noqa: SLF001 - the Q's own block, idle while the port asks
-                "bytes": int(model.buffer_bytes),
-            },
+            **static_request(model, limits, server_key),
         }
         self.menus: tuple[list[SideAction], list[SideAction]] = ([], [])
 
