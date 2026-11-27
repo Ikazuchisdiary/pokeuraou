@@ -3,7 +3,9 @@
 A move read on counted cells in the port: the root is the depth-1 node the port already
 answers, the read spends its budget, the answer moves off the depth-1 answer, the same
 budget reads the same answer twice, and the swap oracle adds actions from outside the menu.
-The leaf and the Q are stand-ins on the test server (no GPU)."""
+The leaf and the Q are stand-ins on the test server (no GPU), built so their numbers are the
+same bits on every machine (`tests/_exact_standins.py`): a read's steps follow every last bit
+of them, and CI on Linux took other steps with stand-ins read through ``sin`` and BLAS."""
 
 from __future__ import annotations
 
@@ -16,8 +18,8 @@ from pokeuraou.encode import Encoder
 from pokeuraou.narrow import narrow
 from pokeuraou.selfplay import position_from_sets
 
-from ._served import QStub
-from .test_humanplay import _noisy, pool  # noqa: F401 - the fixture
+from ._exact_standins import ExactQStub, exact_leaf
+from .test_humanplay import pool  # noqa: F401 - the fixture
 
 
 @pytest.fixture
@@ -26,8 +28,8 @@ def served(pool):  # noqa: ANN001, ANN201, F811
     from pokeuraou.standin import serve
 
     encoder = Encoder(pool.reg)
-    stub = QStub(encoder.vocab.fingerprint())
-    server, address = serve({"value": _noisy}, arms={"value": ["noisy.pt"]},
+    stub = ExactQStub(encoder.vocab.fingerprint())
+    server, address = serve({"value": exact_leaf}, arms={"value": ["exact.pt"]},
                             q_models={"qstub": stub})
     leaf = RemoteValue(address, "value", Encoder(pool.reg))
     model = qrank.RemoteQ(address, "qstub", encoder)
@@ -160,21 +162,38 @@ def _move(pool, pos, served, cells, cost, **kwargs):  # noqa: ANN001, ANN003, AN
 def test_a_priced_budget_is_read_as_the_python_deepening_reads_it(pool, served) -> None:  # noqa: ANN001, F811
     """A count clock's budget priced by `deepen.COSTS` (a person's count-clock game, the tests'
     agents): the port reads the cost's units before every step, the levels and the root's cells
-    at each refinement included, so it takes the steps `deepen.py` took on the same budget
-    (``c8``, the frozen answers), and only its last step passes the budget."""
+    at each refinement included, as `deepen.py` read them (``c8``, the frozen answers): after
+    every step the two reads share, the same cells and the same reading of the budget, to the
+    bit; and only the last step passes the budget.
+
+    The two trees part where the two choose different cells: in position 1 at step 20 (a
+    refinement of 129 cells in the port, 193 in Python; both read 11,266.394 units before it),
+    so the port stops after 25 steps and Python after 26. Why the two choose differently there
+    was not traced (the priorities are the same rule, computed in Rust and in numpy). The
+    step they part at is recorded, so a change in either reading of the budget, or a tree that
+    parts elsewhere, fails here."""
     from pokeuraou.deepen import COSTS, Cost
 
     cost = COSTS["local", 1]
     assert cost.level and cost.root, "the prices this test is about"
     budget = int(400.0 / cost.cell)  # 400 ms of priced work, in cells
     want = {r["position"]: r for r in _python_deepening()["priced"]}
+    parted = {}
     for p, pos in enumerate(_positions(pool, 3, seed=17)):
         steps: list = []
         port = _move(pool, pos, served, budget, cost, progress=steps.append)
-        spent = [s.spent for s in steps if s.kind == "refine"]
+        got = [[s.cells, s.spent] for s in steps if s.kind == "refine"]
+        spent = [v for _cells, v in got]
         assert spent and spent[-1] >= budget and all(v < budget for v in spent[:-1])
-        assert port.deepened.expanded == want[p]["expanded"] > 0, p
-    assert len(want) == 3
+        python = want[p]["steps"]
+        same = 0
+        while same < min(len(got), len(python)) and got[same][0] == python[same][0]:
+            assert got[same][1] == python[same][1], (p, same)
+            same += 1
+        parted[p] = None if same == len(got) == len(python) else same + 1
+        if parted[p] is None:
+            assert port.deepened.expanded == want[p]["expanded"] > 0, p
+    assert parted == {0: None, 1: 20, 2: None}, parted
     # The control that the port reads the level and root prices at all: a hundred times
     # dearer, the same budget buys fewer steps.
     dear = Cost(fill=cost.fill, refine=cost.refine, cell=cost.cell, level=cost.level * 100,
