@@ -408,7 +408,7 @@ def test_match_queue_registers_its_test_before_the_first_game(tmp_path, monkeypa
         [
             "match_queue.py", "--out", str(tmp_path), "--games", "5", "--value", "a.pt",
             "--baseline", "b.pt", "--sprt", "-5", "15", "--sprt-beta", "0.1",
-            "--pool", str(pool_file), "--hide-bench", "--",
+            "--pool", str(pool_file), "--hide-bench", "--python-worker", "--",
         ],
     )
     with pytest.raises(SystemExit) as ended:

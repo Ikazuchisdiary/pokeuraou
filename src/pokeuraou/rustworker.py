@@ -205,6 +205,12 @@ def board_unsupported(args: Any) -> list[str]:  # noqa: ANN401 - tools/pool_matc
                 out.append(f"{flag}{name.replace('_', '-')}")
         if got("ally_targets") != "off":
             out.append(f"{flag}ally-targets {got('ally_targets')}")
+    # Flags of both arms at once, with no baseline form.
+    for name in ("line1_back", "line_only_with", "ally_only_with", "drive_screens"):
+        if getattr(args, name):
+            out.append(f"--{name.replace('_', '-')} {getattr(args, name)}")
+    if args.drive_baton:
+        out.append("--drive-baton")
     return out
 
 

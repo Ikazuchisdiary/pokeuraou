@@ -205,7 +205,8 @@ def test_the_records_keys_are_per_game_or_named_static(pool, served, tmp_path) -
 def test_a_board_flag_the_rust_worker_does_not_play_is_named() -> None:
     base = dict(
         inference="h:1", rank_fill="q-nocover", baseline_rank_fill="q-nocover", rank_leaf=True,
-        baseline_rank_leaf=True,
+        baseline_rank_leaf=True, line1_back=None, line_only_with=None, ally_only_with=None,
+        drive_baton=False, drive_screens=None,
     )
     for prefix in ("", "baseline_"):
         base.update({
@@ -219,6 +220,15 @@ def test_a_board_flag_the_rust_worker_does_not_play_is_named() -> None:
     assert rustworker.board_unsupported(Namespace(**{**base, "baseline_deepen": "m8"})) == [
         "--baseline-deepen m8"
     ]
+    # Flags with no baseline form are named too, each as its own flag.
+    for name, value, said in (
+        ("line1_back", ["a", "b"], "--line1-back ['a', 'b']"),
+        ("line_only_with", ["x"], "--line-only-with ['x']"),
+        ("ally_only_with", ["x"], "--ally-only-with ['x']"),
+        ("drive_baton", True, "--drive-baton"),
+        ("drive_screens", "x", "--drive-screens x"),
+    ):
+        assert rustworker.board_unsupported(Namespace(**{**base, name: value})) == [said]
     assert rustworker.board_unsupported(Namespace(**{**base, "inference": None}))[0].startswith(
         "leaves loaded in the worker"
     )

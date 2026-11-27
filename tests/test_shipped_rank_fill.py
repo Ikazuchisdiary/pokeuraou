@@ -247,8 +247,9 @@ def _match_queue(monkeypatch, tmp_path: Path, argv: list[str]):  # noqa: ANN001,
         return 0
 
     monkeypatch.setattr(driver, "run_workers", fake_run_workers)
+    # The Python worker command: the Rust worker needs --served (IKA-458 stage 3.7).
     monkeypatch.setattr(sys, "argv", ["match_queue.py", "--out", str(tmp_path / "out"),
-                                      "--games", "1", "--value", "a.pt", *argv])
+                                      "--games", "1", "--value", "a.pt", "--python-worker", *argv])
     with pytest.raises(SystemExit) as ended:
         driver.main()
     return ended.value.code, seen.get("command")
