@@ -143,3 +143,64 @@ def test_a_read_widened_mid_way_keeps_its_tree(pool, served) -> None:  # noqa: A
     plain = humanplay.solve_move(pool.reg, pos, 0, ours, theirs, None, served,
                                  budget=Budget.matrix(), exact=True, cells=3000, levels=4, road="port")
     assert plain.deepened.grown == 0 and len(plain.ours) == len(ours)
+
+
+def _move(pool, pos, served, cells, cost, road, **kwargs):  # noqa: ANN001, ANN003, ANN202, F811
+    ours = list(narrow(pool.reg, pos, 0, limit=6).actions)
+    theirs = list(narrow(pool.reg, pos, 1, limit=6).actions)
+    return humanplay.solve_move(pool.reg, pos, 0, ours, theirs, None, served,
+                                budget=Budget.matrix(), exact=True, cells=cells, cost=cost,
+                                levels=4, road=road, **kwargs)
+
+
+def test_a_priced_budget_is_read_as_the_python_deepening_reads_it(pool, served) -> None:  # noqa: ANN001, F811
+    """A count clock's budget priced by `deepen.COSTS` (a person's count-clock game, the tests'
+    agents): the port reads the cost's units before every step, the levels and the root's cells
+    at each refinement included, so it takes the steps `deepen.py` takes on the same budget
+    (``c8``), and only its last step passes the budget."""
+    from pokeuraou.deepen import COSTS, Cost
+
+    cost = COSTS["local", 1]
+    assert cost.level and cost.root, "the prices this test is about"
+    budget = int(400.0 / cost.cell)  # 400 ms of priced work, in cells
+    same = 0
+    for pos in _positions(pool, 3, seed=17):
+        steps: list = []
+        port = _move(pool, pos, served, budget, cost, "port", progress=steps.append)
+        python = _move(pool, pos, served, budget, cost, "python", child_q=8)
+        spent = [s.spent for s in steps if s.kind == "refine"]
+        assert spent and spent[-1] >= budget and all(v < budget for v in spent[:-1])
+        assert port.deepened.expanded > 0
+        same += port.deepened.expanded == python.deepened.expanded
+    assert same == 3, f"{same} of 3 reads took deepen.py's steps"
+    # The control that the port reads the level and root prices at all: a hundred times
+    # dearer, the same budget buys fewer steps.
+    dear = Cost(fill=cost.fill, refine=cost.refine, cell=cost.cell, level=cost.level * 100,
+                root=cost.root * 100)
+    pos = _positions(pool, 1, seed=17)[0]
+    priced = _move(pool, pos, served, budget, cost, "port")
+    dearer = _move(pool, pos, served, budget, dear, "port")
+    assert 0 < dearer.deepened.expanded < priced.deepened.expanded
+
+
+def test_a_read_is_let_go_however_it_ends(pool, served) -> None:  # noqa: ANN001, F811
+    """`deepenEnd` follows every `deepenStart`: after a read, and after a progress callback that
+    raised mid-read, the port holds no read (`deepenCounts.held`)."""
+    from pokeuraou import port as port_mod
+
+    def counts() -> dict:
+        return port_mod.ask(pool.reg, lambda node: node._exchange({"kind": "deepenCounts"}))  # noqa: SLF001
+
+    pos = _positions(pool, 1, seed=19)[0]
+    _read(pool, pos, 0, served, 300, levels=4)
+    assert int(counts()["held"]) == 0
+    started = int(counts()["started"])
+
+    def boom(step) -> None:  # noqa: ANN001
+        if step.kind == "refine":
+            raise RuntimeError("the page went away")
+
+    with pytest.raises(RuntimeError, match="went away"):
+        _read(pool, pos, 0, served, 300, levels=4, progress=boom)
+    after = counts()
+    assert int(after["started"]) == started + 1 and int(after["held"]) == 0

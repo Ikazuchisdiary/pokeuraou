@@ -41,6 +41,8 @@ BRANCHES = 3
 SLICE_MS = 250.0
 #: Steps in a slice where the budget is read off counted work (a `deepen.Cost`).
 SLICE_STEPS = 4
+#: The shortest slice of wall time, in milliseconds.
+SLICE_MIN_MS = 25.0
 
 #: The process's reads and slices: the positive control a test reads.
 COUNTS = {"reads": 0, "slices": 0}
@@ -190,14 +192,38 @@ def deepen_move(  # noqa: PLR0913, PLR0915, C901 - the node, the budget and the 
         raise portlp.PortFault("deepenStart", str(answer))
     COUNTS["reads"] += 1
     ident = int(answer["id"])
+    try:
+        return _run(reg, ident, answer, me, ours, theirs, items, weights, cells=cells, cost=cost,
+                    levels=levels, outside=outside, progress=progress, hidden=hidden, grow=grow)
+    finally:
+        # Whatever stopped the read, the port lets it go (`deepenCounts.held` back to 0).
+        port.ask(reg, lambda node: node._exchange({"kind": "deepenEnd", "id": ident}))  # noqa: SLF001
+
+
+def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
+    reg: Regulation, ident: int, answer: dict[str, Any], me: int, ours: list[SideAction],
+    theirs: list[SideAction], items: list[Any], weights: np.ndarray, *, cells: float,
+    cost: Any, levels: int | None, outside: Any, progress: Any, hidden: bool,  # noqa: ANN401
+    grow: Any,  # noqa: ANN401
+) -> Answer:
+    """`deepen_move`'s slices on the read ``ident`` the port holds, and its report."""
     from .portmenus import _action  # noqa: PLC2701
 
     def meter(snap: dict[str, Any]) -> float:
+        """`deepen._Meter.spent`: the counted cells, or the cost's units of the work so far
+        (fills, refinements, cells and probed cells, and the levels and the root's cells at
+        each refinement; the port's probe asks no Q, so its ``qs`` is 0)."""
         refines = int(snap["refines"])
         counted = int(snap["cells"]) - refines
         if cost is None:
             return float(refines + counted)
         ms = cost.ms(int(snap["fills"]), refines, counted, int(snap["probed"]), 0)
+        per_level = getattr(cost, "level", 0.0)
+        if per_level and int(snap["levelSum"]):
+            ms += per_level * int(snap["levelSum"])
+        per_root = getattr(cost, "root", 0.0)
+        if per_root and int(snap["rootSum"]):
+            ms += per_root * int(snap["rootSum"])
         units = ms / cost.cell
         gate = getattr(cost, "gate", None)
         return units if gate is None else gate(units, int(snap["fills"]) + refines + counted)
@@ -226,37 +252,40 @@ def deepen_move(  # noqa: PLR0913, PLR0915, C901 - the node, the budget and the 
     snap = answer
     announce("start", snap)
     stop = ""
-    try:
-        while True:
-            if snap.get("exhausted"):
-                stop = "exhausted"
-                break
-            if meter(snap) >= cells:
-                stop = "budget"
-                break
-            run: dict[str, Any] = {"kind": "deepenRun", "id": ident}
-            if cost is None:
-                run["cells"] = int(cells)
-                if grow is not None or progress is not None:
-                    # Slices of a few steps, so the caller hears and widens as the read goes;
-                    # the steps are the same either way (the budget is read before each).
-                    run["steps"] = SLICE_STEPS
-            elif wall:
-                # The wall clock: this slice, or what is left of the budget.
-                run["ms"] = max(1.0, min(SLICE_MS, float(cells) - meter(snap)))
-            else:
+    while True:
+        if snap.get("exhausted"):
+            stop = "exhausted"
+            break
+        if meter(snap) >= cells:
+            stop = "budget"
+            break
+        run: dict[str, Any] = {"kind": "deepenRun", "id": ident}
+        if cost is None:
+            run["cells"] = int(cells)
+            if grow is not None or progress is not None:
+                # Slices of a few steps, so the caller hears and widens as the read goes;
+                # the steps are the same either way (the budget is read before each).
                 run["steps"] = SLICE_STEPS
-            wanted = None if grow is None else grow(meter(snap))
-            if wanted is not None:
-                run["grow"] = [_codes(wanted[0]), _codes(wanted[1])]
-            got = port.ask(reg, lambda node, run=run: node._exchange(run))  # noqa: SLF001
-            if "fault" in got or "serverError" in got or "tooBig" in got:
-                raise portlp.PortFault("deepenRun", str(got))
-            COUNTS["slices"] += 1
-            snap = got
-            announce("refine", snap)
-    finally:
-        port.ask(reg, lambda node: node._exchange({"kind": "deepenEnd", "id": ident}))  # noqa: SLF001
+        elif wall:
+            # The wall clock: this slice, or what is left of the budget, at least
+            # `SLICE_MIN_MS` (a pondering move's gate reads just under its budget).
+            run["ms"] = max(SLICE_MIN_MS, min(SLICE_MS, float(cells) - meter(snap)))
+        else:
+            # A cost's units are read before every step, as `deepen._Meter` reads them.
+            run["steps"] = 1
+        wanted = None if grow is None else grow(meter(snap))
+        if wanted is not None:
+            run["grow"] = [_codes(wanted[0]), _codes(wanted[1])]
+        got = port.ask(reg, lambda node, run=run: node._exchange(run))  # noqa: SLF001
+        if "no deepening is held" in str(got.get("fault", "")):
+            raise portlp.PortFault(
+                "deepenRun", "the read was lost: the port was started again mid-read, and a "
+                "read lives only in the process that began it")
+        if "fault" in got or "serverError" in got or "tooBig" in got:
+            raise portlp.PortFault("deepenRun", str(got))
+        COUNTS["slices"] += 1
+        snap = got
+        announce("refine", snap)
     own = [_action(a) for a in snap["own"]]
     other = [_action(a) for a in snap["other"]]
     lines = tuple(int(v) for v in snap["lines"])

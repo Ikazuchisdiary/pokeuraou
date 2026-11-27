@@ -304,6 +304,10 @@ struct Read {
     wait_us: f64,
     grown: u64,
     grown_cells: u64,
+    /// The refined cells' nodes' levels, and the root's cells at each refinement, summed
+    /// (`deepen._Meter`'s `levels` and `roots`, which a `Cost` prices).
+    level_sum: u64,
+    root_sum: u64,
     elapsed: std::time::Duration,
 }
 
@@ -536,6 +540,8 @@ impl Read {
         };
         self.spent += 1;
         self.refines += 1;
+        self.level_sum += level as u64;
+        self.root_sum += (self.root.comps.len() * self.root.m() * self.root.n()) as u64;
         let actions = [slot_actions(&pair[0]), slot_actions(&pair[1])];
         let result = match resolve_turn(reg, &pos, &actions, self.budget) {
             Ok(result) => result,
@@ -879,9 +885,14 @@ impl Read {
         }
         let before = (self.root.prices.clone(), self.root.eq.clone(), self.root.own.clone(), self.root.other.clone());
         let spent = self.spent;
-        if !rows.is_empty() {
-            let other = self.root.other.clone();
-            let lines = self.root_fill(reg, encoder, &rows, &other)?;
+        // Both lines are filled before the root is touched: a fill that fails leaves the read
+        // as it was.
+        let other = self.root.other.clone();
+        let mut own = self.root.own.clone();
+        own.extend(rows.iter().cloned());
+        let row_lines = if rows.is_empty() { None } else { Some(self.root_fill(reg, encoder, &rows, &other)?) };
+        let col_lines = if cols.is_empty() { None } else { Some(self.root_fill(reg, encoder, &own, &cols)?) };
+        if let Some(lines) = row_lines {
             for (p, line) in self.root.prices.iter_mut().zip(lines) {
                 p.extend(line);
             }
@@ -889,9 +900,7 @@ impl Read {
             self.spent += (rows.len() * other.len() * self.root.comps.len()) as u64;
             self.fills += 1;
         }
-        if !cols.is_empty() {
-            let own = self.root.own.clone();
-            let lines = self.root_fill(reg, encoder, &own, &cols)?;
+        if let Some(lines) = col_lines {
             let (m, n, c) = (own.len(), self.root.other.len(), cols.len());
             for (p, line) in self.root.prices.iter_mut().zip(lines) {
                 let mut grown = Vec::with_capacity(m * (n + c));
@@ -1057,6 +1066,8 @@ impl Read {
             "waitUs": self.wait_us,
             "grown": self.grown,
             "grownCells": self.grown_cells,
+            "levelSum": self.level_sum,
+            "rootSum": self.root_sum,
             "elapsedMs": self.elapsed.as_secs_f64() * 1e3,
             "unmodelled": self.notes.iter().collect::<Vec<_>>(),
         })
@@ -1255,6 +1266,8 @@ fn start(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Result<V
         wait_us: 0.0,
         grown: 0,
         grown_cells: 0,
+        level_sum: 0,
+        root_sum: 0,
         elapsed: std::time::Duration::ZERO,
     };
     let (own, other) = (read.root.own.clone(), read.root.other.clone());

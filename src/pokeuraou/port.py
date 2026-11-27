@@ -60,9 +60,13 @@ class PortRefused(RuntimeError):
 def ask[T](reg: Regulation, call: Callable[[RustNode], T]) -> T:
     """`call` on the warm node; a failure restarts the process and asks again.
 
-    A node keeps nothing between requests (`rustnode.RESTARTS_ALLOWED`), so the same call on
-    a fresh process is the same answer. Once the restarts run out this raises: the road it
-    used to fall back to was the Python resolver, and there is none (IKA-209).
+    A node keeps nothing between requests that the caller cannot send again
+    (`rustnode.RESTARTS_ALLOWED`), so the same call on a fresh process is the same answer. The
+    one exception is a deepening (`deepenStart` .. `deepenEnd`, IKA-464): the read lives in the
+    process that began it, so a `deepenRun` after a restart is answered "no deepening is held"
+    and `portdeepen` stops the move with "the read was lost". Once the restarts run out this
+    raises: the road it used to fall back to was the Python resolver, and there is none
+    (IKA-209).
     """
     while True:
         node = rustnode.require_node(reg)
