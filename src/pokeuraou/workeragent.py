@@ -52,13 +52,16 @@ ALLOWED_DIFFERENT = {
     "records": "the board's record templates, one per seat",
     "label": "the board's name for its tested arm, written into the records",
     "mode": "says which worker reads the config",
-    # Compared through the arm's node and store (`board_view`), not as their own keys.
-    "servers": "read into each arm's node.server",
-    "qServers": "read into each arm's node.qServer",
+    # Compared per arm (`board_view`), not as their own keys: the arm's leaf server as its
+    # node.server and as the context's server of each side, its Q server as its node.qServer and q.
+    "servers": "read per arm into its node.server and each side's context server",
+    "qServers": "read per arm into its node.qServer and q",
     "arms": "each arm is compared as a whole (`board_view`)",
-    "value": "generation's leaf server, the same as its node.server",
-    "q": "generation's Q server, the same as its node.qServer",
-    "context": "generation's leaf servers and hidden state; the leaf is its node.server",
+    # `context.hidden` is a placeholder both workers rebuild per game (the game's number, the
+    # seen identities, the leads); `context.leaf` names a server by its place in a list the two
+    # configs order differently. The servers themselves are compared (`_context_view`).
+    "context.hidden": "rebuilt by each worker per game",
+    "context.leaf": "a place in a list; the server it names is compared",
 }
 
 
@@ -88,16 +91,17 @@ class StubQ:
 
 
 def write_pool(directory: Path) -> Path:
-    """Three variants of the M-B roster in the pool file's shape (as `tests/test_poolplay.py`'s)."""
+    """Three variants of the M-B roster in the pool file's shape (as `tests/test_poolplay.py`'s),
+    under M-C's regulation, the one generation and the boards play."""
     base = json.loads((ROOT / "configs" / "teams" / "rizabanadohido.json").read_bytes())["team"]
     rotated = copy.deepcopy(base[2:] + base[:2])
     respread = copy.deepcopy(base)
     for member in respread:
         member["sp"] = {"hp": 32, "spe": 32, "atk": 2}
     data = {
-        "id": "agent-pool", "name": "agent", "regulation": "gen9championsvgc2026regmb",
+        "id": "agent-pool", "name": "agent", "regulation": "gen9championsvgc2026regmc",
         "character": "the agent comparison's pool",
-        "validatedAgainst": {"formatId": "gen9championsvgc2026regmb"},
+        "validatedAgainst": {"formatId": "gen9championsvgc2026regmc"},
         "teams": [{"id": f"t{i}", "name": f"team {i}", "team": t}
                   for i, t in enumerate((base, rotated, respread))],
     }
@@ -160,7 +164,11 @@ def _rustworker(source: Path | None) -> Iterator[None]:
             sys.modules["pokeuraou.rustworker"] = real
             pokeuraou.rustworker = real
         else:
+            # Not imported before: neither the module table nor the package keeps the copy (the
+            # package attribute is what `from pokeuraou import rustworker` reads first).
             sys.modules.pop("pokeuraou.rustworker", None)
+            if getattr(pokeuraou, "rustworker", None) is module:
+                delattr(pokeuraou, "rustworker")
 
 
 def build_both(
@@ -204,10 +212,35 @@ def _server(server: Any) -> Any:  # noqa: ANN401
     return {k: v for k, v in server.items() if k not in PER_RUN}
 
 
+def _context_view(leaf_server: Any, q_server: Any) -> dict[str, Any]:  # noqa: ANN401
+    """The servers a side plays on, as `playGame`'s context and the config's `value` and `q` hand
+    them over: the leaf server whole but the keys of the run (its `netScoresEnds` and `encoding`
+    are read by the replacement and self-switch nodes, `replacenode.rs` and `selfswitch.rs`), and
+    the model and buffer size of the leaf and the Q."""
+    leaf = _server(leaf_server)
+    q = _server(q_server)
+    return {
+        "context.servers[leaf]": leaf,
+        "value": None if not isinstance(leaf, dict) else
+        {"model": leaf.get("model"), "bytes": leaf.get("bytes")},
+        "q": None if not isinstance(q, dict) else {"model": q.get("model"), "bytes": q.get("bytes")},
+    }
+
+
 def generation_view(generation: dict[str, Any]) -> dict[str, Any]:
     """Generation's config without the keys compared nowhere, its node's servers as an agent
-    sees them."""
-    view = {k: v for k, v in generation.items() if k not in ALLOWED_DIFFERENT}
+    sees them, and its context's leaf servers (one per side) and its `value` and `q`."""
+    view = {k: v for k, v in generation.items()
+            if k not in ALLOWED_DIFFERENT and k not in ("context", "value", "q")}
+    context = generation.get("context") or {}
+    servers, leaves = context.get("servers") or [], context.get("leaf") or []
+    for side in (0, 1):
+        leaf = leaves[side] if side < len(leaves) else None
+        server = servers[leaf] if isinstance(leaf, int) and leaf < len(servers) else None
+        # Generation's `value` and `q` are the buffer each worker allocates for the server.
+        mine = _context_view(server, generation.get("q"))
+        mine["value"] = generation.get("value")
+        view[f"side {side}"] = mine
     node = dict(view.get("node") or {})
     for key in ("server", "qServer"):
         if key in node:
@@ -223,6 +256,16 @@ def board_view(board: dict[str, Any], k: int) -> dict[str, Any]:
     the arm's selection store and tag."""
     view = {key: v for key, v in board.items() if key not in ALLOWED_DIFFERENT}
     arm = board["arms"][k]
+    servers_, qs_ = board.get("servers") or [], board.get("qServers") or []
+    leaf_, q_ = arm.get("leaf"), arm.get("q")
+    side = _context_view(
+        servers_[leaf_] if isinstance(leaf_, int) and leaf_ < len(servers_) else None,
+        qs_[q_] if isinstance(q_, int) and q_ < len(qs_) else None,
+    )
+    # The arm plays the same servers in either seat (`boardworker.rs` hands `playGame` the
+    # config's servers and each side's arm's leaf).
+    view["side 0"] = side
+    view["side 1"] = side
     node = dict(arm.get("node") or {})
     servers, qs = board.get("servers") or [], board.get("qServers") or []
     leaf, q = arm.get("leaf"), arm.get("q")

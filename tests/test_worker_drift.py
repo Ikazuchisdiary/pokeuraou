@@ -122,6 +122,35 @@ def test_missing_keys_and_arms_are_differences(stand_in, tmp_path) -> None:  # n
     assert any("epsilon is 0.25" in p for p in exploring), exploring
 
 
+def test_the_servers_the_game_reads_are_compared(stand_in, tmp_path) -> None:  # noqa: ANN001
+    """The leaf servers `playGame`'s context hands the replacement and self-switch nodes, and the
+    buffers of `value` and `q`: a change in any of them is a difference (the review's controls)."""
+    import copy
+
+    address, pool_path = stand_in
+    generation, board = build_both(address, pool_path, tmp_path)
+    assert agent_differences(generation, board) == []
+
+    def changed(config: dict, edit) -> dict:  # noqa: ANN001
+        config = copy.deepcopy(config)
+        edit(config)
+        return config
+
+    cases = (
+        (generation, changed(board, lambda b: b["servers"][0].update(netScoresEnds=True)),
+         "context.servers[leaf].netScoresEnds"),
+        (generation, changed(board, lambda b: b["servers"][0].update(encoding={"megaFromSlots": True})),
+         "context.servers[leaf].encoding"),
+        (changed(generation, lambda g: g["context"]["servers"][0].update(batch=1)), board,
+         "context.servers[leaf].batch"),
+        (changed(generation, lambda g: g["value"].update(bytes=1024)), board, "value.bytes"),
+        (changed(generation, lambda g: g["q"].update(model="other-q")), board, "q.model"),
+    )
+    for mine, theirs, said in cases:
+        problems = agent_differences(mine, theirs)
+        assert any(said in p for p in problems), (said, problems)
+
+
 def test_every_key_but_the_named_ones_is_compared() -> None:
     """`ALLOWED_DIFFERENT` is what is left out, each with a reason; nothing else is."""
     assert all(isinstance(why, str) and why for why in ALLOWED_DIFFERENT.values())
