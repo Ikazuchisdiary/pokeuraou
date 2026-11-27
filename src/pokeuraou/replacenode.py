@@ -32,11 +32,13 @@ def solve(  # noqa: PLR0913 - the node's pieces
     options: Sequence[Sequence[SideAction]],
     spreads: dict[int, list],
     leaves: Sequence[Any],  # noqa: ANN401 - each side's leaf
-) -> dict[int, tuple[list[float], float]]:
-    """Each side's (strategy, value) for the replacement node: side 0's in side 0's units,
-    side 1's of its own game (the negated transpose). ``options`` are each side's
+) -> dict[int, tuple[list[float], float, tuple[np.ndarray, ...]]]:
+    """Each side's (strategy, value, replies) for the replacement node: side 0's value in
+    side 0's units, side 1's of its own game (the negated transpose); the replies are the
+    other side's strategy in each completion of its bench. ``options`` are each side's
     replacements, ``spreads[s]`` the completions of side ``s``'s bench, ``leaves[s]`` side
-    ``s``'s leaf (an inference server's)."""
+    ``s``'s leaf (an inference server's). The Rust worker asks the same request
+    (`rust/src/replacenode.rs`); a person's game asks it for the agent's side (`humanplay`)."""
     from .beliefnode import served_leaf
     from .encode import rules_of
     from .inference import request_failed
@@ -134,11 +136,11 @@ def solve(  # noqa: PLR0913 - the node's pieces
         games = [mat if side == 0 else -mat.T for mat in by_side[side]]
         solved[side] = (games, portlp.bayesian_answer(games, weights[side], one))
     portlp.COUNTS["replaced"] += 1
-    out: dict[int, tuple[list[float], float]] = {}
+    out: dict[int, tuple[list[float], float, tuple[np.ndarray, ...]]] = {}
     for side in (0, 1):
-        games, got = solved[side]
-        del games
+        _games, got = solved[side]
         if isinstance(got, Exception):
             raise got
-        out[side] = ([float(x) for x in got.row_strategy], float(got.value))
+        out[side] = ([float(x) for x in got.row_strategy], float(got.value),
+                     tuple(np.asarray(y, dtype=np.float64) for y in got.col_strategies))
     return out

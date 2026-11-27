@@ -149,64 +149,6 @@ def test_knowing_the_bench_is_never_worth_less_than_nothing(setup) -> None:  # n
     assert informed >= answers[0].value - 1e-9
 
 
-def _fixture_sheets(reg, position, data):  # noqa: ANN001, ANN202
-    """Each side's six as sets: the four on the board exactly, the two they left at home
-    from the usage prior, which is all an observer could have anyway."""
-    import numpy as np
-
-    from pokeuraou.priors import (
-        SampledSet,
-        find_cached_chaos,
-        load_chaos,
-        sample_set,
-    )
-
-    cached = find_cached_chaos(reg.meta.format_id)
-    if cached is None:
-        pytest.skip("no cached usage stats to fill the unbrought two")
-    prior = load_chaos(cached, reg)
-    rng = np.random.default_rng(0)
-    out = []
-    for side, key in ((0, "ownSix"), (1, "foeSix")):
-        board = {mon.species: mon for mon in position.sides[side].pokemon}
-        six = []
-        for name in data[key]:
-            mon = board.get(name)
-            six.append(
-                SampledSet(
-                    species=mon.species, ability=mon.ability, item=mon.item,
-                    nature=mon.nature, sp=dict(mon.sp or {}),
-                    moves=[m.id for m in mon.moves],
-                )
-                if mon is not None
-                else sample_set(rng, reg, prior.species[name])
-            )
-        out.append(six)
-    return tuple(out)
-
-
-@pytest.fixture(scope="module")
-def replacement():  # noqa: ANN201
-    """A real mid-game replacement node, taken from a recorded game.
-
-    A turn-1 position built for the occasion gives a forced or one-sided replacement, and a
-    forced choice agrees with anything -- the first version of this test compared [1.0, 0.0]
-    with [1.0, 0.0] and would have passed against a node that did nothing at all.
-    """
-    import json
-    from pathlib import Path
-
-    from pokeuraou.port import replacements_needed
-    from pokeuraou.position import Position
-
-    path = Path(__file__).parent / "fixtures" / "replacement-mixed.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    reg = load_regulation(data["position"]["format"])
-    register_mega_stones(reg)
-    position = Position.from_json(data["position"])
-    return reg, position, replacements_needed(reg, position), data
-
-
 def test_the_menu_is_ranked_from_a_completion_and_not_from_the_position(setup) -> None:  # noqa: ANN001
     """`narrow` decides which actions get a number at all, and the leaf ranking reads the
     whole position to decide it -- so ranking from the true position leaves that choice

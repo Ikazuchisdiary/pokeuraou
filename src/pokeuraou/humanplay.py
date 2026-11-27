@@ -94,7 +94,7 @@ from . import port
 from .actions import PassAction, SideAction, side_actions, switch_actions_after_faint, target_names
 from .budget import Budget
 from .deepen import ALL_ACTIONS, COSTS, cells_for_seconds
-from .equilibrium import EquilibriumError, solve_bayesian
+from .equilibrium import EquilibriumError
 from .hidden import (
     DEFAULT_BENCH_DROP,
     completions,
@@ -127,7 +127,6 @@ from .selfplay import (
     _set_json,
     _shown_record,
     position_from_sets,
-    replacement_matrix,
 )
 from .teams import Roster, pick_four_indices
 
@@ -2230,15 +2229,18 @@ class HumanGame:
         replacements. Returns its mixture over ``options[side]``, its model of the other
         side's (averaged over completions) and the value in side 0's units. What the agent
         plays at a replacement (`_replacement`), and what an agent in the person's seat
-        plays there (`timematch`, IKA-333)."""
+        plays there (`timematch`, IKA-333).
+
+        IKA-463: the node is the port's `replacementNode` (`replacenode.solve`, the request
+        the Rust worker asks): the fills, the leaf on the inference server, a phase that
+        draws folded at its weights (IKA-352) and the LP. The other side's game is asked over
+        this side's own bench as it stands (one completion of weight 1) and not read."""
+        from types import SimpleNamespace
+
+        from . import replacenode
+
         reg, record = self.reg, self.record
         other = 1 - side
-        leaf = self.agent.evaluate
-
-        def matrix(at: Position) -> np.ndarray:
-            # A phase that draws is every outcome at its weight (IKA-352).
-            return replacement_matrix(reg, at, options, leaf)
-
         mine = options[side]
         policy = [1.0]
         model = [1.0 / len(options[other])] * len(options[other])
@@ -2255,13 +2257,15 @@ class HumanGame:
                 record.unmodelled.append(f"hidden bench at a replacement: {problem}")
                 items = []
             if items:
-                built = [matrix(item.position) for item in items]
-                weights = np.asarray([item.weight for item in items], dtype=np.float64)
+                weights = [item.weight for item in items]
+                spreads = {other: items, side: [SimpleNamespace(position=pos, weight=1.0)]}
+                leaf = self.agent.leaf
                 try:
-                    solved = solve_bayesian([m if side == 0 else -m.T for m in built], weights)
-                    policy = [float(x) for x in solved.row_strategy]
-                    model = _averaged(solved.col_strategies, weights)
-                    value = float(solved.value) if side == 0 else -float(solved.value)
+                    answers = replacenode.solve(reg, options, spreads, (leaf, leaf))
+                    strategy, own_value, replies = answers[side]
+                    policy = strategy
+                    model = _averaged(replies, weights)
+                    value = own_value if side == 0 else -own_value
                 except EquilibriumError:
                     policy = [1.0 / len(mine)] * len(mine)
             else:

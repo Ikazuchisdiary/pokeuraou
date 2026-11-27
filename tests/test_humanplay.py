@@ -258,6 +258,37 @@ def test_the_record_holds_both_menus_the_agent_mixture_and_the_person_choice(poo
         assert d["humanOffMenu"] == (d["foeChosen"] not in d["foeActions"])
 
 
+def test_the_agent_s_replacement_is_the_port_s_replacement_node(pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-463: the agent's side at a replacement phase is solved by the port's
+    `replacementNode` (`replacenode.solve`), one request a phase where either side has a
+    choice; its mixture is a distribution over its options and the record holds it."""
+    from pokeuraou import portlp, replacenode
+
+    asked: list[int] = []
+    real = replacenode.solve
+
+    def counting(reg, options, spreads, leaves):  # noqa: ANN001, ANN202
+        asked.append(len(options[0]) * len(options[1]))
+        return real(reg, options, spreads, leaves)
+
+    monkeypatch.setattr(replacenode, "solve", counting)
+    before = portlp.COUNTS["replaced"]
+    phases = []
+    for seed in range(4):
+        record, _, _ = _play(pool, PolicyPerson("first"), seed=seed, side=0, turns=30,
+                             agent=_agent(pool, width_only=True))
+        phases += [d for d in record["decisions"] if d["kind"] == "replacement"
+                   and len(d["ownActions"]) * len(d["foeActions"]) > 1]
+        if phases:
+            break
+    assert phases, "no replacement phase with a choice; the road was not taken"
+    assert len(asked) >= len(phases) and all(cells > 1 for cells in asked)
+    assert portlp.COUNTS["replaced"] - before == len(asked)
+    for d in phases:
+        assert sum(d["ownPolicy"]) == pytest.approx(1.0)
+        assert len(d["ownPolicy"]) == len(d["ownActions"])
+
+
 def test_the_wall_clock_spends_the_budget(pool, tmp_path) -> None:  # noqa: ANN001
     agent = _agent(pool, clock="wall", seconds=0.3)
     record, clock, _ = _play(pool, PolicyPerson("first"), seed=3, agent=agent, turns=2)

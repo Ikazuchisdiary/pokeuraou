@@ -60,8 +60,8 @@ uv run pytest --junitxml=reports/pytest.xml && uv run python tools/ci_skip_audit
 - 決定性は検証の道具で、製品の制約ではない（ユーザー、9/28）。局が少し変わる高速化（浮動小数の足し順・順伝播の積み上げ・スレッドの並べ方など）は、一致しないことでは捨てず、変化の大きさを記録して同じ費用で判定する。テストと A/B のためにノード時間・固定スレッドの決定的な読み方は残し、人と打つ・検討は実時間・全コア・非決定の並列を使ってよい。
 
 **探索:**
-- `search.py`（narrow で候補を絞り、葉の順位付けで候補集合を作り、行列を埋める）
-- `equilibrium.py`（HiGHS の LP で均衡を解く）
+- `search.py`（narrow で候補を絞り、葉の順位付けで候補集合を作り、行列を埋める）。使うのは人と打つ道具・検討だけで、深掘りの根と梯子のセルもここを通る。固定の深さ 2 の読み・研究用の knob（`depth`・`restricted`・`depth2_auto` など）・均衡の選び方（`eqselect`）は IKA-463 で消した
+- `equilibrium.py`（HiGHS の LP で均衡を解く）。Python の LP を使うのは、人と打つ道具・検討の開いた局面の深さ 1 のノード、深掘り、梯子、選出だけ。人と打つ道具の交代の局面は、生成と同じ port の `replacementNode`（`replacenode.solve`）で解く（IKA-463）
 - 裏を隠すノードは `beliefnode.py` / `hidden.py`（裏の決定化ごとに解いて fold する）
 - 選出（6→4）は順序付きの 90×90 のベイズ型ゲーム（`selection.py`）。人と打つ道具は、答えに関わるセルを深く読み直す（`selection_deep.py`、90 秒・全コア）。各セルは深さ 1 で読む（`humanplay.PLAY_SELECTION_READING`。深さ 2 の段で読む前の既定に、同じ費用で +12.7 Elo [−0.1, +25.6]、900 組。IKA-440）。前の既定は `--selection-reading default`。生成と対戦評価の選出は、先に解いた store のまま
 
