@@ -376,8 +376,57 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
     from types import SimpleNamespace
 
     from . import portlp
-    from .encode import HP_SCALE
     from .inference import request_failed
+
+    request, jobs, asks = node_request(reg, leaf, position, row, col, budget, rules, hidden,
+                                       spreads, solve, encoder)
+    started = timing.clock()
+    answer = port.ask(reg, lambda node: node.belief_node(request))
+    wall = timing.clock() - started
+    portlp.COUNTS["crossings"] += 1
+    portlp.COUNTS["lps"] += int(answer.get("lps", 0))
+    if "fault" in answer:
+        raise portlp.PortFault(request["kind"], str(answer["fault"]))
+    if "serverError" in answer:
+        raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
+                              "capGb": answer.get("capGb")}, "inference failed")
+    if "fills" not in answer:
+        raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
+    book_node(answer, leaf, encoder, wall)
+    if "refused" in answer:
+        port.raise_refused([(int(i), int(j), str(why)) for i, j, why in answer["refused"]])
+    if rules.mega_from_slots and answer["mega"] is not True:
+        # A binary that predates the field encoded with the current rule.
+        return _NOT_ON_THIS_BINARY
+    if "served" not in answer:
+        raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
+    book_served(answer, leaf, encoder, any(hidden.values()))
+    unmodelled = set(answer["unmodelled"])
+    ordered = [SimpleNamespace(side=job["side"]) for job in jobs]
+    payoffs, solved = _fold_answer(answer, ordered, len(row), len(col), asks)
+    matrices: dict[int, list[np.ndarray]] = {}
+    for job, payoff in zip(ordered, payoffs, strict=True):
+        matrices.setdefault(1 - job.side, []).append(payoff)
+    return BeliefNode(matrices, unmodelled, int(answer["shared"]), int(answer["redone"]), solved)
+
+
+def node_request(  # noqa: PLR0913 - the node's pieces
+    reg: Regulation,
+    leaf,  # noqa: ANN001 - inference.RemoteValue
+    position: Position,
+    row: list[SideAction],
+    col: list[SideAction],
+    budget: Budget,
+    rules,  # noqa: ANN001 - EncodingRules
+    hidden: dict[int, tuple[int, ...]],
+    spreads: dict[int, list],
+    solve: Sequence[int],
+    encoder,  # noqa: ANN001 - Encoder
+) -> tuple[dict, list[dict], list]:
+    """The `beliefNode` request `_node_in_port` sends, its jobs and the games it asks to solve.
+    The port's deepening (`portdeepen`, IKA-464) starts from the same request."""
+    from . import portlp
+    from .encode import HP_SCALE
     from .rustnode import _candidates, _position, dump_budget  # noqa: PLC2701
 
     ident = _id_of
@@ -440,34 +489,7 @@ def _node_in_port(  # noqa: PLR0913 - the node's pieces
         "team_hp_fraction": side_k["team_hp_fraction"],
         "hp_scale": float(HP_SCALE),
     }
-    started = timing.clock()
-    answer = port.ask(reg, lambda node: node.belief_node(request))
-    wall = timing.clock() - started
-    portlp.COUNTS["crossings"] += 1
-    portlp.COUNTS["lps"] += int(answer.get("lps", 0))
-    if "fault" in answer:
-        raise portlp.PortFault(request["kind"], str(answer["fault"]))
-    if "serverError" in answer:
-        raise request_failed({"error": answer["serverError"], "oom": answer.get("oom"),
-                              "capGb": answer.get("capGb")}, "inference failed")
-    if "fills" not in answer:
-        raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
-    book_node(answer, leaf, encoder, wall)
-    if "refused" in answer:
-        port.raise_refused([(int(i), int(j), str(why)) for i, j, why in answer["refused"]])
-    if rules.mega_from_slots and answer["mega"] is not True:
-        # A binary that predates the field encoded with the current rule.
-        return _NOT_ON_THIS_BINARY
-    if "served" not in answer:
-        raise RuntimeError("the port did not answer `beliefNode`; the binary predates it -- rebuild it")
-    book_served(answer, leaf, encoder, any(hidden.values()))
-    unmodelled = set(answer["unmodelled"])
-    ordered = [SimpleNamespace(side=job["side"]) for job in jobs]
-    payoffs, solved = _fold_answer(answer, ordered, len(row), len(col), asks)
-    matrices: dict[int, list[np.ndarray]] = {}
-    for job, payoff in zip(ordered, payoffs, strict=True):
-        matrices.setdefault(1 - job.side, []).append(payoff)
-    return BeliefNode(matrices, unmodelled, int(answer["shared"]), int(answer["redone"]), solved)
+    return request, jobs, asks
 
 
 def book_node(answer: dict, leaf, encoder, wall: float) -> None:  # noqa: ANN001

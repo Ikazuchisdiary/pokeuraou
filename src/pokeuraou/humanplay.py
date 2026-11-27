@@ -469,6 +469,12 @@ CLOCKS = ("wall", "count")
 #: turns) it asks nothing; it matters where the legal list is longer than the width.
 PLAY_ORACLE = ALL_ACTIONS
 
+#: Where a deepened move is read (IKA-464): ``python`` (`deepen.py`, `narrow`'s children) or
+#: ``port`` (`portdeepen`, the port's `deepenStart`, the Q's children). `solve_move`'s
+#: ``road`` names one for a call.
+DEEPEN_ROADS = ("python", "port")
+DEEPEN_ROAD = "python"
+
 #: The deepening's depth guard for a person's game and the analysis mode (None would be
 #: `deepen.MAX_LEVELS`, 8, which generation and the board keep). IKA-342: 16. On 16 recorded
 #: M-C positions read for 7.5 to 60 s of the count clock, the answer at guard 16 lost less
@@ -1433,6 +1439,7 @@ def solve_move(
     discount: float | None = None,
     grow: Any = None,  # noqa: ANN401 - deepen.Grow
     ladder: dict[str, Any] | None = None,
+    road: str | None = None,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game when ``exact``: at depth 1 the port's `beliefNode` on one exact completion a
@@ -1454,6 +1461,24 @@ def solve_move(
             raise ValueError("a ladder is read on the depth-1 node alone (IKA-367)")
         return _ladder_move(reg, pos, me, ours, theirs, spreads, leaf, budget=budget,
                             exact=exact, how=ladder)
+    if cells and (road or DEEPEN_ROAD) == "port":
+        from . import portdeepen
+
+        if child_q is not None or grow is not None:
+            raise ValueError("the port's deepening ranks its children by the Q's 8 and does not "
+                             "grow the root: no child_q, no grow (IKA-464)")
+        items = list(open_spreads(pos)[you] if exact else (spreads or {})[you])
+        got = portdeepen.deepen_move(
+            reg, pos, me, list(ours), list(theirs), items, leaf, budget=budget, cells=cells,
+            cost=cost, levels=levels, discount=discount, outside=outside, progress=progress,
+            hidden=not exact,
+        )
+        return SolvedMove(
+            strategy=got.strategy, model=_averaged(got.replies, [item.weight for item in items]),
+            ours=got.ours, theirs=got.theirs,
+            value=float(got.value) if me == 0 else -float(got.value),
+            deepened=got.deepened, unmodelled=got.unmodelled,
+        )
     if exact and cells:
         got = search(
             reg, pos, ours, theirs, leaf, budget=budget, deepen=cells, deepen_cost=cost,

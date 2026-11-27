@@ -24,6 +24,7 @@ mod beliefplan;
 mod bind;
 #[cfg(feature = "count-allocations")]
 mod counting_alloc;
+mod deepen;
 mod damage;
 mod damage_callback;
 mod effects;

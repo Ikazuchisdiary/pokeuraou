@@ -1245,6 +1245,13 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("replacementNode") => {
             crate::replacenode::replacement_node(reg, encoder, &value)
         }
+        // IKA-464: a move's best-first deepening, read in slices (`deepen.rs`).
+        Ok(value) if value["kind"].as_str() == Some("deepenStart") => {
+            crate::deepen::deepen_start(reg, encoder, &value)
+        }
+        Ok(value) if value["kind"].as_str() == Some("deepenRun") => crate::deepen::deepen_run(reg, encoder, &value),
+        Ok(value) if value["kind"].as_str() == Some("deepenEnd") => crate::deepen::deepen_end(&value),
+        Ok(value) if value["kind"].as_str() == Some("deepenCounts") => crate::deepen::counts(),
         // IKA-463: a selection game's matrices, scores and Bayesian game in one request.
         Ok(value) if value["kind"].as_str() == Some("selectionSolve") => {
             crate::selection::selection_solve(reg, encoder, &value)
