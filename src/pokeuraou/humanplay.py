@@ -487,10 +487,6 @@ PLAY_MAX_LEVELS: int | None = 16
 #: machine to the analysis mode. The port's deepening (IKA-464) was not measured again.
 PLAY_THREADS = 4
 
-#: This process's CUDA allocator cap, and each worker process's (IKA-334's server cap: a
-#: card that fills resets instead of raising out-of-memory).
-PLAY_CUDA_MEMORY_GB = 3.5
-
 #: Whether the agent reads on while the person chooses (IKA-344, ponder). Off until a
 #: same-time board has shown it stronger (IKA-333's tool); ``--ponder on`` turns it on.
 PLAY_PONDER = False
@@ -2371,7 +2367,6 @@ __all__ = [
     "CLOCKS",
     "MIN_DEEPEN_MS",
     "NODE_TIME",
-    "PLAY_CUDA_MEMORY_GB",
     "PLAY_MAX_LEVELS",
     "PLAY_ORACLE",
     "PLAY_PONDER",
