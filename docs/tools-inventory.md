@@ -6,13 +6,13 @@
 
 > **9/24 IKA-212 で消した道具（下の表の行はそのまま残す）。** Python の解決器
 > （`src/pokeuraou/resolve.py`）を消したので、それを前提にする道具を消した。消した本文は
-> git の 471b98e で読める。理由は TODO.md の「9/24 — IKA-212」の節の表:
+> git の 471b98e で読める。理由は TODO.md の「9/24 — IKA-212」の節の表に書いてある。消した道具は
 > `bench`・`bench_turn_cases`・`bench_damage_cases`・`branch_dedup`・`cells_needed`・
 > `count_resolver_calls`・`diff_commands`・`diff_narrow`・`diff_node`・`diff_solve_node`・
 > `dump_damage_cases`・`dump_damage_cases_selfplay`・`dump_damage_cases_synthetic`・
 > `dump_turn_cases`・`hidden_dominance`・`ko_branch_count`・`narrow_effect`・`narrow_regret`・
 > `oneshot/depth_effect`・`profile_resolve`・`regret_playout`・`seat_bias`・`selfplay_budget`・
-> `width_vs_ranking`。port に向け直したもの（`diff_turn`・`diverge_report`・`diff_replacement`・
+> `width_vs_ranking` である。port に向け直したもの（`diff_turn`・`diverge_report`・`diff_replacement`・
 > `show_game`・`why_action` ほか）は残っている。
 
 ## 数えた結果（IKA-25 で再測定）
@@ -32,7 +32,7 @@
 小さいが、**この表の数字は上の定義で自分で数え直したもの**であって、本文の転記ではない。
 `scripts/` はこのリポジトリに存在しない。
 
-⚠ **「参照が無い＝死んでいる」ではない。** その場で叩いただけの道具は記録に参照が残らない。
+**「参照が無い＝死んでいる」ではない。** その場で実行しただけの道具は記録に参照が残らない。
 この数字は棚卸しの必要性を示すだけで、削除の根拠にはならない。
 
 ## 凡例
@@ -60,12 +60,12 @@
 | C | `configs/` |
 | — | どこにも無い |
 
-**判定**:
+**判定**
 
 | 判定 | 意味 |
 |---|---|
 | 現役 | 記録のどこかから参照されている。動かさない |
-| 据え置き（他ツール依存） | 記録からの参照は無いが、他のツールが import または名指ししている。動かすと壊れる |
+| 据え置き（他ツール依存） | 記録からの参照は無いが、他のツールが import または名指ししている。動かすと使えなくなる |
 | 判断保留 | 記録からも他のツールからも参照が無い。**退避の根拠が弱いので動かさなかった** |
 | **退避** | 一度きりの分析と判断し、`tools/oneshot/` へ移した |
 
@@ -75,9 +75,9 @@
 
 ## 表
 
-「使う側」は、そのツールを import または本文・ヘルプ文字列で名指ししている他のツール。
+「使う側」はそのツールを import または本文・ヘルプ文字列で名指ししている他のツール。
 
-⚠ **上の「数えた結果」は 9/19 の数字**であって、この表の行数ではない。9/19 以降に増えた
+**上の「数えた結果」は 9/19 の数字**であって、この表の行数ではない。9/19 以降に増えた
 道具は表に足しているが、**102 という総数は数え直していない**。9/22 時点で表に無いものが
 1本ある: `ci_skip_audit.py`（CI が何を飛ばしたかを見る。9/19 以降に追加）。
 
@@ -120,7 +120,7 @@
 | `diff_turn.py` | 1ターン解決器の全体が Showdown と一致するか | 9/19 | TR | `diff_replacement`、`diverge_report` | 現役 |
 | `diverge_report.py` | 解決器の無言の乖離の原因を、統計的リフトで順に並べる | 9/10 | RX | — | 現役 |
 | `tools/oneshot/does_the_sweep_happen.py` | 人が実際に打つ筋書き（削り→抜き）はデータに現れるか | 9/17 | — | — | **退避** |
-| `dump_damage_cases.py` | 実際の行列充填が行う全ダメージ呼び出しと、Python が返した答え | 9/12 | — | `dump_damage_cases_selfplay`、`dump_damage_cases_synthetic` | 据え置き（他ツール依存） |
+| `dump_damage_cases.py` | 実際の行列の評価が行う全ダメージ呼び出しと、Python が返した答え | 9/12 | — | `dump_damage_cases_selfplay`、`dump_damage_cases_synthetic` | 据え置き（他ツール依存） |
 | `dump_damage_cases_selfplay.py` | 同じダンプを、フィールド相手の自己対戦から取る | 9/12 | — | — | 判断保留 |
 | `dump_damage_cases_synthetic.py` | 効果表の全修正子を最低1回発火させる合成ケースを作る | 9/12 | — | — | 判断保留 |
 | `dump_turn_cases.py` | 生成1本の全 resolve_turn 呼び出しと、Python が返した分岐 | 9/12 | — | `agent_drift` | 据え置き（他ツール依存） |
@@ -131,23 +131,23 @@
 | `generate_queue.py` | 対局をブロック配分ではなく1本のキューで生成する | 9/17 | TshS | `match_queue`、`selfplay` | 現役 |
 | `generation_match.py` | ある世代の探索を別世代の探索と戦わせる（唯一公平な比較） | 9/19 | TGhRSX | `match_queue`、`paired_match`、`served_matches_direct` | 現役 |
 | `hidden_dominance.py` | 同じ優越の問いを、プレイヤーが実際に持っていた情報の下で問う | 9/19 | — | `human_baseline` | 据え置き（他ツール依存） |
-| `human_baseline.py` | 人が答えを知っている局面を、葉と突き合わせる | 9/19 | Ts | `hidden_dominance`、`ko_branch_count`、`why_action` | 現役 |
-| `inference_server.py` | 葉をワーカーの代わりに持つ（ワーカーがモデルを抱えずに済むように） | 9/17 | — | `generate_queue`、`match_queue`、`served_matches_direct`、`served_throughput`、`worker_growth` | 据え置き（他ツール依存） |
+| `human_baseline.py` | 人が答えを知っている局面を、評価モデルと突き合わせる | 9/19 | Ts | `hidden_dominance`、`ko_branch_count`、`why_action` | 現役 |
+| `inference_server.py` | 評価モデルをワーカーの代わりに持つ（ワーカーが評価モデルを自分で持たずに済むように） | 9/17 | — | `generate_queue`、`match_queue`、`served_matches_direct`、`served_throughput`、`worker_growth` | 据え置き（他ツール依存） |
 | `ko_branch_count.py` | 確定KOでも分岐は16本あるのか | 9/19 | — | — | 判断保留 |
 | `lead_profile.py` | 解いた各選出キャッシュが六体のどれを連れ、どの2体で先発するか | 9/18 | T | `book_seed_spread` | 現役 |
-| `leaf_calibration.py` | 静的な葉の見積もりは、探索の答えからどこでどれだけ離れているか | 9/19 | Ts | — | 現役 |
+| `leaf_calibration.py` | 静的な評価モデルの見積もりは、探索の答えからどこでどれだけ離れているか | 9/19 | Ts | — | 現役 |
 | `match_queue.py` | 対局を配分ではなく手渡しする両席対戦 | 9/19 | Ts | `generate_queue`、`served_throughput` | 現役 |
 | `match_result.py` | 1つの対戦を読み戻す（席別勝率・対・どの条件で打たれたか） | 9/19 | s | — | 現役 |
 | `tools/oneshot/matchup.py` | 勝率は相性か、機械側の偏りか | 9/10 | — | — | **退避** |
 | `mirror_check.py` | 各プールのミラー行を、記憶ではなく対局から再計算する | 9/18 | — | — | 判断保留 |
 | `mirror_cycle.py` | 価値関数はミラーの既知の三すくみを再現するか | 9/11 | — | `cycle_match` | 据え置き（他ツール依存） |
-| `names_report.py` | 日本語名表がどこまで被覆していて、何が英語のまま残っているか | 9/10 | RSC | — | 現役 |
+| `names_report.py` | 日本語名表がどこまで網羅していて、何が英語のまま残っているか | 9/10 | RSC | — | 現役 |
 | `narrow_as_built.py` | 絞り込みの代価を、`narrow` が実際に作る候補手の上で測る | 9/16 | T | — | 現役 |
 | `narrow_effect.py` | 絞り込みが捨てるものを、均衡質量として測る | 9/11 | — | `width_match` | 据え置き（他ツール依存） |
 | `narrow_regret.py` | 候補手の代価を、探索自身の評価に照らして測る | 9/12 | — | `regret_playout`、`selfplay` | 据え置き（他ツール依存） |
 | `noise_cost_model.py` | セル誤差±11点は勝率でいくらか（測定ではなくモデル） | 9/19 | — | — | 判断保留 |
 | `ordering_check.py` | 均衡が重く置いた選出は、本当に良いほうか（対局を打たずに） | 9/19 | — | `ordering_result` | 据え置き（他ツール依存） |
-| `ordering_result.py` | 均衡が重く置いた選出は、盤上で本当に多く勝つか | 9/19 | Ts | `match_result` | 現役 |
+| `ordering_result.py` | 均衡が重く置いた選出は、対戦評価で本当に多く勝つか | 9/19 | Ts | `match_result` | 現役 |
 | `paired_match.py` | 両席対戦を対として読み、2つのソルバの答えを直接比べる | 9/13 | TW | — | 現役 |
 | `paired_result.py` | キュー方式の対戦を、それが本来もつ対の設計として読む | 9/19 | Ts | — | 現役 |
 | `policy_ceiling.py` | 並べ替えが完璧なら、候補手はどこまで狭くできるか | 9/13 | — | `narrow_as_built`、`policy_dataset`、`policy_pool_recall`、`policy_train` | 据え置き（他ツール依存） |
@@ -158,7 +158,7 @@
 | `pool_matches.py` | 独立した1対1のランを、席別と全体の1つの判定に集計する | 9/11 | h | `book_check`、`cycle_match`、`pool_games` | 現役 |
 | `port_coverage.py` | Rust 移植が無視してよい id と、Python が模擬していると主張する id | 9/12 | — | `port_gate_audit` | 据え置き（他ツール依存） |
 | `port_gate_audit.py` | 移植が実装しているのにゲートが弾く効果と、ゲートは通すのに実装が無い名前 | 9/22 | TX | — | 現役 |
-| `profile_generation.py` | 学習済みの葉を入れた生成対局で、時間はどこに行っているか | 9/11 | — | `agent_drift` | 据え置き（他ツール依存） |
+| `profile_generation.py` | 学習済みの評価モデルを入れた生成対局で、時間はどこに行っているか | 9/11 | — | `agent_drift` | 据え置き（他ツール依存） |
 | `profile_resolve.py` | ターン解決器の時間はどこに行っているか | 9/10 | R | `profile_generation` | 現役 |
 | `ratings.py` | 記録した全対戦から、全エージェントを1つの尺度に載せる | 9/19 | TGW | — | 現役 |
 | `regret_playout.py` | 絞り込みが落とした手は本当に良かったのか、良く見えただけか | 9/12 | — | `selfplay` | 据え置き（他ツール依存） |
@@ -180,7 +180,7 @@
 | `sweep_value.py` | 価値関数の設定をスイープする（学習は安く、生成は高いので） | 9/10 | TWS | — | 現役 |
 | `train_value.py` | 価値関数を学習し、意味のある2つの基準線に照らして報告する | 9/19 | TsRWSX | `selection`、`selfplay` | 現役 |
 | `what_the_data_lacks.py` | 学習データに、遅い筋書きが勝った対局は入っているか | 9/17 | T | `does_the_sweep_happen` | 現役 |
-| `what_the_leak_buys.py` | 相手の控え2体を探索に教えるのをやめると、何が変わるか | 9/17 | T | `hidden_dominance` | 現役 |
+| `what_the_leak_buys.py` | 相手の裏2体を探索に教えるのをやめると、何が変わるか | 9/17 | T | `hidden_dominance` | 現役 |
 | `why_action.py` | ある手の価値はどこから来ているか（列ごとの分解） | 9/19 | — | — | 判断保留 |
 | `tools/oneshot/why_no_handoff.py` | 削りが終わったとき、抜き手への交代はそもそも候補手にあるか | 9/17 | — | — | **退避** |
 | `width_match.py` | 広い候補手と狭い候補手を、他をすべて同一にして戦わせる | 9/19 | h | — | 現役 |
@@ -197,20 +197,20 @@
    `tools/*.sh` / `src/` / `tests/` / `configs/`）のどこからも参照が無い
 2. 他のツールから import されていない（import があれば移動で壊れる）
 3. 他のツールの本文・ヘルプ文字列でも名指しされていない（名指しがあれば追随修正が要る）
-4. docstring が「一度きりの問い」を書いている —— 再実行する器具ではなく、一度答えて済んだ問い
+4. docstring が「一度きりの問い」を書いている。再実行する器具ではなく、一度答えて済んだ問いである
 
 | ツール | 退避の理由 |
 |---|---|
 | `depth_effect.py` | 「1時間の対戦を打つ前に、深さが効くかを切り分ける」と docstring 自身が書いている。その切り分けのための一回きりの診断 |
 | `does_the_sweep_happen.py` | `what_the_data_lacks.py` が数え損ねた形を数え直した一回きりの訂正。後続（`what_the_data_lacks` 側）は `TODO.md` に残っている |
 | `matchup.py` | 「勝率62.3%は相性か機械の偏りか」を一度切り分けるための道具。9/10 以降更新も参照もない |
-| `served_matches_direct.py` | 推論サーバに葉を移すときの**受け入れ条件**。サーバは採用済み（`inference_server.py` は5本から使われている）で、受け入れ判定は済んでいる |
+| `served_matches_direct.py` | 推論サーバに評価モデルを移すときの**受け入れ条件**。サーバは採用済み（`inference_server.py` は5本から使われている）で、受け入れ判定は済んでいる |
 | `served_throughput.py` | 「比較できない数字が転がっている」ので同条件で並べ直した一回きりの計測。docstring 自身がそう書いている |
 | `why_no_handoff.py` | 受け渡しが無い理由を3つに切り分けた一回きりの診断。後続の `forced_handoff.py` は `TODO.md` に残っている |
 
 ### 退避で直した参照
 
-移動で壊れるのは**そのファイル自身が持っているパス**だけだった（外部からの参照は定義上ゼロ）。
+移動で使えなくなるのは**そのファイル自身が持っているパス**だけだった（外部からの参照は定義上ゼロ）。
 移動後に `grep -rn "tools/<名前>"` をリポジトリ全体にかけ、見つかったのは自分自身の中の
 使用例だけである。直したのは次の2種類。
 
@@ -220,7 +220,7 @@
 | docstring の使用例 | `tools/<名前>.py` → `tools/oneshot/<名前>.py` | 退避した6本すべて |
 
 `parents[1]` は `tools/` から見たリポジトリルートで、`src` も `configs` もそこから引いている。
-1階層深くなったので放置すると `import pokeuraou` が全滅する。`does_the_sweep_happen.py` は
+1階層深くなったので放置すると `import pokeuraou` がすべて失敗する。`does_the_sweep_happen.py` は
 標準ライブラリしか使っていないので、直したのは使用例1行だけ。
 
 `served_matches_direct.py` と `served_throughput.py` は `ROOT / "tools" / ...` で
@@ -240,9 +240,9 @@
 | 絞り込みの代価 | `narrow_effect` / `narrow_as_built` | 同じ問いを違う候補手の上で測る（理論上の幅 / `narrow` が実際に作る幅） |
 | 絞り込みが落とした手は良かったか | `narrow_regret` / `regret_playout` | 探索自身の評価で見積もる / 実際に打って確かめる |
 | 学習シードで答えがどれだけ動くか | `cell_noise` / `book_seed_spread` | セル単位 / 印字される選出助言単位。同じ不安定さを2つの粒度で測る |
-| 選出キャッシュの助言はいくらの価値か | `book_check` / `book_against_uniform` / `selection_check` | フィールド全体・盤上 / 一様抽選相手 / 1チーム分。`book_check` の docstring が `selection_check` との射程の違いを明記している |
+| 選出キャッシュの助言はいくらの価値か | `book_check` / `book_against_uniform` / `selection_check` | フィールド全体・対戦評価 / 一様抽選相手 / 1チーム分。`book_check` の docstring が `selection_check` との射程の違いを明記している |
 | ミラーは 50% か（探索・解決器・評価器の較正） | `mirror_check` / `seat_bias` / `mirror_cycle` / `cycle_match` | 対局から再計算 / 対局を打たずに厳密に / 三すくみをモデルに聞く / 三すくみを実際に打つ |
-| 隠れ情報はいくらの価値か | `what_the_leak_buys` / `hidden_dominance` / `blind_opponent` | 控え2体を教えるのをやめる / 同じ優越を実際の情報下で / 配分を相手に見せる代償。3本とも 9/17〜9/19 に立て続けに増えた |
+| 隠れ情報はいくらの価値か | `what_the_leak_buys` / `hidden_dominance` / `blind_opponent` | 裏2体を教えるのをやめる / 同じ優越を実際の情報下で / 配分を相手に見せる代償。3本とも 9/17〜9/19 に立て続けに増えた |
 | Rust 移植は同じ答えを出すか | `diff_node` / `diff_generation` / `diff_narrow` / `diff_solve_node` / `diff_encode` | 層ごとに1本ずつ。族としては意図的な分割で、重複ではない（記録しておく） |
 | 削り→抜きの筋書き | `does_the_sweep_happen` / `what_the_data_lacks` / `why_no_handoff` / `forced_handoff` | データに現れるか / 遅い筋書きが勝った対局はあるか / 候補手に載っているか / 均衡のゼロは正しいか。4本で1つの話を追っている |
 
@@ -250,9 +250,9 @@
 
 本文は「今日それが1回起きた: 順位パネルの問いの取り違え」と書いている。該当するのは
 `ordering_check`（対局を打たずに、均衡が重く置いた選出は良いほうか）と
-`ordering_result`（盤上で本当に多く勝つか）の対である。名前が近く、答える問いが違う。
+`ordering_result`（対戦評価で本当に多く勝つか）の対である。名前が近く、答える問いが違う。
 `ordering_result` は `TODO.md` と `scratchpad/run2.sh` / `run3.sh` から使われており、
-`ordering_check` はその入力を吐く側なので、どちらも動かしていない。
+`ordering_check` はその入力を出す側なので、どちらも動かしていない。
 
 ## 判断保留（17本）
 
@@ -271,7 +271,7 @@
 | `counterplay` | `configs/knowledge/rizabanadohido-counters.json` の唯一の読み手。維持されている設定ファイルと読み手を離すのは筋が悪い |
 | `ko_branch_count` / `noise_cost_model` / `search_optimism` / `why_action` | 9/19 に増えたばかり。「一度きりだった」と言えるだけの履歴がまだ無い |
 
-## 動かさなかったもののうち、明示的に触らなかった道具
+## 動かさなかったもののうち明示的に触らなかった道具
 
 本課題の作業中、次の7本は他の作業と衝突するため一切触っていない（表には載っている）。
 
