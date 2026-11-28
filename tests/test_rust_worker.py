@@ -230,24 +230,33 @@ def test_a_game_the_turn_cap_stops_is_not_written(pool, served, tmp_path) -> Non
 class _MirroredQ(_ServedStub):
     """A stand-in Q that is the same game from either seat: ``Q(i, j) = 1 - Q'(j, i)`` where
     ``Q'`` is the matrix with the seats swapped. `_stub_matrix` is not, so in a mirror it gives
-    the two seats different menus and their values do not mirror."""
+    the two seats different menus and their values do not mirror.
+
+    IKA-470: a ranking game, ``Q(i, j) = 0.5 + 0.4 tanh((s_i - s_j) / 2)`` with one strength
+    ``s`` per action (a fixed random weighting of the action's and the port's features, the same
+    weighting on both seats). The best action is a dominant row, so the Q solve has one pure
+    equilibrium and the candidates' scores (their best reply to it) are strictly ordered by ``s``
+    with no tie: the menu is the four strongest actions, the same four on both seats, on any
+    platform. A game with ties (the sines this stood for before) makes the scores of the actions on
+    the equilibrium's support equal up to rounding, and which four a seat keeps is then the
+    rounding's choice. CI run 46128754110 (Linux) failed on this test with a sum of 1.075; the
+    tie is the cause we believe, and it was not reproduced (the Windows build passed). With the
+    sines no game had the same menu on both seats (0 of 16), and the sum held only by chance."""
 
     def __call__(self, arrays):  # noqa: ANN001, ANN204
         self.calls += 1
-        a0 = arrays["acts0"].reshape(len(arrays["acts0"]), -1).astype(np.float64).sum(1)
-        a1 = arrays["acts1"].reshape(len(arrays["acts1"]), -1).astype(np.float64).sum(1)
-        f0 = arrays["feats0"].astype(np.float64).sum(1)
-        f1 = arrays["feats1"].astype(np.float64).sum(1)
-        x = 0.37 * (a0[:, None] - a1[None, :]) + 0.11 * (f0[:, None] - f1[None, :])
-        # IKA-470: the sines alone make a game with ties, whose vertex the port's HiGHS and
-        # scipy's choose differently, and the two seats' menus then differ (no mirror in any
-        # of 16 games with the sines alone). A term that is odd under swapping the seats keeps
-        # the mirror and breaks the ties: h(i, j) - h(j, i) for a made-up h of the sides' sums.
-        def h(pa, pf, qa, qf):  # noqa: ANN001, ANN202
-            return np.sin(0.017 * pa[:, None] * qf[None, :] + 0.0031 * pf[:, None] * qa[None, :])
 
-        odd = h(a0, f0, a1, f1) - h(a1, f1, a0, f0).T
-        return 0.5 + 0.4 * np.sin(x) + 0.02 * odd
+        def strength(acts: np.ndarray, feats: np.ndarray) -> np.ndarray:
+            a = acts.reshape(len(acts), -1).astype(np.float64)
+            f = feats.reshape(len(feats), -1).astype(np.float64)
+            weights = np.random.default_rng(470)
+            wa, wf = weights.normal(size=a.shape[1]), weights.normal(size=f.shape[1])
+            raw = a @ wa + f @ wf
+            return 3.0 * raw / max(float(np.abs(raw).max()), 1e-9)
+
+        s0 = strength(arrays["acts0"], arrays["feats0"])
+        s1 = strength(arrays["acts1"], arrays["feats1"])
+        return 0.5 + 0.4 * np.tanh(0.5 * (s0[:, None] - s1[None, :]))
 
 
 @pytest.fixture(scope="module")
@@ -278,7 +287,7 @@ def test_a_mirror_s_two_values_sum_to_one(mirrored_games) -> None:  # noqa: ANN0
     half, which this hidden game does not give."""
     # IKA-470: the same four, not only the same team and leads. The port's HiGHS may end on
     # another vertex of the selection game than scipy's did, so a game with the same leads and
-    # other backs is possible, and it is not a mirror.
+    # other backs is possible, and it is not a mirror (the other backs make other menus).
     same = [r for r in mirrored_games
             if r["ownTeam"] == r["foeTeam"] and r["leads"][0] == r["leads"][1]
             and sorted(r["ownPick"]) == sorted(r["foePick"])]
@@ -288,6 +297,9 @@ def test_a_mirror_s_two_values_sum_to_one(mirrored_games) -> None:  # noqa: ANN0
     for record in same:
         first = record["decisions"][0]
         assert first["kind"] == "move" and first["turn"] == 1
+        # A mirror, checked and not assumed: both seats kept the same four actions (the strength
+        # ranking of `_MirroredQ` leaves no tie to choose them by), and so the sum below holds.
+        assert first["ownActions"] == first["foeActions"], "the seats' menus are not a mirror"
         assert first["searchValue"] + first["foeSearchValue"] == pytest.approx(1.0, abs=1e-9)
         assert abs(first["searchValue"] - 0.5) > 1e-4, (
             "the value is one half, so this cannot tell side 1's answer from side 0's"
