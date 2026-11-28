@@ -1477,7 +1477,8 @@ fn use_move<'a>(
                                 expanded.push((w * inner, next));
                             }
                         }
-                        here = expanded;
+                        // IKA-469: a drawn turn keeps one outcome per target.
+                        here = crate::resolve::collapse(expanded)?;
                     }
                     branches.extend(here);
                 }
@@ -1510,7 +1511,8 @@ fn use_move<'a>(
                 expanded.push((weight * inner_weight, inner_state));
             }
         }
-        branches = expanded;
+        // IKA-469: a drawn turn keeps one outcome per target.
+        branches = crate::resolve::collapse(expanded)?;
     }
     for (_weight, state) in branches.iter_mut() {
         after_move(state, action, mv)?;

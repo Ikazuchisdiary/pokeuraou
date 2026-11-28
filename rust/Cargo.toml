@@ -41,6 +41,9 @@ ika458-arm-control = []
 # IKA-458 stage 3.7's positive control for the board worker: side 1 draws its four from side 0's
 # stream. Not for use; `tests/test_rust_board_worker.py` must fail against it.
 ika458-board-control = []
+# IKA-469's positive control: a played turn drawn along one path draws each chance point's
+# options at their weights squared. Not for use; `tests/test_sample_turn.py` must fail against it.
+ika469-control = []
 # IKA-215's positive control: the trace broken on purpose -- no `acts` entry for the
 # residual phase, and no "fainted" line. Never for use; `diff_commands --events` has to
 # tell a build with it from one without.

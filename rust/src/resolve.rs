@@ -338,6 +338,10 @@ pub struct Turn<'a> {
     /// Who damaged each active slot this turn, for Counter, Mirror Coat, Metal Burst and
     /// Comeuppance (`damage_callback`, IKA-213).
     pub(crate) damaged_by: Option<Box<crate::damage_callback::Records>>,
+    /// IKA-469: set only on a turn `sample_turn` draws along one path. A list of outcomes
+    /// that `collapse` meets is then drawn down to one. Never compared, and cleared on a
+    /// pause before it leaves `sample_turn`.
+    pub(crate) sampler: Option<Sampler>,
 }
 
 impl<'a> Turn<'a> {
@@ -365,6 +369,7 @@ impl<'a> Turn<'a> {
             draws: None,
             log: None,
             damaged_by: None,
+            sampler: None,
         }
     }
 
@@ -1464,38 +1469,8 @@ fn resolve_turn_inner<'a>(
 ) -> Result<TurnResult<'a>, String> {
     #[cfg(feature = "count-resolves")]
     crate::dupcount::record(pos, side_actions, &budget);
-    let started = phase_start();
-    let (adopted, notes) = showdown_volatiles(pos);
+    let Prepared { adopted, notes, attacks, queues } = prepare_turn(reg, pos, side_actions)?;
     let pos = adopted.as_ref().unwrap_or(pos);
-    check_position_supported(pos, side_actions)?;
-    phase_end(0, started);
-    if pos.sides.len() != 2 || pos.sides.iter().any(|s| s.active.len() != 2) {
-        return Err("this port handles two sides of two active slots".into());
-    }
-
-    let mut attacks = [[false; 2]; 2];
-    for (side_index, actions) in side_actions.iter().enumerate() {
-        for action in actions {
-            match action {
-                SlotAction::Move { slot, move_id, .. } => {
-                    check_move_supported(reg, move_id.as_str())?;
-                    attacks[side_index][*slot] = reg
-                        .moves
-                        .get(move_id.as_str())
-                        .map(|m| m.category != "Status")
-                        .unwrap_or(false);
-                }
-                SlotAction::Switch { slot, .. } | SlotAction::Pass { slot } => {
-                    attacks[side_index][*slot] = false;
-                }
-            }
-        }
-    }
-
-    let started = phase_start();
-    let field = field_state(pos);
-    let queues = build_queue(reg, pos, side_actions, &field)?;
-    phase_end(1, started);
 
     let mut branches: Vec<Branch> = Vec::new();
     let mut suspended: Vec<Suspended<'a>> = Vec::new();
@@ -1552,6 +1527,268 @@ fn resolve_turn_inner<'a>(
         suspended = merge_suspended(suspended);
     }
     Ok(TurnResult { branches, exact, suspended, unmodelled })
+}
+
+/// What a turn needs before its first action, for both `resolve_turn` and `sample_turn`.
+struct Prepared {
+    /// The position with Showdown's volatiles adopted, when that changed anything.
+    adopted: Option<Position>,
+    notes: Vec<String>,
+    attacks: [[bool; 2]; 2],
+    queues: Vec<Vec<QueuedAction>>,
+}
+
+fn prepare_turn(
+    reg: &Reg,
+    pos: &Position,
+    side_actions: &[Vec<SlotAction>; 2],
+) -> Result<Prepared, String> {
+    let started = phase_start();
+    let (adopted, notes) = showdown_volatiles(pos);
+    let pos = adopted.as_ref().unwrap_or(pos);
+    check_position_supported(pos, side_actions)?;
+    phase_end(0, started);
+    if pos.sides.len() != 2 || pos.sides.iter().any(|s| s.active.len() != 2) {
+        return Err("this port handles two sides of two active slots".into());
+    }
+
+    let mut attacks = [[false; 2]; 2];
+    for (side_index, actions) in side_actions.iter().enumerate() {
+        for action in actions {
+            match action {
+                SlotAction::Move { slot, move_id, .. } => {
+                    check_move_supported(reg, move_id.as_str())?;
+                    attacks[side_index][*slot] = reg
+                        .moves
+                        .get(move_id.as_str())
+                        .map(|m| m.category != "Status")
+                        .unwrap_or(false);
+                }
+                SlotAction::Switch { slot, .. } | SlotAction::Pass { slot } => {
+                    attacks[side_index][*slot] = false;
+                }
+            }
+        }
+    }
+
+    let started = phase_start();
+    let field = field_state(pos);
+    let queues = build_queue(reg, pos, side_actions, &field)?;
+    phase_end(1, started);
+
+    Ok(Prepared { adopted, notes, attacks, queues })
+}
+
+// ---------------------------------------------------------------------------
+// A played turn, drawn along one path (IKA-469)
+// ---------------------------------------------------------------------------
+
+/// What answers a drawn turn's chance points: handed the weights of the options at one
+/// point, it answers the index it draws.
+pub trait Chooser: std::any::Any {
+    fn pick(&mut self, weights: &[f64]) -> Result<usize, String>;
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+/// The chooser of a drawn turn and the number of points it answered. Shared by the turn's
+/// states (`Turn.sampler`), so a draw deep in an action takes the next answer.
+pub struct Chances {
+    pub chooser: Box<dyn Chooser>,
+    pub count: usize,
+}
+
+pub type Sampler = Rc<std::cell::RefCell<Chances>>;
+
+pub fn sampler(chooser: Box<dyn Chooser>) -> Sampler {
+    Rc::new(std::cell::RefCell::new(Chances { chooser, count: 0 }))
+}
+
+/// One answer from ``sampler``: a single option is taken without asking.
+fn draw_one(sampler: &Sampler, weights: &[f64]) -> Result<usize, String> {
+    if weights.len() == 1 {
+        return Ok(0);
+    }
+    let mut draws = sampler.borrow_mut();
+    draws.count += 1;
+    let at = if cfg!(feature = "ika469-control") {
+        // The positive control: every option kept, at its weight squared.
+        let squared: Vec<f64> = weights.iter().map(|w| w * w).collect();
+        draws.chooser.pick(&squared)?
+    } else {
+        draws.chooser.pick(weights)?
+    };
+    if at >= weights.len() {
+        return Err(format!("drew option {at} of {}", weights.len()));
+    }
+    Ok(at)
+}
+
+/// A list of outcomes drawn down to one, on a turn `sample_turn` draws (IKA-469); any other
+/// list is returned as it is. The one kept carries the list's whole weight, so a caller
+/// that pools it with other lists weighs it as it weighed the list. Valid wherever each
+/// outcome of the list goes on independently of the others.
+pub(crate) fn collapse<'a>(outcomes: Vec<Outcome<'a>>) -> Result<Vec<Outcome<'a>>, String> {
+    if outcomes.len() < 2 {
+        return Ok(outcomes);
+    }
+    let Some(sampler) = outcomes[0].1.sampler.clone() else { return Ok(outcomes) };
+    let weights: Vec<f64> = outcomes.iter().map(|(w, _)| *w).collect();
+    let total: f64 = weights.iter().sum();
+    let at = draw_one(&sampler, &weights)?;
+    let (_, kept) = outcomes.into_iter().nth(at).expect("drawn within the list");
+    Ok(vec![(total, kept)])
+}
+
+/// The outcome `sample_turn` drew.
+pub enum Drawn<'a> {
+    /// The turn has no action to resolve: `resolve_turn` returns no branch for it either.
+    Nothing,
+    /// The turn ran to its end: the position after the residual phase.
+    Finished(Position),
+    /// The turn stopped at a mid-turn replacement (probability 1: it is the drawn one).
+    Paused(Suspended<'a>),
+}
+
+pub struct SampledTurn<'a> {
+    pub drawn: Drawn<'a>,
+    /// False when an action's resolution was narrowed or its rolls stratified, as for
+    /// `TurnResult.exact`. One path never prunes, so the cap drops nothing here.
+    pub exact: bool,
+    /// The notes of the drawn path (`TurnResult.unmodelled` is the union over every branch).
+    pub unmodelled: std::collections::BTreeSet<String>,
+}
+
+/// One outcome of a turn, drawn chance point by chance point along one path.
+///
+/// `resolve_turn` builds every branch, and a played turn then draws one of them by weight.
+/// Here each chance point is drawn from ``sampler`` when it is met, and only the drawn path
+/// is resolved. The points are the fractional-priority queue, the Speed-tie order, an
+/// Encore's variants, each action's outcomes, the residual-phase order, and inside a
+/// damaging move the outcomes after each target (`collapse`).
+///
+/// The drawn distribution is `resolve_turn`'s whenever its result is exact: merging two
+/// branches only adds up the weight of one state, and every list of outcomes carries the
+/// whole weight of the state it came from. Where `resolve_turn` narrows an action or drops
+/// branches at the cap (its result is then not exact), this keeps every action at the full
+/// budget, because one path leaves the cap's whole room to each action.
+pub fn sample_turn<'a>(
+    reg: &'a Reg,
+    pos: &Position,
+    side_actions: &[Vec<SlotAction>; 2],
+    budget: Budget,
+    sampler: &Sampler,
+) -> Result<SampledTurn<'a>, String> {
+    let whole = phase_start();
+    let answer = sample_turn_inner(reg, pos, side_actions, budget, sampler);
+    phase_end(16, whole);
+    answer
+}
+
+fn sample_turn_inner<'a>(
+    reg: &'a Reg,
+    pos: &Position,
+    side_actions: &[Vec<SlotAction>; 2],
+    budget: Budget,
+    sampler: &Sampler,
+) -> Result<SampledTurn<'a>, String> {
+    let Prepared { adopted, notes, attacks, queues } = prepare_turn(reg, pos, side_actions)?;
+    let pos = adopted.as_ref().unwrap_or(pos);
+    let mut unmodelled: std::collections::BTreeSet<String> = notes.into_iter().collect();
+    let draw = |weights: &[f64]| draw_one(sampler, weights);
+    // The queues all hold the same actions (they differ in fractional priority only), so
+    // either every one is empty or none is.
+    if queues.iter().all(|q| q.is_empty()) {
+        return Ok(SampledTurn { drawn: Drawn::Nothing, exact: true, unmodelled });
+    }
+    let queue_weights: Vec<f64> = queues.iter().map(|q| q.first().map_or(0.0, |a| a.branch_probability)).collect();
+    let queue = &queues[draw(&queue_weights)?];
+    let (order, ties) = order_actions(queue, pos.field.trick_room());
+    let mut permutations = tie_permutations(&order, &ties, &budget);
+    let tie_weights: Vec<f64> = permutations.iter().map(|(_, w)| *w).collect();
+    let (permutation, _) = permutations.swap_remove(draw(&tie_weights)?);
+    let mut remaining: Vec<QueuedAction> = permutation.iter().map(|index| queue[*index].clone()).collect();
+    let mut turn = Turn::new(reg, pos.clone(), budget, attacks);
+    turn.sampler = Some(sampler.clone());
+    let mut exact = true;
+    // `run_queue`'s room with one live branch.
+    let step_budget = budget.narrowed(budget.max_branches.max(1));
+    if step_budget != budget {
+        exact = false;
+    }
+    while !remaining.is_empty() {
+        let started = phase_start();
+        let ordered = resort(reg, &turn, &remaining)?;
+        phase_end(5, started);
+        let action = ordered[0].clone();
+        let rest: Vec<QueuedAction> = ordered[1..].to_vec();
+        turn.actions_remaining = rest.len();
+        let started = phase_start();
+        let mut variants = encore_override(reg, &turn, &action);
+        phase_end(4, started);
+        let overridden =
+            variants.first().map(|(_, variant)| variant.move_id != action.move_id).unwrap_or(false);
+        if overridden {
+            if let Some(forced) = variants[0].1.move_id {
+                log_event!(turn, "{} must use {} (encore)", Name(action.side, action.slot), forced);
+            }
+        }
+        // `run_queue` runs every variant and pools their outcomes at `variant_weight *
+        // weight`; drawing the variant and then one of its outcomes draws the same pool.
+        let variant_weights: Vec<f64> = variants.iter().map(|(w, _)| *w).collect();
+        let (_, variant) = variants.swap_remove(draw(&variant_weights)?);
+        let mut base = turn;
+        if overridden {
+            base.report(
+                "encore override changed the move Sucker Punch was read against",
+            );
+        }
+        base.begin(|| action_label(reg, &variant));
+        let started = phase_start();
+        let mut produced = execute(reg, base, &variant, step_budget)?;
+        phase_end(6, started);
+        let weights: Vec<f64> = produced.iter().map(|(w, _)| *w).collect();
+        let (_, mut next) = produced.swap_remove(draw(&weights)?);
+        if next.rolls_stratified {
+            next.rolls_stratified = false;
+            exact = false;
+        }
+        let wiped = next.pos.sides.iter().any(|s| s.pokemon.iter().all(|m| m.fainted));
+        remaining = if wiped { Vec::new() } else { rest };
+        if !wiped && next.self_switch_pending {
+            unmodelled.extend(next.unmodelled.iter().cloned());
+            // The pause is resumed by the self-switch node, which enumerates.
+            next.sampler = None;
+            let pause = Suspended { probability: 1.0, turn: next, remaining };
+            return Ok(SampledTurn { drawn: Drawn::Paused(pause), exact, unmodelled });
+        }
+        turn = next;
+    }
+    let started = phase_start();
+    let mut forks = residual_forks(reg, turn)?;
+    phase_end(3, started);
+    let shares: Vec<f64> = forks.iter().map(|(share, _)| *share).collect();
+    let (_, finished) = forks.swap_remove(draw(&shares)?);
+    let branch = finished_branch(finished, 1.0, &mut unmodelled);
+    Ok(SampledTurn { drawn: Drawn::Finished(branch.position), exact, unmodelled })
+}
+
+/// Whether two finished positions are the same branch (`merge_branches`'s test).
+pub(crate) fn same_branch(a: &Position, b: &Position) -> bool {
+    same_position(a, b)
+}
+
+/// Whether two pauses are the same pause (`merge_suspended`'s test).
+pub(crate) fn same_pause(a: &Suspended, b: &Suspended) -> bool {
+    a.remaining == b.remaining && same_turn(&a.turn, &b.turn)
+}
+
+/// `state_fingerprint` of a finished position or a pause, for bucketing before `same_*`.
+pub(crate) fn branch_fingerprint(pos: &Position, remaining: Option<&[QueuedAction]>) -> u64 {
+    match remaining {
+        None => state_fingerprint(pos, &[], false),
+        Some(rest) => state_fingerprint(pos, rest, true),
+    }
 }
 
 /// Orders produced by resolving Speed ties, with their probabilities.
@@ -1923,6 +2160,8 @@ fn same_turn(a: &Turn, b: &Turn) -> bool {
         // The readable trace; Python's `_MERGE_IGNORED_STATE` (IKA-215).
         log: _,
         damaged_by,
+        // Set only on the one path `sample_turn` draws, where nothing merges (IKA-469).
+        sampler: _,
     } = a;
     std::ptr::eq(*reg, b.reg)
         && *self_switch_pending == b.self_switch_pending
@@ -2421,9 +2660,9 @@ fn encore_override(
 /// Wall clock inside the phases of a turn, in nanoseconds. Coarse on purpose: a timer
 /// costs about 25 ns here, so it goes around things called a handful of times a turn and
 /// never around anything in the innermost loop, where it would measure itself.
-pub static PHASE_NS: [std::sync::atomic::AtomicU64; 16] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 16];
-pub const PHASE_NAMES: [&str; 16] = [
+pub static PHASE_NS: [std::sync::atomic::AtomicU64; 17] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 17];
+pub const PHASE_NAMES: [&str; 17] = [
     "supported",
     "build_queue",
     "run_queue",
@@ -2440,6 +2679,9 @@ pub const PHASE_NAMES: [&str; 16] = [
     "merge_live",
     "merge_branches",
     "resolve_turn_total",
+    // IKA-469: a played turn drawn along one path (`sample_turn`); its inner phases share
+    // the numbers above with `resolve_turn`'s.
+    "sample_turn_total",
 ];
 
 /// Zeroes every counter. The differential pass resolves each fixture once before the
@@ -2462,8 +2704,8 @@ pub fn reset_counters() {
 
 /// Allocations made inside each phase, when the counting allocator is built in. The
 /// phases nest, so an inner one's allocations are counted by the outer one too.
-pub static PHASE_ALLOCS: [std::sync::atomic::AtomicU64; 16] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 16];
+pub static PHASE_ALLOCS: [std::sync::atomic::AtomicU64; 17] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 17];
 
 #[cfg(feature = "count-allocations")]
 fn allocations_now() -> usize {

@@ -809,6 +809,8 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("playGame") => {
             crate::playgame::play_game(reg, encoder, &value)
         }
+        // IKA-469: a turn drawn along one path against its branches (a diagnostic for the tests).
+        Ok(value) if value["kind"].as_str() == Some("sampleCheck") => crate::drawcheck::sample_check(reg, &value),
         // IKA-458 stage 3.1: a turn's weights, the draw and the drawn branch in one request.
         Ok(value) if value["kind"].as_str() == Some("advanceTurn") => {
             crate::advance::advance_turn(reg, encoder, &value)

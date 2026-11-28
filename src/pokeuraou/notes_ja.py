@@ -47,6 +47,8 @@ FIXED = {
         "近似: トレースが写す特性を見つけられない時の続きを入れていない",
     "transform: Illusion (assumed not up)":
         "近似: へんしんの相手のイリュージョンは解けているとして読んだ",
+    "encore override changed the move Sucker Punch was read against":
+        "近似: アンコールで技が変わったが、ふいうちは元の技に対して読んだ",
 }
 
 _ROLE = {"attacker": "攻撃側", "defender": "防御側"}

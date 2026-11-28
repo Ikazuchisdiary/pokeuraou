@@ -5,7 +5,8 @@
 //! has shown and the positions its unseen slots could hold (`hiddenStep`), the replacement phase
 //! if one is owed (`replacementPhase`), else the move node (`moveNode`: both menus and the node
 //! over them), the two draws, and the turn played on to its end (`advanceTurn`, a drawn pause
-//! carried on node by node) -- is made here, one after another, from one generator whose state
+//! carried on node by node; since IKA-469 the turn is drawn chance point by chance point along one
+//! path, `advance::advance_sampled`) -- is made here, one after another, from one generator whose state
 //! the caller handed over. The pieces are the ones the stages below this made; what the loop
 //! adds is that a step's answer feeds the next step in this process: the completions `hiddenStep`
 //! made are the ones the move node and the replacement phase read (one decision's completions are
@@ -27,7 +28,7 @@
 //! is made before the step draws anything or records anything, so the caller plays that step
 //! itself from the same state, its generator exactly where the steps before left it.
 
-use crate::advance::{advance_core, choice, Pcg64};
+use crate::advance::{advance_sampled, choice, Pcg64};
 use crate::encode::Encoder;
 use crate::hiddenbench::{step_of, Item};
 use crate::legal;
@@ -36,7 +37,7 @@ use crate::position::Position;
 use crate::qmenus::{menus_core, move_node_over, MenusArgs};
 use crate::reg::Reg;
 use crate::resolve::commands::replacements_needed;
-use crate::resolve::{resolve_turn, Budget, SlotAction};
+use crate::resolve::{Budget, SlotAction};
 use crate::selfswitch::Context;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -438,9 +439,11 @@ fn one_step(
     ];
     #[cfg(feature = "count-resolves")]
     crate::dupcount::end_fills();
-    let result = resolve_turn(reg, pos, &chosen, *exact).map_err(|why| Handoff::of(format!("resolve: {why}")))?;
+    // IKA-469: the turn is drawn chance by chance along one path, and only that path is
+    // resolved (`resolve::sample_turn`). Before, every branch was built and one drawn.
     lap(3, &mut lapped);
-    let advanced = advance_core(reg, encoder, result, Some(context), &mut trial).map_err(|failed| Handoff::of(format!("advance: {failed}")))?;
+    let advanced = advance_sampled(reg, encoder, pos, &chosen, *exact, Some(context), &mut trial)
+        .map_err(|failed| Handoff::of(format!("advance: {failed}")))?;
     lap(4, &mut lapped);
     MOVES.fetch_add(1, Ordering::Relaxed);
 

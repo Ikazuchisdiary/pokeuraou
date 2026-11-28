@@ -29,7 +29,8 @@ def loc():  # noqa: ANN201
 def test_every_fixed_port_note_is_said() -> None:
     fixed = set()
     for path in (repo_root() / "rust" / "src").glob("*.rs"):
-        fixed.update(re.findall(r'report\("([^"]+)"\)', path.read_text(encoding="utf-8")))
+        # IKA-469: the argument may sit on the next line (rustfmt's layout of a long one).
+        fixed.update(re.findall(r'report\(\s*"([^"]+)"\s*,?\s*\)', path.read_text(encoding="utf-8")))
     assert fixed, "no fixed note found; the scan would be vacuous"
     assert fixed <= set(FIXED), sorted(fixed - set(FIXED))
 

@@ -223,6 +223,24 @@ pub(crate) fn choose_p(p: &[f64], rng: &mut Pcg64) -> Result<usize, String> {
     Ok(cdf.partition_point(|c| *c <= u).min(cdf.len() - 1))
 }
 
+/// IKA-469: a drawn turn's chance points answered with numpy's `choice` arithmetic.
+impl crate::resolve::Chooser for Pcg64 {
+    fn pick(&mut self, weights: &[f64]) -> Result<usize, String> {
+        if sum_f64(weights) <= 0.0 {
+            return Err("a chance point with no weight".into());
+        }
+        choice(weights, self)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 pub fn advance_turn(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Value {
     let Some(mut rng) = Pcg64::from_json(&value["rng"]) else {
         return json!({ "fault": "advanceTurn without a PCG64 state" });
@@ -311,12 +329,75 @@ pub(crate) fn advance_core(
         advanced.position = Some(result.branches[index].position.clone());
     } else if let Some(context) = context {
         let first = result.suspended.swap_remove(index - branches);
-        match crate::selfswitch::run(reg, encoder, context, first, rng) {
-            Err(crate::selfswitch::Failure::Fault(why)) => return Err(json!({ "fault": why })),
-            Err(crate::selfswitch::Failure::Answer(refusal)) => return Err(refusal),
-            Ok(chain) => {
-                advanced.position = chain.position.clone();
-                advanced.chain = Some(chain);
+        carry_on(reg, encoder, context, first, rng, &mut advanced)?;
+    }
+    Ok(advanced)
+}
+
+/// A drawn pause carried on to the turn's end (`selfswitch::run`).
+fn carry_on<'a>(
+    reg: &'a Reg,
+    encoder: &crate::encode::Encoder,
+    context: &crate::selfswitch::Context,
+    first: crate::resolve::Suspended<'a>,
+    rng: &mut Pcg64,
+    advanced: &mut Advanced,
+) -> Result<(), Value> {
+    match crate::selfswitch::run(reg, encoder, context, first, rng) {
+        Err(crate::selfswitch::Failure::Fault(why)) => Err(json!({ "fault": why })),
+        Err(crate::selfswitch::Failure::Answer(refusal)) => Err(refusal),
+        Ok(chain) => {
+            advanced.position = chain.position.clone();
+            advanced.chain = Some(chain);
+            Ok(())
+        }
+    }
+}
+
+/// IKA-469: `advance_core` for a played turn drawn along one path (`resolve::sample_turn`),
+/// each chance point drawn from ``rng`` with numpy's `choice` arithmetic. Only the drawn
+/// path is resolved. `weights` and `paused` are left empty, and `index` is 0 when an outcome
+/// was drawn (there is no list of branches for it to index).
+pub(crate) fn advance_sampled(
+    reg: &Reg,
+    encoder: &crate::encode::Encoder,
+    pos: &Position,
+    actions: &[Vec<crate::resolve::SlotAction>; 2],
+    budget: crate::resolve::Budget,
+    context: Option<&crate::selfswitch::Context>,
+    rng: &mut Pcg64,
+) -> Result<Advanced, Value> {
+    let sampler = crate::resolve::sampler(Box::new(rng.clone()));
+    let sampled = crate::resolve::sample_turn(reg, pos, actions, budget, &sampler)
+        .map_err(|reason| json!({ "refused": reason }))?;
+    *rng = sampler
+        .borrow()
+        .chooser
+        .as_any()
+        .downcast_ref::<Pcg64>()
+        .expect("the sampler holds the generator it was given")
+        .clone();
+    let mut advanced = Advanced {
+        exact: sampled.exact,
+        unmodelled: sampled.unmodelled.iter().cloned().collect(),
+        weights: Vec::new(),
+        paused: Vec::new(),
+        index: None,
+        position: None,
+        chain: None,
+    };
+    match sampled.drawn {
+        crate::resolve::Drawn::Nothing => {}
+        crate::resolve::Drawn::Finished(landed) => {
+            ADVANCED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            advanced.index = Some(0);
+            advanced.position = Some(landed);
+        }
+        crate::resolve::Drawn::Paused(first) => {
+            ADVANCED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            advanced.index = Some(0);
+            if let Some(context) = context {
+                carry_on(reg, encoder, context, first, rng, &mut advanced)?;
             }
         }
     }

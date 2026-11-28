@@ -27,6 +27,7 @@ mod counting_alloc;
 mod deepen;
 #[cfg(feature = "count-resolves")]
 mod dupcount;
+mod drawcheck;
 mod damage;
 mod damage_callback;
 mod effects;

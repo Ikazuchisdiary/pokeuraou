@@ -205,7 +205,12 @@ fn turn_state_json(turn: &Turn) -> Result<Value, String> {
         draws,
         log,
         damaged_by,
+        sampler,
     } = turn;
+    // IKA-469: a drawn turn's pause leaves `sample_turn` without its sampler.
+    if sampler.is_some() {
+        return Err("a pause that still draws along one path".into());
+    }
     // Both are set and cleared inside one action, and a pause is taken between actions.
     // Either one here would mean a pause taken somewhere this module does not expect.
     if draws.is_some() {
