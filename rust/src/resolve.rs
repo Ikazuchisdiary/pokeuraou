@@ -927,8 +927,8 @@ pub(crate) fn grounded_ignoring(turn: &Turn, mon: &Pokemon, ignore_ability: bool
 }
 
 pub fn field_state(pos: &Position) -> FieldState {
-    let mut abilities: [Vec<Id>; 2] = [Vec::new(), Vec::new()];
-    let mut shielded: [Vec<Id>; 2] = [Vec::new(), Vec::new()];
+    let mut abilities: [crate::battler::Abilities; 2] = Default::default();
+    let mut shielded: [crate::battler::Abilities; 2] = Default::default();
     let mut conditions: [Vec<Id>; 2] = [Vec::new(), Vec::new()];
     for (index, side) in pos.sides.iter().enumerate() {
         for slot in 0..side.active.len() {
@@ -2323,7 +2323,9 @@ fn run_queue<'a>(
             exact = false;
         }
 
-        let mut next: Vec<Live<'a>> = Vec::new();
+        // Sized for two outcomes an item: a `Live` is 0.7 KB, and growing from nothing
+        // copied each one up to three times (IKA-471).
+        let mut next: Vec<Live<'a>> = Vec::with_capacity(2 * live.len());
         let (finished_before, paused_before) = (finished.len(), paused.len());
         for mut item in live.into_iter() {
             if item.remaining.is_empty() {
@@ -2331,10 +2333,9 @@ fn run_queue<'a>(
                 continue;
             }
             let started = phase_start();
-            let ordered = resort(reg, &item.turn, &item.remaining)?;
+            let mut rest = resort(reg, &item.turn, &item.remaining)?;
             phase_end(5, started);
-            let action = ordered[0].clone();
-            let rest: Vec<QueuedAction> = ordered[1..].to_vec();
+            let action = rest.remove(0);
             item.turn.actions_remaining = rest.len();
             // `step_budget` goes to `execute` and nowhere else: `turn.budget` stays the
             // budget the turn was asked for, as `_Turn.budget` does in Python. A turn that
@@ -2389,8 +2390,11 @@ fn run_queue<'a>(
                 phase_end(6, started);
                 #[cfg(feature = "count-execute")]
                 execute_count::after(probe);
-                for (weight, turn) in produced {
-                    outcomes.push((variant_weight * weight, turn));
+                // The outcomes in place, with the variant's weight: the same products as
+                // pushing each into a new list, without the list.
+                outcomes = produced;
+                for (weight, _) in outcomes.iter_mut() {
+                    *weight *= variant_weight;
                 }
             } else {
                 for (variant_weight, variant) in &variants {
@@ -2408,7 +2412,8 @@ fn run_queue<'a>(
                     }
                 }
             }
-            for (weight, mut turn) in outcomes {
+            let count = outcomes.len();
+            for (index, (weight, mut turn)) in outcomes.into_iter().enumerate() {
                 // Python's `_run_queue`: a note from `_execute` makes the turn inexact.
                 if turn.rolls_stratified {
                     turn.rolls_stratified = false;
@@ -2418,7 +2423,14 @@ fn run_queue<'a>(
                 // of the queue. Carrying on would apply moves that never happened --
                 // including a spread move hitting the winner's own partner.
                 let wiped = turn.pos.sides.iter().any(|s| s.pokemon.iter().all(|m| m.fainted));
-                let remaining_actions = if wiped { Vec::new() } else { rest.clone() };
+                // The last outcome takes the queue itself rather than a copy.
+                let remaining_actions = if wiped {
+                    Vec::new()
+                } else if index + 1 == count {
+                    std::mem::take(&mut rest)
+                } else {
+                    rest.clone()
+                };
                 let child =
                     Live { weight: item.weight * weight, turn, remaining: remaining_actions };
                 // A self-switching move ends `runAction` with `switchFlag` set, and
@@ -2474,7 +2486,11 @@ fn run_queue<'a>(
     let mut unmodelled: std::collections::BTreeSet<String> = Default::default();
     for item in finished {
         let started = phase_start();
+        #[cfg(feature = "count-execute")]
+        let probe = execute_count::before_residual(&item.turn);
         let forks = residual_forks(reg, item.turn)?;
+        #[cfg(feature = "count-execute")]
+        execute_count::after_residual(probe);
         phase_end(3, started);
         for (share, turn) in forks {
             branches.push(finished_branch(turn, item.weight * share, &mut unmodelled));
@@ -2654,6 +2670,8 @@ pub mod execute_count {
         pub masked_ns: u64,
         /// By how many slots had acted before the call: calls, ns, masked repeats, their ns.
         pub by_depth: [[u64; 4]; 5],
+        /// `residual_forks`: calls, ns, repeats of a state met earlier in the fill, their ns.
+        pub residual: [u64; 4],
     }
 
     struct Seen {
@@ -2664,12 +2682,40 @@ pub mod execute_count {
     }
 
     thread_local! {
+        static SEEN_RESIDUAL: RefCell<Vec<(u64, Turn<'static>)>> = const { RefCell::new(Vec::new()) };
         static SEEN: RefCell<Vec<Seen>> = const { RefCell::new(Vec::new()) };
         pub static COUNTS: RefCell<Counts> = RefCell::new(Counts::default());
     }
 
     pub fn new_fill() {
         SEEN.with(|s| s.borrow_mut().clear());
+        SEEN_RESIDUAL.with(|s| s.borrow_mut().clear());
+    }
+
+    pub fn before_residual(turn: &Turn) -> (std::time::Instant, bool) {
+        let fp = state_fingerprint(&turn.pos, &[], turn.self_switch_pending);
+        // SAFETY: only compared and dropped inside one fill, while the Reg lives.
+        let stored: Turn<'static> = unsafe { std::mem::transmute(turn.clone()) };
+        let repeat = SEEN_RESIDUAL.with(|seen| {
+            let mut seen = seen.borrow_mut();
+            let hit = seen.iter().any(|(f, t)| *f == fp && same_turn(turn, t) && turn.unmodelled == t.unmodelled);
+            seen.push((fp, stored));
+            hit
+        });
+        (std::time::Instant::now(), repeat)
+    }
+
+    pub fn after_residual(probe: (std::time::Instant, bool)) {
+        let ns = probe.0.elapsed().as_nanos() as u64;
+        COUNTS.with(|c| {
+            let mut c = c.borrow_mut();
+            c.residual[0] += 1;
+            c.residual[1] += ns;
+            if probe.1 {
+                c.residual[2] += 1;
+                c.residual[3] += ns;
+            }
+        });
     }
 
     pub struct Probe {

@@ -412,6 +412,13 @@ pub fn main(args: &[String]) {
             "execute calls {} ({:.1} ms); state+action met earlier in the fill: exact {} ({:.1}% of execute time),              attacks masked {} ({:.1}%)",
             c.calls, c.ns as f64 / 1e6, c.exact, pct(c.exact_ns), c.masked, pct(c.masked_ns)
         );
+        println!(
+            "residual phases {} ({:.1} ms), of a state met earlier in the fill {} ({:.1}% of their time)",
+            c.residual[0],
+            c.residual[1] as f64 / 1e6,
+            c.residual[2],
+            c.residual[3] as f64 / c.residual[1].max(1) as f64 * 100.0
+        );
         for (depth, row) in c.by_depth.iter().enumerate() {
             println!(
                 "  slots acted before {depth}: calls {} ({:.1}% of execute time), masked repeats {} ({:.1}%)",

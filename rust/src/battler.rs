@@ -205,17 +205,85 @@ fn fallen_of(mon: &Pokemon) -> i64 {
 
 /// The field as the calculator sees it. Owned ids, because the resolver rebuilds it
 /// whenever the field changes and the active abilities are at most four.
+/// Abilities of one side's Pokemon on the field: two inline, more on the heap (IKA-471).
+///
+/// `field_state` builds four of these per call, and it is called for every hit and every
+/// re-sort; as `Vec`s the two that are never empty were two allocations a call. A third
+/// entry (a fainted Ruin holder put back, `field_for_hit`) moves the list to the heap.
+#[derive(Clone, Default)]
+pub struct Abilities {
+    len: u8,
+    inline: [Id; 2],
+    more: Vec<Id>,
+}
+
+impl Abilities {
+    pub fn push(&mut self, id: Id) {
+        if self.more.is_empty() && (self.len as usize) < self.inline.len() {
+            self.inline[self.len as usize] = id;
+            self.len += 1;
+            return;
+        }
+        if self.more.is_empty() {
+            self.more.extend_from_slice(&self.inline[..self.len as usize]);
+        }
+        self.more.push(id);
+    }
+}
+
+impl std::ops::Deref for Abilities {
+    type Target = [Id];
+    #[inline]
+    fn deref(&self) -> &[Id] {
+        if self.more.is_empty() {
+            &self.inline[..self.len as usize]
+        } else {
+            &self.more
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Abilities {
+    type Item = &'a Id;
+    type IntoIter = std::slice::Iter<'a, Id>;
+    fn into_iter(self) -> std::slice::Iter<'a, Id> {
+        self.iter()
+    }
+}
+
+impl PartialEq for Abilities {
+    fn eq(&self, other: &Abilities) -> bool {
+        **self == **other
+    }
+}
+
+impl std::fmt::Debug for Abilities {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl From<Vec<Id>> for Abilities {
+    fn from(ids: Vec<Id>) -> Abilities {
+        let mut out = Abilities::default();
+        for id in ids {
+            out.push(id);
+        }
+        out
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct FieldState {
     pub weather: Option<Id>,
     pub terrain: Option<Id>,
     pub pseudo_weather: Vec<Id>,
     pub side_conditions: [Vec<Id>; 2],
-    pub active_abilities: [Vec<Id>; 2],
+    pub active_abilities: [Abilities; 2],
     /// The abilities of the active Pokemon holding an Ability Shield, by side: `breakable`
     /// abilities of a third Pokemon (Friend Guard, Aura Break) survive a Mold Breaker only
     /// through it (IKA-414).
-    pub shielded_abilities: [Vec<Id>; 2],
+    pub shielded_abilities: [Abilities; 2],
     pub active_per_half: i64,
 }
 
@@ -318,8 +386,8 @@ impl From<&FieldCase> for FieldState {
             terrain: case.terrain.as_deref().map(Id::new),
             pseudo_weather: ids(&case.pseudo_weather),
             side_conditions: [ids(&case.side_conditions[0]), ids(&case.side_conditions[1])],
-            active_abilities: [ids(&case.active_abilities[0]), ids(&case.active_abilities[1])],
-            shielded_abilities: [Vec::new(), Vec::new()],
+            active_abilities: [ids(&case.active_abilities[0]).into(), ids(&case.active_abilities[1]).into()],
+            shielded_abilities: Default::default(),
             active_per_half: case.active_per_half,
         }
     }
