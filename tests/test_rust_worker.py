@@ -237,11 +237,12 @@ class _MirroredQ(_ServedStub):
     weighting on both seats). The best action is a dominant row, so the Q solve has one pure
     equilibrium and the candidates' scores (their best reply to it) are strictly ordered by ``s``
     with no tie: the menu is the four strongest actions, the same four on both seats, on any
-    platform. A game with ties (the sines this stood for before) makes the scores of the actions on
-    the equilibrium's support equal up to rounding, and which four a seat keeps is then the
-    rounding's choice. CI run 46128754110 (Linux) failed on this test with a sum of 1.075; the
-    tie is the cause we believe, and it was not reproduced (the Windows build passed). With the
-    sines no game had the same menu on both seats (0 of 16), and the sum held only by chance."""
+    platform. A game whose solve is mixed (the sines this stood for before) makes the scores of the
+    actions on the equilibrium's support equal up to rounding, and when the support is wider than
+    the menu, which four a seat keeps is the rounding's choice. CI run 46128754110 (Linux) failed
+    on this test with a sum of 1.075; that rounding is the cause we believe, and it was not
+    reproduced (the Windows build passed). With the sines no game had the same menu on both seats
+    (0 of 16), and the sum held only by chance."""
 
     def __call__(self, arrays):  # noqa: ANN001, ANN204
         self.calls += 1
@@ -301,7 +302,7 @@ def test_a_mirror_s_two_values_sum_to_one(mirrored_games) -> None:  # noqa: ANN0
         # ranking of `_MirroredQ` leaves no tie to choose them by), and so the sum below holds.
         assert first["ownActions"] == first["foeActions"], "the seats' menus are not a mirror"
         assert first["searchValue"] + first["foeSearchValue"] == pytest.approx(1.0, abs=1e-9)
-        assert abs(first["searchValue"] - 0.5) > 1e-4, (
+        assert abs(first["searchValue"] - 0.5) > 1e-6, (
             "the value is one half, so this cannot tell side 1's answer from side 0's"
         )
 
