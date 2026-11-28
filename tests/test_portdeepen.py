@@ -158,6 +158,28 @@ def test_a_batch_on_counted_cells_stops_near_its_budget(pool, served) -> None:  
     assert all(0 <= v <= one_cell for v in over[1] + over[8]), over
 
 
+def test_a_priced_batch_caps_its_first_step_too(pool, served) -> None:  # noqa: ANN001, F811
+    """IKA-467: on a priced budget Python caps a step's cells at what the budget left pays for
+    (`deepenRun`'s ``batch``), the first step included, where no cell has been refined yet to
+    read the price of one from: a budget of about two refinements reads fewer than 8 cells in
+    its first step. The control: the same read on counted cells (no prices, no cap from Python)
+    takes 8 in its first step."""
+    from pokeuraou.deepen import COSTS
+
+    cost = COSTS["local", 1]
+    budget = int(30.0 / cost.cell)
+    pos = _positions(pool, 1, seed=17)[0]
+    priced: list = []
+    _move(pool, pos, served, budget, cost, progress=priced.append, batch=8)
+    first = next(s for s in priced if s.kind == "refine")
+    assert 0 < first.refines < 8, first.refines
+    counted: list = []
+    _move(pool, pos, served, 3000, None, progress=counted.append, batch=8)
+    assert next(s for s in counted if s.kind == "refine").root.port["steps"] >= 1
+    first_counted = next(s for s in counted if s.kind == "refine")
+    assert first_counted.refines >= 8, first_counted.refines
+
+
 def test_the_swap_oracle_brings_in_actions_from_outside(pool, served) -> None:  # noqa: ANN001, F811
     from pokeuraou.actions import side_actions
 

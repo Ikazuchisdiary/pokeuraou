@@ -1,8 +1,8 @@
 //! IKA-464: a move's best-first deepening, in the port (`deepen.py`'s ``m...sallh`` reading).
 //!
 //! A person's move (`humanplay.solve_move`) and the analysis mode read the depth-1 node and
-//! then spend the rest of the budget one cell at a time, best first, re-solving the tree after
-//! every step, so that wherever the budget stops the last equilibrium is an answer. Here the
+//! then spend the rest of the budget a step at a time (the `batch` best cells, one by default),
+//! best first, re-solving the tree once after every step, so that wherever the budget stops the last equilibrium is an answer. Here the
 //! whole read is the port's: the root's matrices (`beliefplan::belief_node`), the tree, the
 //! priorities, the turns of the refined cells, the children's menus by the Q
 //! (`qmenus::menus_of`), the children's matrices on the inference server, every LP (`lp.rs`)

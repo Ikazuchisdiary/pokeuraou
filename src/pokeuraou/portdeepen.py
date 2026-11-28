@@ -136,6 +136,22 @@ def _is_wall(cost: Any) -> bool:  # noqa: ANN401
     return False
 
 
+def _prices(cost: Any) -> Any:  # noqa: ANN401
+    """The `deepen.Cost` a reading of the budget wraps (`Tally`, `HaltingCost`, `PonderCost`
+    keep theirs as ``inner``), or None: read for its prices only, so no reading's own state
+    (a brake's, a tally's) is touched."""
+    from .deepen import Cost
+
+    seen = cost
+    for _ in range(8):
+        if isinstance(seen, Cost):
+            return seen
+        if seen is None:
+            return None
+        seen = getattr(seen, "__dict__", {}).get("inner")
+    return None
+
+
 @dataclass
 class Answer:
     """`search.BeliefAnswer`'s parts a deepened side reads, and the port's last snapshot."""
@@ -248,8 +264,9 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
 
     def meter(snap: dict[str, Any]) -> float:
         """`deepen._Meter.spent` of the port's counts: the counted cells, or the cost's units
-        of the work so far (fills, refinements, cells and probed cells, and the levels and
-        the root's cells at each refinement; the port's probe asks no Q, so ``qs`` is 0)."""
+        of the work so far (fills, refinements, cells and probed cells, the levels at each
+        refinement and the root's cells at each step, IKA-467; the port's probe asks no Q, so
+        ``qs`` is 0)."""
         read = _Meter(cost)
         read.refines = int(snap["refines"])
         read.cells = int(snap["cells"]) - read.refines
@@ -316,13 +333,24 @@ def _run(  # noqa: PLR0913, PLR0915, C901 - the read's slices and its report
             # cells cost more. The port cannot read these units between a step's cells.
             run["steps"] = 1
             refines = int(snap["refines"])
+            spent = meter(snap)
             if refines:
-                spent = meter(snap)
                 per = spent / refines
                 if refines > last[1]:
                     per = max(per, (spent - last[0]) / (refines - last[1]))
-                run["batch"] = max(1, math.ceil((float(cells) - spent) / max(per, 1e-9)))
                 last[:] = [spent, refines]
+            else:
+                # The first step has no refined cell to read: one priced refinement of a full
+                # child (a fill, its cells) and the root's cells solved again, in units, at
+                # the prices the readings wrap (`_prices`; none: the step is not capped).
+                prices = _prices(cost)
+                per = None
+                if prices is not None:
+                    root_cells = len(snap["own"]) * len(snap["other"]) * max(1, int(snap["classes"]))
+                    ms = prices.ms(1, 1, 1 + CHILD_WIDTH ** 2) + prices.root * root_cells
+                    per = ms / prices.cell
+            if per is not None:
+                run["batch"] = max(1, math.ceil((float(cells) - spent) / max(per, 1e-9)))
         wanted = None if grow is None else grow(meter(snap))
         if wanted is not None:
             run["grow"] = [_codes(wanted[0]), _codes(wanted[1])]
