@@ -12,7 +12,7 @@
 //! into the slot's pinned memory, replays a CUDA Graph and sleeps until the card is done.
 
 use crate::encode::Encoder;
-use crate::infer_gpu::{self, Geometry, Gpu, Net, QItem, QNet, QSlot, Slot, MAX_ROWS, Q_ARRAYS};
+use crate::infer_gpu::{self, Geometry, Gpu, Net, QItem, QMode, QNet, QSlot, Slot, MAX_ROWS, Q_ARRAYS};
 use crate::reg::Reg;
 use crate::rnet;
 use crate::shm::Shared;
@@ -46,6 +46,16 @@ struct Stats {
     q_forwarded: AtomicU64,
     /// Items answered by a Q arm of this server.
     q_served: AtomicU64,
+    /// IKA-473: Q requests answered here, and their nanoseconds in the copy and on the card
+    /// (kept apart from the leaf's, which the report divides by the leaf's requests).
+    q_requests: AtomicU64,
+    q_copy_ns: AtomicU64,
+    q_gpu_ns: AtomicU64,
+    /// IKA-473 (`POKEURAOU_Q_GRAPHS=check`): cells compared, and cells whose bits differed.
+    q_checked: AtomicU64,
+    q_differ: AtomicU64,
+    /// IKA-473: Q requests the eager road answered after the graph road failed.
+    q_fallbacks: AtomicU64,
 }
 
 struct QArm {
@@ -67,6 +77,8 @@ struct Server {
     free: Condvar,
     q_forward: Option<String>,
     stats: Stats,
+    /// IKA-473: how the Q is run (`POKEURAOU_Q_GRAPHS`).
+    q_mode: QMode,
 }
 
 impl Server {
@@ -189,13 +201,39 @@ fn q_request(server: &Server, req: &Value, attached: &mut HashMap<String, Shared
     let shared = attach(attached, req["shm"].as_str().ok_or("`shm` is missing")?, needed)?;
     let geom = server.geometry;
     let mut slot = server.take_q_slot();
+    let mut note: Option<String> = None;
     let result = (|| -> Result<(), String> {
         let started = Instant::now();
         let (staged, result_offsets, used, cells) = stage_q(&mut slot, shared, geom, &items)?;
-        server.stats.copy_ns.fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        server.stats.q_copy_ns.fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
         let on_card = Instant::now();
-        let values = slot.matrices(&server.gpu, &arm.net, &staged, used, cells)?;
-        server.stats.gpu_ns.fetch_add(on_card.elapsed().as_nanos() as u64, Relaxed);
+        let graphs = server.q_mode != QMode::Eager;
+        let (got, fell_back) = slot.matrices(&server.gpu, &arm.net, &staged, used, cells, graphs)?;
+        let mut values = got.to_vec();
+        server.stats.q_gpu_ns.fetch_add(on_card.elapsed().as_nanos() as u64, Relaxed);
+        if let Some(why) = fell_back {
+            // IKA-473: the graph road failed and the eager road answered; said in the reply and,
+            // for the first few, in the log.
+            if server.stats.q_fallbacks.fetch_add(1, Relaxed) < 5 {
+                eprintln!("  Q graphs failed, answered eagerly: {why}");
+            }
+            note = Some(format!("the Q graphs failed and the request was answered eagerly: {why}"));
+        }
+        // IKA-473's control (the counting build only, `POKEURAOU_Q_GRAPH_FAULT=ulp`): one ULP on
+        // the first cell of the graph road's answer. The games see it; the check does not, because
+        // it hands back the eager road's answer.
+        #[cfg(feature = "served-report")]
+        if graphs && std::env::var("POKEURAOU_Q_GRAPH_FAULT").as_deref() == Ok("ulp") && !values.is_empty() {
+            values[0] = f64::from_bits(values[0].to_bits() + 1);
+        }
+        if server.q_mode == QMode::Check {
+            // IKA-473: the eager road on the same staged arrays, every cell compared bit for bit.
+            let (eager, _) = slot.matrices(&server.gpu, &arm.net, &staged, used, cells, false)?;
+            let differ = values.iter().zip(eager).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            server.stats.q_checked.fetch_add(cells as u64, Relaxed);
+            server.stats.q_differ.fetch_add(differ as u64, Relaxed);
+            values = eager.to_vec();
+        }
         for (item, at) in staged.iter().zip(&result_offsets) {
             let bytes: Vec<u8> =
                 values[item.cells_at..item.cells_at + item.n0 * item.n1].iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -206,7 +244,11 @@ fn q_request(server: &Server, req: &Value, attached: &mut HashMap<String, Shared
     server.give_q_slot(slot);
     result?;
     server.stats.q_served.fetch_add(items.len() as u64, Relaxed);
-    Ok(json!({ "ok": true }))
+    server.stats.q_requests.fetch_add(1, Relaxed);
+    Ok(match note {
+        Some(note) => json!({ "ok": true, "note": note }),
+        None => json!({ "ok": true }),
+    })
 }
 
 fn error_reply(message: impl std::fmt::Display) -> Value {
@@ -472,6 +514,18 @@ fn handle(server: Arc<Server>, stream: TcpStream) {
         let reply = match op.as_str() {
             "ping" => Ok(json!({ "ok": true, "models": server.arms.iter().map(|a| a.name.clone())
                 .chain(server.hp_arms.iter().cloned()).collect::<Vec<_>>() })),
+            // IKA-473: the Q road's counters, for a test that runs the server with
+            // POKEURAOU_Q_GRAPHS=check.
+            "q_stats" => Ok(json!({
+                "ok": true,
+                "mode": format!("{:?}", server.q_mode),
+                "checked": server.stats.q_checked.load(Relaxed),
+                "differ": server.stats.q_differ.load(Relaxed),
+                "fallbacks": server.stats.q_fallbacks.load(Relaxed),
+                "captured": infer_gpu::Q_CAPTURED.load(Relaxed),
+                "captureFailed": infer_gpu::Q_CAPTURE_FAILED.load(Relaxed),
+                "requests": server.stats.q_requests.load(Relaxed),
+            })),
             "describe" => {
                 let mut arms: serde_json::Map<String, Value> =
                     server.arms.iter().map(|a| (a.name.clone(), json!(a.files))).collect();
@@ -532,7 +586,7 @@ fn forward_q(
 }
 
 #[cfg(windows)]
-fn process_cpu_seconds() -> f64 {
+pub(crate) fn process_cpu_seconds() -> f64 {
     #[repr(C)]
     #[derive(Default)]
     struct FileTime {
@@ -552,7 +606,7 @@ fn process_cpu_seconds() -> f64 {
 }
 
 #[cfg(not(windows))]
-fn process_cpu_seconds() -> f64 {
+pub(crate) fn process_cpu_seconds() -> f64 {
     0.0
 }
 
@@ -572,8 +626,19 @@ pub fn main(args: &[String]) {
     // POKEURAOU_RUST_SERVER_REPORT: seconds between the report lines, for a run that is shorter
     // than a minute (a launcher does not pass --report-every).
     let every = std::env::var("POKEURAOU_RUST_SERVER_REPORT").ok().and_then(|s| s.parse().ok());
+    // IKA-473 (the counting build only): POKEURAOU_RUST_SERVER_SLOTS sets the slots where a
+    // launcher does not pass --slots, 1 to 8 (every slot holds graphs and buffers on the card).
+    #[cfg(feature = "served-report")]
+    let slots_env: Option<usize> = std::env::var("POKEURAOU_RUST_SERVER_SLOTS").ok().map(|s| {
+        s.parse().ok().filter(|n| (1..=8).contains(n)).unwrap_or_else(|| {
+            eprintln!("POKEURAOU_RUST_SERVER_SLOTS is {s:?}; it takes 1 to 8");
+            std::process::exit(2)
+        })
+    });
+    #[cfg(not(feature = "served-report"))]
+    let slots_env: Option<usize> = None;
     let (mut host, mut port, mut slots, mut report) =
-        ("127.0.0.1".to_string(), 0u16, 4usize, every.unwrap_or(60.0f64));
+        ("127.0.0.1".to_string(), 0u16, slots_env.unwrap_or(4usize), every.unwrap_or(60.0f64));
     let mut q_forward = None;
     let mut q_specs: Vec<(String, String)> = Vec::new();
     let mut dll_dir = None;
@@ -766,6 +831,10 @@ pub fn main(args: &[String]) {
         free: Condvar::new(),
         q_forward,
         stats: Stats::default(),
+        q_mode: QMode::from_env().unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2)
+        }),
     });
     let listener = TcpListener::bind((host.as_str(), port)).unwrap_or_else(|e| {
         eprintln!("bind: {e}");
@@ -810,9 +879,13 @@ pub fn main(args: &[String]) {
                 let (req, rows) = (s.requests.load(Relaxed), s.rows.load(Relaxed));
                 let cpu = process_cpu_seconds();
                 let per = |ns: &AtomicU64| ns.load(Relaxed) as f64 / 1e6 / req.max(1) as f64;
+                let q_req = s.q_requests.load(Relaxed);
+                let per_q = |ns: &AtomicU64| ns.load(Relaxed) as f64 / 1e6 / q_req.max(1) as f64;
                 eprintln!(
                     "  {req} requests, {rows} rows ({} since the last line); per request {:.2} ms in all, \
                      {:.2} ms waiting for a slot, {:.2} ms copying, {:.2} ms on the card; Q items {}; \
+                     Q requests {}, per Q request {:.2} ms copying, {:.2} ms on the card; \
+                     Q {:?}, cells checked {}, differing {}, answered eagerly after a graph failed {}; \
                      process CPU {:.1} s (+{:.1})",
                     req - last.0,
                     per(&s.handled_ns),
@@ -820,6 +893,13 @@ pub fn main(args: &[String]) {
                     per(&s.copy_ns),
                     per(&s.gpu_ns),
                     s.q_forwarded.load(Relaxed) + s.q_served.load(Relaxed),
+                    q_req,
+                    per_q(&s.q_copy_ns),
+                    per_q(&s.q_gpu_ns),
+                    server.q_mode,
+                    s.q_checked.load(Relaxed),
+                    s.q_differ.load(Relaxed),
+                    s.q_fallbacks.load(Relaxed),
                     cpu,
                     cpu - last.2
                 );

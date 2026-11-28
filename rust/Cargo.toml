@@ -14,6 +14,8 @@ profile = []
 count-resolves = []
 # IKA-462: the selfplay worker adds up the fills' resolve/encode/bind microseconds and the server waits, and reports them. Off by default.
 phase-report = []
+# IKA-473: the worker counts its requests to the inference servers (rows, items, waits) and reports them. Off by default.
+served-report = []
 # IKA-462: mimalloc as the global allocator. Off by default: in the steady-state ABBA of 2,000 games
 # (records/IKA-462.md section 3.2) it bought nothing, and it adds a C build.
 mimalloc = ["dep:mimalloc"]

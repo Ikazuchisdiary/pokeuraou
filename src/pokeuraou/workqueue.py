@@ -227,6 +227,9 @@ class _Handler(socketserver.StreamRequestHandler):
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    # IKA-473: every worker connects at once. With socketserver's backlog of 5, one of 28
+    # workers was refused (os error 10061) and the run stopped.
+    request_queue_size = 256
 
 
 def serve(queue: WorkQueue, on_return=None) -> tuple[_Server, str]:

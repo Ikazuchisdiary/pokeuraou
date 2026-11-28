@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -113,6 +114,7 @@ class RustServer:
         slots: int = 2,
         q_arms: dict[str, Path] | None = None,
         hp_arms: tuple[str, ...] = (),
+        env: dict[str, str] | None = None,
     ) -> None:
         exe = rustnode.binary_path()
         assert exe.exists(), f"{exe} is not built: cd rust && cargo build --release"
@@ -129,7 +131,8 @@ class RustServer:
             command += ["--hp-share-arm", name]
         self.log = (tmp_path / "server.log").open("w")
         self.process = subprocess.Popen(  # noqa: S603
-            command, stdout=subprocess.PIPE, stderr=self.log, text=True
+            command, stdout=subprocess.PIPE, stderr=self.log, text=True,
+            env={**os.environ, **(env or {})},
         )
         self.address = self.process.stdout.readline().strip()
         assert self.address, f"the server did not start; see {tmp_path / 'server.log'}"
@@ -497,6 +500,39 @@ def test_start_server_is_the_rust_server(encoder, tmp_path):
         assert _ask(address, {"op": "ping"})["models"] == ["value"]
     finally:
         process.terminate()
+
+
+def test_the_q_graphs_answer_what_the_eager_road_answers(reg, encoder, tmp_path):
+    """IKA-473: with POKEURAOU_Q_GRAPHS=check the server runs every Q request on the graphs and
+    on the eager road and compares the cells bit for bit; none differs, and graphs were captured."""
+    from pokeuraou import qrank
+    from pokeuraou.rustnet import write_q
+
+    value = _write(_net(encoder, CONFIGS["bind"], seed=11), encoder, tmp_path / "v.rnet", "v.pt")
+    write_q(_q_net(encoder, reg, seed=5), encoder, tmp_path / "q.rnet", source="q-test.pt", sha256="abc")
+    server = RustServer(
+        {"value": [value]}, tmp_path, q_arms={"q": tmp_path / "q.rnet"}, env={"POKEURAOU_Q_GRAPHS": "check"}
+    )
+    try:
+        pairs = [(pos, pools) for pos, pools, _ in _asks(reg, encoder, 12)]
+        with contextlib.closing(qrank.RemoteQ(server.address, "q", encoder)) as remote:
+            remote.matrices(reg, pairs[:1])
+            remote.matrices(reg, pairs[1:])
+            remote.batched(reg, pairs)
+            remote.matrices(reg, pairs[:3])
+        stats = _ask(server.address, {"op": "q_stats"})
+    finally:
+        server.close()
+    assert stats["mode"] == "Check"
+    assert stats["checked"] > 0 and stats["captured"] > 0, stats
+    assert stats["differ"] == 0 and stats["fallbacks"] == 0 and stats["captureFailed"] == 0, stats
+
+
+def test_an_unknown_q_graphs_value_stops_the_server(encoder, tmp_path):
+    value = _write(_net(encoder, CONFIGS["bind"], seed=11), encoder, tmp_path / "v.rnet", "v.pt")
+    with pytest.raises(AssertionError, match="did not start"):
+        RustServer({"value": [value]}, tmp_path, env={"POKEURAOU_Q_GRAPHS": "yes"})
+    assert "POKEURAOU_Q_GRAPHS" in (tmp_path / "server.log").read_text(encoding="utf-8")
 
 
 def test_describe_q_and_a_missing_q_arm(q_served):

@@ -631,6 +631,28 @@ fn report(stats: &Stats, elapsed: f64, out_path: &str, store: &str) {
             eprintln!("{line}");
         }
     }
+    #[cfg(feature = "served-report")]
+    {
+        use crate::served::counts::{get, LEAF, LEAF_ROWS, LEAF_WAIT, Q, Q_ITEMS};
+        let hist = |h: &[std::sync::atomic::AtomicU64; 14]| {
+            h.iter().enumerate().filter(|(_, c)| get(c) > 0).map(|(k, c)| format!("{}:{}", 1usize << k, get(c))).collect::<Vec<_>>().join(" ")
+        };
+        eprintln!(
+            "SERVED games {} wall {:.3} cpu {:.3} | leaf requests {} rows {} wait_s {:.3} | q requests {} items {} wait_s {:.3} | leaf rows hist {} | q items hist {} | leaf wait ms by rows {}",
+            stats.games,
+            elapsed,
+            crate::infer_server::process_cpu_seconds(),
+            get(&LEAF[0]),
+            get(&LEAF[1]),
+            get(&LEAF[2]) as f64 / 1e9,
+            get(&Q[0]),
+            get(&Q[1]),
+            get(&Q[2]) as f64 / 1e9,
+            hist(&LEAF_ROWS),
+            hist(&Q_ITEMS),
+            LEAF_WAIT.iter().enumerate().filter(|(_, c)| get(c) > 0).map(|(k, c)| format!("{}:{:.0}", 1usize << k, get(c) as f64 / 1e6)).collect::<Vec<_>>().join(" "),
+        );
+    }
     let finished = stats.finished.max(1) as f64;
     println!(
         "{} games in {elapsed:.1}s ({:.2}s each)\n  finished {}, discarded unfinished {}\n  seat-0 win rate {:.1}%\n  decisions {} ({:.1} per game), turns {:.1} per game\n  mirrors {} (wins {}, draws {})\n  -> {out_path}",

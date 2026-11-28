@@ -87,6 +87,31 @@ thread_local! {
     static Q_CLIENT: RefCell<Vec<Client>> = const { RefCell::new(Vec::new()) };
 }
 
+/// IKA-473: the process's requests to the inference servers, counted for the worker's report.
+#[cfg(feature = "served-report")]
+pub mod counts {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    /// Leaf requests (`score`), their rows, and the nanoseconds blocked on their answers.
+    pub static LEAF: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    /// Q requests, their items, and the nanoseconds blocked on their answers.
+    pub static Q: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    /// Leaf requests by rows: bucket k holds 2^k <= rows < 2^(k+1).
+    pub static LEAF_ROWS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+    /// Nanoseconds blocked on the leaf requests of each rows bucket.
+    pub static LEAF_WAIT: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+    /// Q requests by items, the same buckets.
+    pub static Q_ITEMS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+    pub fn bucket(n: usize) -> usize {
+        (usize::BITS - 1 - n.max(1).leading_zeros()).min(13) as usize
+    }
+    pub fn add(a: &AtomicU64, v: u64) {
+        a.fetch_add(v, Relaxed);
+    }
+    pub fn get(a: &AtomicU64) -> u64 {
+        a.load(Relaxed)
+    }
+}
+
 fn connect(server: &Server) -> Result<Client, Failed> {
     let stream = TcpStream::connect(&server.address)
         .map_err(|e| Failed::Broken(format!("the inference server at {}: {e}", server.address)))?;
@@ -180,6 +205,14 @@ pub fn ask(client: &mut Client, request: &Value, stats: &mut Stats) -> Result<Va
         return Err(Failed::Broken("the inference server closed the connection".into()));
     }
     stats.wait_ns += waited.elapsed().as_nanos() as u64;
+    #[cfg(feature = "served-report")]
+    {
+        let items = request.get("items").and_then(Value::as_array).map_or(1, Vec::len);
+        counts::add(&counts::Q[0], 1);
+        counts::add(&counts::Q[1], items as u64);
+        counts::add(&counts::Q[2], waited.elapsed().as_nanos() as u64);
+        counts::add(&counts::Q_ITEMS[counts::bucket(items)], 1);
+    }
     let reply: Value = serde_json::from_str(reply.trim())
         .map_err(|e| Failed::Broken(format!("the inference server's reply: {e}")))?;
     if reply.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -348,6 +381,12 @@ fn send(
     client.writer.flush().map_err(broken)?;
     stats.requests += 1;
     stats.rows += n as u64;
+    #[cfg(feature = "served-report")]
+    {
+        counts::add(&counts::LEAF[0], 1);
+        counts::add(&counts::LEAF[1], n as u64);
+        counts::add(&counts::LEAF_ROWS[counts::bucket(n)], 1);
+    }
     Ok(result_offset)
 }
 
@@ -360,6 +399,11 @@ fn receive(client: &mut Client, out: &mut [f64], result_offset: usize, stats: &m
         return Err(Failed::Broken("the inference server closed the connection".into()));
     }
     stats.wait_ns += waited.elapsed().as_nanos() as u64;
+    #[cfg(feature = "served-report")]
+    {
+        counts::add(&counts::LEAF[2], waited.elapsed().as_nanos() as u64);
+        counts::add(&counts::LEAF_WAIT[counts::bucket(out.len())], waited.elapsed().as_nanos() as u64);
+    }
     let reply: Value = serde_json::from_str(reply.trim())
         .map_err(|e| Failed::Broken(format!("the inference server's reply: {e}")))?;
     if reply.get("ok").and_then(Value::as_bool) != Some(true) {

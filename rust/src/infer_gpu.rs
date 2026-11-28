@@ -730,9 +730,83 @@ pub struct QSlot {
     sp: [CudaSlice<f32>; 2],
     fl: [CudaSlice<f32>; 2],
     sl: [CudaSlice<f32>; 2],
+    /// IKA-473: one item's arrays at fixed places (`q_fixed`), what the graphs read.
+    fixed_dev: CudaSlice<u8>,
+    fixed: [usize; 12],
+    /// IKA-473: the trunk's graph and each side's graph by pool size, captured on first use
+    /// (keyed by the Q net's address too: a server's Q arms share the slots).
+    trunk_graphs: HashMap<usize, CudaGraph>,
+    side_graphs: HashMap<(usize, usize, usize), CudaGraph>,
+    /// IKA-473: the trunks and sides whose capture failed. They run eagerly from then on, so a
+    /// capture that keeps failing is not tried again on every request.
+    trunk_failed: std::collections::HashSet<usize>,
+    side_failed: std::collections::HashSet<(usize, usize, usize)>,
 }
 
 unsafe impl Send for QSlot {}
+
+/// IKA-473: how the Q is run (`POKEURAOU_Q_GRAPHS`): graphs (unset or `1`, the default), eager
+/// (`0`), or both with the answers compared bit for bit (`check`). Any other value stops the
+/// server at its start. Kept in the shipping build on purpose: `0` is the way back to the eager
+/// road without a rebuild, and `check` is how a run on the card shows the two roads agree.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum QMode {
+    Graphs,
+    Eager,
+    Check,
+}
+
+impl QMode {
+    pub fn from_env() -> Result<QMode, String> {
+        match std::env::var("POKEURAOU_Q_GRAPHS").as_deref() {
+            Err(_) | Ok("1") => Ok(QMode::Graphs),
+            Ok("0") => Ok(QMode::Eager),
+            Ok("check") => Ok(QMode::Check),
+            Ok(other) => Err(format!("POKEURAOU_Q_GRAPHS is {other:?}; it takes 0, 1 or check")),
+        }
+    }
+}
+
+/// IKA-473: the most side graphs a Q slot keeps. A side graph is captured for each (net, side,
+/// pool size) met; past this many, a new size runs eagerly (the same kernels, so the same answer).
+pub const Q_SIDE_GRAPHS: usize = 256;
+
+/// IKA-473: Q graphs captured by this process.
+pub static Q_CAPTURED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// IKA-473: Q captures that failed; each one's piece runs eagerly from then on.
+pub static Q_CAPTURE_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// IKA-473's control (the counting build only, `POKEURAOU_Q_GRAPH_FAULT=shape`): each side graph
+/// is captured for one action fewer than its pool, so the pool's last row is stale.
+#[cfg(feature = "served-report")]
+fn shape_fault() -> bool {
+    static FAULT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FAULT.get_or_init(|| std::env::var("POKEURAOU_Q_GRAPH_FAULT").as_deref() == Ok("shape"))
+}
+#[cfg(not(feature = "served-report"))]
+fn shape_fault() -> bool {
+    false
+}
+
+/// Where an item's twelve arrays lie in `fixed_dev`: the position's eight one after another at
+/// 64-byte boundaries (as `stage_q` lays them), then each side's actions and features with room
+/// for Q_POOL rows.
+fn q_fixed(geom: Geometry, feats: usize) -> ([usize; 12], usize) {
+    let row = geom.row_bytes();
+    let acts = crate::legal::SLOTS * crate::legal::ACTION_FIELDS * 4;
+    let mut out = [0usize; 12];
+    let mut at = 0usize;
+    for k in 0..12 {
+        at = (at + 63) & !63;
+        out[k] = at;
+        at += match k {
+            0..=7 => row[k],
+            8 | 9 => Q_POOL * acts,
+            _ => Q_POOL * feats.max(1) * 4,
+        };
+    }
+    (out, (at + 63) & !63)
+}
 
 impl QSlot {
     pub fn new(gpu: &Gpu, geom: Geometry, q: &QNet) -> Result<QSlot, String> {
@@ -776,6 +850,12 @@ impl QSlot {
             sp: pools(pair)?,
             fl: pools(rank)?,
             sl: pools(rank)?,
+            fixed_dev: stream.alloc_zeros::<u8>(q_fixed(geom, q.q.feats).1).map_err(e)?,
+            fixed: q_fixed(geom, q.q.feats).0,
+            trunk_graphs: HashMap::new(),
+            side_graphs: HashMap::new(),
+            trunk_failed: Default::default(),
+            side_failed: Default::default(),
             _workspace: workspace,
             stream,
             blas,
@@ -814,32 +894,176 @@ impl QSlot {
 
     /// The matrices of `items` (their arrays staged in `stage_mut`, `used` bytes) in `cells`
     /// doubles, valid until the next call.
-    pub fn matrices(&mut self, gpu: &Gpu, q: &QNet, items: &[QItem], used: usize, cells: usize) -> Result<&[f64], String> {
+    ///
+    /// IKA-473: with `graphs`, each item's arrays go to their fixed places (`q_fixed`) and the
+    /// trunk and each side's actions and pair projections replay graphs captured on first use;
+    /// the matrix of both sides stays one eager kernel. The graphs hold the kernels and shapes
+    /// the eager road launches, so the answer is the eager road's (`QMode::Check` compares
+    /// them on every request). Where the graph road fails, the request is answered on the eager
+    /// road and the failure comes back beside the values for the caller to note.
+    pub fn matrices(
+        &mut self,
+        gpu: &Gpu,
+        q: &QNet,
+        items: &[QItem],
+        used: usize,
+        cells: usize,
+        graphs: bool,
+    ) -> Result<(&[f64], Option<String>), String> {
         if cells > Q_CELLS {
             return Err(format!("a Q request's matrices are over {Q_CELLS} cells"));
         }
         let k = &gpu.kernels;
-        let src = unsafe { std::slice::from_raw_parts(self.stage_host.ptr, used) };
-        unsafe { dres::memcpy_htod_async(self.p(&self.stage_dev), src, self.stream.cu_stream()) }
-            .map_err(|e| e.to_string())?;
-        for item in items {
-            self.item(k, q, item)?;
+        let mut failed = None;
+        if graphs {
+            for item in items {
+                if let Err(why) = self.item_graphs(k, q, item) {
+                    failed = Some(why);
+                    break;
+                }
+            }
+        }
+        if !graphs || failed.is_some() {
+            let src = unsafe { std::slice::from_raw_parts(self.stage_host.ptr, used) };
+            unsafe { dres::memcpy_htod_async(self.p(&self.stage_dev), src, self.stream.cu_stream()) }
+                .map_err(|e| e.to_string())?;
+            for item in items {
+                self.item(k, q, item)?;
+            }
         }
         let dst = unsafe { std::slice::from_raw_parts_mut(self.out_host.ptr as *mut f64, cells) };
         unsafe { dres::memcpy_dtoh_async(dst, self.p(&self.out_dev), self.stream.cu_stream()) }
             .map_err(|e| e.to_string())?;
         self.event.record(&self.stream).map_err(|e| e.to_string())?;
         self.event.synchronize().map_err(|e| e.to_string())?;
-        Ok(unsafe { std::slice::from_raw_parts(self.out_host.ptr as *const f64, cells) })
+        Ok((unsafe { std::slice::from_raw_parts(self.out_host.ptr as *const f64, cells) }, failed))
     }
 
+    /// One item on the eager road, its arrays where `stage_q` staged them.
     fn item(&self, k: &Kernels, q: &QNet, item: &QItem) -> Result<(), String> {
+        let base = self.p(&self.stage_dev);
+        let at: Vec<u64> = item.offsets.iter().map(|o| base + *o as u64).collect();
+        self.trunk(k, q, &at)?;
+        for (side, n) in [item.n0, item.n1].into_iter().enumerate() {
+            self.side(k, q, &at, side, n)?;
+        }
+        self.pair(k, q, item)
+    }
+
+    /// One item on the graph road: its arrays copied to their fixed places, the trunk's graph
+    /// and each side's graph replayed (each captured the first time it is met), and the pair
+    /// matrix launched.
+    fn item_graphs(&mut self, k: &Kernels, q: &QNet, item: &QItem) -> Result<(), String> {
+        for side in [item.n0, item.n1] {
+            if side > Q_POOL {
+                return Err(format!("a pool of {side} actions is over {}", Q_POOL));
+            }
+        }
+        let base = self.p(&self.fixed_dev);
+        // The position's eight arrays lie as `q_fixed` places them, so one copy moves them.
+        let copy = |from: usize, to: usize, n: usize| -> Result<(), String> {
+            if n == 0 {
+                return Ok(());
+            }
+            let src = unsafe { std::slice::from_raw_parts(self.stage_host.ptr.add(from), n) };
+            unsafe { dres::memcpy_htod_async(base + to as u64, src, self.stream.cu_stream()) }.map_err(|e| e.to_string())
+        };
+        let position_end = self.fixed[7] + self.geom.row_bytes()[7];
+        if (0..8).any(|j| item.offsets[j] - item.offsets[0] != self.fixed[j]) {
+            return Err("a Q item's position arrays are not laid as the graphs read them".into());
+        }
+        copy(item.offsets[0], 0, position_end)?;
+        let acts = crate::legal::SLOTS * crate::legal::ACTION_FIELDS * 4;
+        for side in 0..2 {
+            let n = [item.n0, item.n1][side];
+            copy(item.offsets[8 + side], self.fixed[8 + side], n * acts)?;
+            copy(item.offsets[10 + side], self.fixed[10 + side], n * q.q.feats * 4)?;
+        }
+        let at: Vec<u64> = self.fixed.iter().map(|o| base + *o as u64).collect();
+        let net_id = q as *const QNet as usize;
+        let mut trunks = std::mem::take(&mut self.trunk_graphs);
+        let replayed = (|| -> Result<(), String> {
+            if self.trunk_failed.contains(&net_id) {
+                return self.trunk(k, q, &at);
+            }
+            if !trunks.contains_key(&net_id) {
+                match self.capture(|slot| slot.trunk(k, q, &at)) {
+                    Ok(graph) => {
+                        trunks.insert(net_id, graph);
+                    }
+                    Err(why) => {
+                        self.capture_failed(&why);
+                        self.trunk_failed.insert(net_id);
+                        return self.trunk(k, q, &at);
+                    }
+                }
+            }
+            trunks[&net_id].launch().map_err(|e| e.to_string())
+        })();
+        self.trunk_graphs = trunks;
+        replayed?;
+        for (side, n) in [item.n0, item.n1].into_iter().enumerate() {
+            if n == 0 {
+                continue;
+            }
+            let key = (net_id, side, n);
+            let mut sides = std::mem::take(&mut self.side_graphs);
+            let replayed = (|| -> Result<(), String> {
+                if !sides.contains_key(&key) {
+                    if sides.len() >= Q_SIDE_GRAPHS || self.side_failed.contains(&key) {
+                        return self.side(k, q, &at, side, n);
+                    }
+                    let rows = if shape_fault() { n.max(2) - 1 } else { n };
+                    match self.capture(|slot| slot.side(k, q, &at, side, rows)) {
+                        Ok(graph) => {
+                            sides.insert(key, graph);
+                        }
+                        Err(why) => {
+                            self.capture_failed(&why);
+                            self.side_failed.insert(key);
+                            return self.side(k, q, &at, side, n);
+                        }
+                    }
+                }
+                sides[&key].launch().map_err(|e| e.to_string())
+            })();
+            self.side_graphs = sides;
+            replayed?;
+        }
+        self.pair(k, q, item)
+    }
+
+    /// A capture that failed: counted, and the first few in the log.
+    fn capture_failed(&self, why: &str) {
+        if Q_CAPTURE_FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
+            eprintln!("  a Q capture failed; that piece runs eagerly from now on: {why}");
+        }
+    }
+
+    /// `run` once eagerly (the kernels loaded and cuBLAS set up before a capture), then
+    /// captured as a graph on the slot's stream. The caller replays it for this request too.
+    fn capture(&self, run: impl Fn(&QSlot) -> Result<(), String>) -> Result<CudaGraph, String> {
+        run(self)?;
+        self.stream
+            .begin_capture(dsys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
+            .map_err(|e| e.to_string())?;
+        let result = run(self);
+        let graph = self
+            .stream
+            .end_capture(dsys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH)
+            .map_err(|e| e.to_string())?;
+        result?;
+        Q_CAPTURED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        graph.ok_or_else(|| "a Q capture came back empty".to_string())
+    }
+
+    /// The trunk on the item's position (`at`: its twelve arrays): the Pokemon rows after
+    /// attention (`hfin`) and each side's context (`ctx`).
+    fn trunk(&self, k: &Kernels, q: &QNet, at: &[u64]) -> Result<(), String> {
         let (net, qd) = (&q.net, &q.q);
         let d = &net.dims;
         let g = self.geom;
         let s = &self.stream;
-        let base = self.p(&self.stage_dev);
-        let at: Vec<u64> = item.offsets.iter().map(|o| base + *o as u64).collect();
         let t = 2 * g.m;
         let i = |v: usize| v as i32;
         // The leaf's trunk on this position: Pokemon rows (+ move properties), the side vectors.
@@ -911,12 +1135,22 @@ impl QSlot {
             unsafe { l.launch(cfg(2, 256)) }.map_err(|e| e.to_string())?;
         }
         self.lin(net.raw("context.0.weight"), ctx_in, ctx, qd.act, d.head_in, 2, 0.0)?;
-        self.bln(k, ctx, 2, qd.act, net.raw("context.0.bias"), net.raw("context.1.weight"), net.raw("context.1.bias"))?;
-        // each side's actions -> vectors
+        self.bln(k, ctx, 2, qd.act, net.raw("context.0.bias"), net.raw("context.1.weight"), net.raw("context.1.bias"))
+    }
+
+    /// Side `side`'s `n` actions -> vectors (`u`), and their pair projections (`fp`, `sp`, `fl`,
+    /// `sl`). Nothing for an empty pool (the eager road's projections of no rows were no-ops).
+    fn side(&self, k: &Kernels, q: &QNet, at: &[u64], side: usize, n: usize) -> Result<(), String> {
+        let (net, qd) = (&q.net, &q.q);
+        let d = &net.dims;
+        let g = self.geom;
+        let s = &self.stream;
+        let i = |v: usize| v as i32;
+        let (hfin, ctx) = (self.p(&self.hfin), self.p(&self.ctx));
         let slot_width = 16 + d.mon + d.md + qd.props + 1 + 8 + d.mon + d.mon;
-        for (side, n) in [item.n0, item.n1].into_iter().enumerate() {
+        {
             if n == 0 {
-                continue;
+                return Ok(());
             }
             if n > Q_POOL {
                 return Err(format!("a pool of {n} actions is over {}", Q_POOL));
@@ -952,7 +1186,7 @@ impl QSlot {
             self.bln(k, u, n, qd.act, net.raw("act_mlp.4.bias"), net.raw("act_mlp.5.weight"), net.raw("act_mlp.5.bias"))?;
         }
         // the pair head: first_pair / second_pair / first_low / second_low of every vector
-        for (side, n) in [item.n0, item.n1].into_iter().enumerate() {
+        {
             let (u, fp, sp, fl, sl) =
                 (self.p(&self.u[side]), self.p(&self.fp[side]), self.p(&self.sp[side]), self.p(&self.fl[side]), self.p(&self.sl[side]));
             self.lin(net.raw("first_pair.weight"), u, fp, qd.pair, qd.act, n, 0.0)?;
@@ -963,6 +1197,14 @@ impl QSlot {
             self.lin(net.raw("second_low.weight"), u, sl, qd.rank, qd.act, n, 0.0)?;
             self.bias(k, sl, n, qd.rank, net.raw("second_low.bias"))?;
         }
+        Ok(())
+    }
+
+    /// The item's N0 x N1 matrix from both sides' projections, into the output at its cells.
+    fn pair(&self, k: &Kernels, q: &QNet, item: &QItem) -> Result<(), String> {
+        let (net, qd) = (&q.net, &q.q);
+        let s = &self.stream;
+        let i = |v: usize| v as i32;
         let out = self.p(&self.out_dev) + (item.cells_at * 8) as u64;
         let (n0, n1, pd, rank) = (i(item.n0), i(item.n1), i(qd.pair), i(qd.rank));
         let (w, b) = (net.raw("pair_out.weight"), net.raw("pair_out.bias"));

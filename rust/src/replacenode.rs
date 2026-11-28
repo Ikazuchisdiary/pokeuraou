@@ -51,33 +51,44 @@ fn settle(values: &mut [f64], header: &Value, net_scores_ends: bool) -> u64 {
     ended
 }
 
-/// One completion's matrix of the replacement node, from a position and the pairs of options
-/// already read (IKA-458 stage 3.6a: `node`'s per-job work without a request's JSON): every
-/// pair's phase filled and encoded, scored on `server`, an ended leaf settled, a phase that draws
-/// folded into its cell by weight. The matrix (row-major) and the fill's account for Python's
-/// counters; an `Err` is an answer to hand back (a fault, or the server's failure).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn score_job(
+/// One completion's leaves of the replacement node, filled and encoded but not yet scored:
+/// the phase's header, the encoded rows, and their count.
+pub(crate) struct EncodedJob {
+    header: Value,
+    pub(crate) encoded: crate::encode::Encoded,
+    pub(crate) rows: usize,
+}
+
+/// Every pair's phase of one completion filled and encoded (IKA-458 stage 3.6a: `node`'s
+/// per-job work without a request's JSON). An `Err` is a fault to hand back.
+pub(crate) fn encode_job(
     reg: &Reg,
     encoder: &Encoder,
     position: &crate::position::Position,
     pairs: &[[Vec<crate::resolve::SlotAction>; 2]],
     rules: crate::encode::EncodeRules,
-    server: &Server,
+) -> Result<EncodedJob, Value> {
+    let per_row = (2 * encoder.widths.mons_per_side).max(1);
+    let (header, encoded) = crate::resolve::commands::replacements_encoded_of(reg, encoder, position, rules, pairs)
+        .map_err(|why| json!({ "fault": format!("the port refused a replacement phase: {why}") }))?;
+    let rows = encoded.species.len() / per_row;
+    Ok(EncodedJob { header, encoded, rows })
+}
+
+/// One completion's matrix of the replacement node from its scored leaves (`values`, one a row
+/// of `job`): an ended leaf settled, a phase that draws folded into its cell by weight. The
+/// matrix (row-major) and the fill's account for Python's counters; an `Err` is a fault.
+pub(crate) fn job_matrix(
+    job: &EncodedJob,
+    mut values: Vec<f64>,
     net_scores_ends: bool,
-    stats: &mut Stats,
     ended: &mut u64,
     m: usize,
     n: usize,
 ) -> Result<(Vec<f64>, Value), Value> {
     let fault = |e: String| json!({ "fault": e });
-    let per_row = (2 * encoder.widths.mons_per_side).max(1);
-    let (header, encoded) = crate::resolve::commands::replacements_encoded_of(reg, encoder, position, rules, pairs)
-        .map_err(|why| fault(format!("the port refused a replacement phase: {why}")))?;
-    let rows = encoded.species.len() / per_row;
-    let batch = crate::served::begin(server, &encoder.widths, &[&encoded], &[rows], stats).map_err(server_failed)?;
-    let mut values = crate::served::finish(server, batch, stats).map_err(server_failed)?;
-    *ended += settle(&mut values, &header, net_scores_ends);
+    let (header, rows) = (&job.header, job.rows);
+    *ended += settle(&mut values, header, net_scores_ends);
     let cell_values = match header.get("branches").and_then(Value::as_array).filter(|b| !b.is_empty()) {
         Some(branches) => {
             if branches.len() != values.len() {
@@ -102,6 +113,94 @@ pub(crate) fn score_job(
         }
     };
     Ok((cell_values, json!({ "leaves": rows, "mega": header["encoding"]["megaFromSlots"], "pairs": m * n })))
+}
+
+/// The server's graph bucket of a request of `rows` rows (`infer_gpu::bucket_of`), or None for
+/// a request the server cuts into several graphs (or an empty one).
+fn bucket(rows: usize) -> Option<usize> {
+    (1..=crate::infer_gpu::MAX_ROWS).contains(&rows).then(|| crate::infer_gpu::bucket_of(rows))
+}
+
+/// IKA-473: whether `score_jobs` packs (`POKEURAOU_REPLACEMENT_PACK`: unset or `1` packs, `0`
+/// sends one request a job as before, for the test that holds the two to the same values).
+/// Kept in the shipping build on purpose: CI's test runs the shipping build, `0` only sends more
+/// requests and gives the same games, and any value but `0` or `1` stops the node.
+fn packing() -> Result<bool, String> {
+    match std::env::var("POKEURAOU_REPLACEMENT_PACK").as_deref() {
+        Err(_) | Ok("1") => Ok(true),
+        Ok("0") => Ok(false),
+        Ok(other) => Err(format!("POKEURAOU_REPLACEMENT_PACK is {other:?}; it takes 0 or 1")),
+    }
+}
+
+/// IKA-473's control (the counting build only, `POKEURAOU_PACK_IGNORE_BUCKET`): jobs are packed
+/// up to 4,096 rows whatever their buckets, so a job's rows can run on another graph.
+#[cfg(feature = "served-report")]
+fn ignore_bucket() -> bool {
+    std::env::var_os("POKEURAOU_PACK_IGNORE_BUCKET").is_some()
+}
+#[cfg(not(feature = "served-report"))]
+fn ignore_bucket() -> bool {
+    false
+}
+
+/// IKA-473: the jobs (by their row counts) in the groups `score_jobs` sends together, as
+/// ranges of consecutive jobs: a group's jobs and their sum share one graph bucket.
+fn packs(rows: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut first = 0usize;
+    let ignore = ignore_bucket();
+    while first < rows.len() {
+        let own = bucket(rows[first]);
+        let mut stop = first + 1;
+        let mut total = rows[first];
+        if ignore {
+            while stop < rows.len() && rows[stop] > 0 && total + rows[stop] <= crate::infer_gpu::MAX_ROWS {
+                total += rows[stop];
+                stop += 1;
+            }
+        } else if own.is_some() {
+            while stop < rows.len() && bucket(rows[stop]) == own && bucket(total + rows[stop]) == own {
+                total += rows[stop];
+                stop += 1;
+            }
+        }
+        out.push(first..stop);
+        first = stop;
+    }
+    out
+}
+
+/// IKA-473: the rows of `jobs` scored on `server`, each job's values apart. Consecutive jobs go
+/// in one request while every one of them and their sum fall in the same graph bucket of the
+/// server. The server runs a request on the graph of its bucket, and a row's value there
+/// depends only on that row's inputs, so each job gets the values its own request gave, with
+/// fewer round trips (a replacement node asked once a completion, mostly 1 to 4 rows each).
+pub(crate) fn score_jobs(
+    server: &Server,
+    widths: &crate::encode::Widths,
+    jobs: &[&EncodedJob],
+    stats: &mut Stats,
+) -> Result<Vec<Vec<f64>>, Value> {
+    let mut out: Vec<Vec<f64>> = Vec::with_capacity(jobs.len());
+    let counts: Vec<usize> = jobs.iter().map(|j| j.rows).collect();
+    let groups = if packing().map_err(|e| json!({ "fault": e }))? {
+        packs(&counts)
+    } else {
+        (0..counts.len()).map(|j| j..j + 1).collect()
+    };
+    for group in groups {
+        let blocks: Vec<&crate::encode::Encoded> = jobs[group.clone()].iter().map(|j| &j.encoded).collect();
+        let rows: Vec<usize> = counts[group].to_vec();
+        let batch = crate::served::begin(server, widths, &blocks, &rows, stats).map_err(server_failed)?;
+        let values = crate::served::finish(server, batch, stats).map_err(server_failed)?;
+        let mut at = 0usize;
+        for r in rows {
+            out.push(values[at..at + r].to_vec());
+            at += r;
+        }
+    }
+    Ok(out)
 }
 
 fn node(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
@@ -203,5 +302,20 @@ mod tests {
         let mut values = vec![0.3, 0.4, 0.5];
         assert_eq!(settle(&mut values, &header, true), 2);
         assert_eq!(values, vec![0.3, 0.4, 0.5]);
+    }
+
+    #[test]
+    fn completions_go_together_only_while_they_keep_their_graph_bucket() {
+        // Small jobs share the 64-row bucket until their sum would leave it.
+        assert_eq!(packs(&[2, 4, 3, 1]), vec![0..4]);
+        assert_eq!(packs(&[30, 30, 5]), vec![0..2, 2..3]);
+        // A job of another bucket goes alone, and so does one the server would cut.
+        assert_eq!(packs(&[2, 100, 3]), vec![0..1, 1..2, 2..3]);
+        assert_eq!(packs(&[0, 2]), vec![0..1, 1..2]);
+        assert_eq!(packs(&[5000, 5000]), vec![0..1, 1..2]);
+        assert_eq!(packs(&[]), Vec::<std::ops::Range<usize>>::new());
+        // Two jobs of the 1,280-row bucket: their sum is in another.
+        assert_eq!(packs(&[1100, 1100]), vec![0..1, 1..2]);
+        assert_eq!(packs(&[70, 70]), vec![0..1, 1..2]);
     }
 }

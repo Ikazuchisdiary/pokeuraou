@@ -5,9 +5,10 @@
 //! node (`replacementNode`), drew each side's replacement from its strategy with numpy's
 //! `choice`, and asked for the phase once more for each draw it opened
 //! (`resolve_replacements`). Here one request does all of it, in the same order and so with the
-//! same requests to the inference server and the same draws from the generator: the options, the
+//! same values from the inference server and the same draws from the generator: the options, the
 //! completions of both benches (`hiddenbench::step_of`, as `hiddenStep` answers them), every
-//! completion's matrix (`replacenode::score_job`), the two Bayesian games, the two draws
+//! completion's matrix (`replacenode::encode_job`, `score_jobs` and `job_matrix`; IKA-473 packs
+//! the completions into fewer requests that give the same values), the two Bayesian games, the two draws
 //! (`advance::choice`), and the phase replayed with each draw it opens answered from the same
 //! generator (`commands::replacement_phase_drawn`, whose answer is `Generator.choice(n, p=w / sum(w))`).
 //!
@@ -117,27 +118,35 @@ pub(crate) fn phase_core(
     let mut job_sides: Vec<i64> = Vec::new();
     let mut fills: Vec<Value> = Vec::new();
     // Side 0's leaf scores the completions of side 1's bench, then side 1's those of side 0's.
+    // IKA-473: every completion is filled and encoded first, and each leaf's are scored in as
+    // few requests as keep their values (`replacenode::score_jobs`).
+    let mut jobs: Vec<(usize, usize, crate::replacenode::EncodedJob)> = Vec::new();
     for side in 0..2 {
         let leaf = context.leaf[side];
         for position in &spreads[1 - side].0 {
-            let (cells, mut fill) = crate::replacenode::score_job(
-                reg,
-                encoder,
-                position,
-                &pairs,
-                context.rules[leaf],
-                &context.servers[leaf],
-                context.net_scores_ends[leaf],
-                &mut stats[leaf],
-                &mut ended[leaf],
-                m,
-                n,
-            )?;
-            fill["leaf"] = json!(leaf);
-            matrices.push(cells);
-            job_sides.push((1 - side) as i64);
-            fills.push(fill);
+            jobs.push((side, leaf, crate::replacenode::encode_job(reg, encoder, position, &pairs, context.rules[leaf])?));
         }
+    }
+    let mut scored: Vec<Option<Vec<f64>>> = vec![None; jobs.len()];
+    for leaf in 0..context.servers.len() {
+        let mine: Vec<usize> = (0..jobs.len()).filter(|&j| jobs[j].1 == leaf).collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let asked: Vec<&crate::replacenode::EncodedJob> = mine.iter().map(|&j| &jobs[j].2).collect();
+        let values = crate::replacenode::score_jobs(&context.servers[leaf], &encoder.widths, &asked, &mut stats[leaf])?;
+        for (j, v) in mine.into_iter().zip(values) {
+            scored[j] = Some(v);
+        }
+    }
+    for ((side, leaf, job), values) in jobs.iter().zip(scored) {
+        let values = values.ok_or_else(|| fault("a completion's leaf is not a server".into()))?;
+        let (cells, mut fill) =
+            crate::replacenode::job_matrix(job, values, context.net_scores_ends[*leaf], &mut ended[*leaf], m, n)?;
+        fill["leaf"] = json!(leaf);
+        matrices.push(cells);
+        job_sides.push((1 - side) as i64);
+        fills.push(fill);
     }
     let asks: Vec<(i64, Vec<f64>)> = (0..2).map(|side| (side as i64, spreads[1 - side].1.clone())).collect();
     let mut strategies: Vec<Vec<f64>> = Vec::new();
