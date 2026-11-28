@@ -254,7 +254,8 @@ pub struct Reg {
     /// FNV rather than SipHash, keyed by inline id; looked up by `&str` all the same.
     pub species: HashMap<Id, Species, FnvBuild>,
     pub moves: HashMap<Id, Move, FnvBuild>,
-    pub natures: HashMap<String, Nature>,
+    /// FNV and inline ids, as `species` (IKA-471: every Battler build looks its nature up).
+    pub natures: HashMap<Id, Nature, FnvBuild>,
     /// `typechart[attacking][defending]`, dense: a type's slot comes from `type_slot`, and
     /// a type the chart does not name is `UNKNOWN_TYPE` (IKA-101: this was two nested
     /// SipHash maps of `String`, walked twice per damage calculation).
@@ -647,7 +648,7 @@ impl Reg {
             }
         }
 
-        let mut natures = HashMap::new();
+        let mut natures: HashMap<Id, Nature, FnvBuild> = HashMap::default();
         if let Some(list) = doc["natures"].as_array() {
             for entry in list {
                 let mut numerators = [100i64; 6];
@@ -661,10 +662,7 @@ impl Reg {
                         numerators[index] = 90;
                     }
                 }
-                natures.insert(
-                    entry["name"].as_str().unwrap_or_default().to_string(),
-                    Nature { numerators },
-                );
+                natures.insert(Id::new(entry["name"].as_str().unwrap_or_default()), Nature { numerators });
             }
         }
 

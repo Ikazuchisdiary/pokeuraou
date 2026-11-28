@@ -2,7 +2,7 @@
 //!
 //! `dump-fills` (a feature, off by default) writes every fill request the belief plan makes to
 //! `$POKEURAOU_FILL_DUMP/<pid>.jsonl`, one in `$POKEURAOU_FILL_DUMP_EVERY` (default 1).
-//! `fill-bench <regulation.json> <dump.jsonl>... [--repeats N] [--digest] [--limit N]` reads
+//! `fill-bench <regulation.json> <dump.jsonl>... [--repeats N] [--digest] [--limit N] [--max-acted N|off]` reads
 //! them back and resolves each fill's cells as `encoded_node::fill` does on one thread: the
 //! turn, then every pause resumed (`resume_all`). It does not encode. `--digest` prints a hash
 //! of every answer (branch weights, positions, pauses, notes, refusals), so two builds can be
@@ -310,6 +310,12 @@ pub fn main(args: &[String]) {
                 k += 1;
             }
             "--digest" => digest = true,
+            // IKA-471: how many slots may have moved in a state the fill cache keeps; `off` for none.
+            "--max-acted" => {
+                let n = if args[k + 1] == "off" { usize::MAX } else { args[k + 1].parse().unwrap() };
+                crate::resolve::fill_cache::MAX_ACTED.store(n, std::sync::atomic::Ordering::Relaxed);
+                k += 1;
+            }
             other => files.push(other.to_string()),
         }
         k += 1;
@@ -340,6 +346,7 @@ pub fn main(args: &[String]) {
         let mut whole = fnv();
         let mut turns = 0usize;
         for (index, request) in requests.iter().enumerate() {
+            let _cache = crate::resolve::fill_cache::begin(&reg);
             let mut h = Some(fnv());
             for (i, j) in request.wanted_cells() {
                 let actions = [request.ours[i].clone(), request.theirs[j].clone()];
@@ -374,6 +381,7 @@ pub fn main(args: &[String]) {
             damage_new_fill();
             #[cfg(feature = "count-execute")]
             crate::resolve::execute_count::new_fill();
+            let _cache = crate::resolve::fill_cache::begin(&reg);
             for (i, j) in request.wanted_cells() {
                 let actions = [request.ours[i].clone(), request.theirs[j].clone()];
                 turns += 1;

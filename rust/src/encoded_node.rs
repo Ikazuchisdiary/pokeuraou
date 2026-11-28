@@ -283,6 +283,8 @@ fn fill_on<'r>(
 ) -> (Value, Encoded, Vec<f64>, Vec<u8>) {
     #[cfg(feature = "count-resolves")]
     crate::dupcount::next_fill();
+    // IKA-471: the cells' shared actions executed once (`resolve::fill_cache`).
+    let _cache = crate::resolve::fill_cache::begin(reg);
     let rows = request.ours.len();
     let cols = request.theirs.len();
     let mut exact = vec![vec![false; cols]; rows];

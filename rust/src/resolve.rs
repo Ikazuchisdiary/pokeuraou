@@ -2375,7 +2375,17 @@ fn run_queue<'a>(
                 #[cfg(feature = "count-execute")]
                 let probe = execute_count::before(&base, variant, step_budget);
                 let started = phase_start();
-                let produced = execute(reg, base, variant, step_budget)?;
+                let produced = match fill_cache::lookup(&base, variant, step_budget) {
+                    Some(outcomes) => outcomes,
+                    None => {
+                        let key = fill_cache::wanted(&base).then(|| base.clone());
+                        let produced = execute(reg, base, variant, step_budget)?;
+                        if let Some(key) = key {
+                            fill_cache::store(key, variant, step_budget, &produced);
+                        }
+                        produced
+                    }
+                };
                 phase_end(6, started);
                 #[cfg(feature = "count-execute")]
                 execute_count::after(probe);
@@ -2482,6 +2492,148 @@ fn run_queue<'a>(
         });
     }
     Ok(TurnResult { branches, exact, suspended, unmodelled })
+}
+
+/// IKA-471: within one fill, an action executed from a state an earlier cell of the same fill
+/// already executed it from is answered with that cell's outcomes.
+///
+/// A fill resolves one turn per cell, and the cells of a row share one side's actions, so
+/// the first actions of a turn are often the same action from the same state: in the fills of
+/// generation, 39% of `execute`'s time went to states and actions met earlier in the fill
+/// (`count-execute`). `execute` reads nothing but the
+/// state, the action and the budget, so its answer is the same; the key compares every field
+/// `same_turn` does and the ones it leaves out as well (the notes, the move resolving now's
+/// bookkeeping), and a turn that keeps a trace is never cached. Only states where at most
+/// `MAX_ACTED` slots have moved are kept (`usize::MAX` turns the cache off): past that a
+/// state was met again too seldom to pay for keeping it (records/IKA-471.md).
+///
+/// The cache lives on the thread that resolves a fill's cells, from `begin` until the guard it
+/// returns is dropped; outside a fill (the turn a game plays, a cell thread of the pool) there
+/// is none and nothing is kept.
+pub mod fill_cache {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// The most slots that may have moved in a state that is kept. A static so that
+    /// `fill-bench --max-acted N` can try another; nothing else writes it.
+    pub static MAX_ACTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+    struct Entry {
+        turn: Turn<'static>,
+        action: QueuedAction,
+        budget: Budget,
+        outcomes: Vec<Outcome<'static>>,
+    }
+
+    #[derive(Default)]
+    struct Cache {
+        buckets: std::collections::HashMap<u64, Vec<Entry>>,
+    }
+
+    thread_local! {
+        static CACHE: RefCell<Option<Cache>> = const { RefCell::new(None) };
+    }
+
+    /// Clears the cache when the fill is over. The entries borrow the fill's `Reg` (they are
+    /// kept as `'static`), so they must not outlive it: the guard is dropped before the
+    /// fill returns.
+    pub struct Guard {
+        _not_send: std::marker::PhantomData<*const ()>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CACHE.with(|c| *c.borrow_mut() = None);
+        }
+    }
+
+    /// Starts a fill's cache on this thread.
+    pub fn begin(_reg: &Reg) -> Guard {
+        let on = MAX_ACTED.load(std::sync::atomic::Ordering::Relaxed) != usize::MAX;
+        CACHE.with(|c| *c.borrow_mut() = on.then(Cache::default));
+        Guard { _not_send: std::marker::PhantomData }
+    }
+
+    fn active() -> bool {
+        CACHE.with(|c| c.borrow().is_some())
+    }
+
+    /// Whether `turn` is a state worth keeping (and a fill is running).
+    pub fn wanted(turn: &Turn) -> bool {
+        turn.log.is_none()
+            && turn.draws.is_none()
+            && turn.acted.iter().flatten().filter(|a| **a).count()
+                <= MAX_ACTED.load(std::sync::atomic::Ordering::Relaxed)
+            && active()
+    }
+
+    fn key(turn: &Turn, action: &QueuedAction) -> u64 {
+        let mut hash = state_fingerprint(&turn.pos, &[], turn.self_switch_pending);
+        let mut eat = |value: u64| {
+            hash ^= value;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        eat(action.side as u64);
+        eat(action.slot as u64);
+        eat(action.kind as u64);
+        eat(action.move_id.map(|m| m.as_str().len() as u64 + 11).unwrap_or(0));
+        eat(action.target.unwrap_or(-1) as u64);
+        for row in turn.acted.iter().chain(turn.attacks.iter()) {
+            eat(row[0] as u64 | (row[1] as u64) << 1);
+        }
+        hash
+    }
+
+    fn same(a: &Turn, b: &Turn) -> bool {
+        a.unmodelled == b.unmodelled
+            && a.rolls_stratified == b.rolls_stratified
+            && a.move_start_hp == b.move_start_hp
+            && a.move_hit == b.move_hit
+            && a.move_dolled == b.move_dolled
+            && same_turn(a, b)
+    }
+
+    /// The kept outcomes, copied for the fill that is running.
+    fn copy<'a>(outcomes: &[Outcome<'static>]) -> Vec<Outcome<'a>> {
+        // SAFETY: the kept turns borrow the `Reg` of the fill that is running (see `Guard`),
+        // and a turn's lifetime is only that borrow.
+        outcomes
+            .iter()
+            .map(|(w, t)| (*w, unsafe { std::mem::transmute::<Turn<'static>, Turn<'a>>(t.clone()) }))
+            .collect()
+    }
+
+    /// The outcomes kept for `turn` and `action`, if this fill met them.
+    pub fn lookup<'a>(turn: &Turn<'a>, action: &QueuedAction, budget: Budget) -> Option<Vec<Outcome<'a>>> {
+        if !wanted(turn) {
+            return None;
+        }
+        let k = key(turn, action);
+        CACHE.with(|c| {
+            let cache = c.borrow();
+            let bucket = cache.as_ref()?.buckets.get(&k)?;
+            bucket
+                .iter()
+                .find(|e| e.budget == budget && e.action == *action && same(turn, &e.turn))
+                .map(|e| copy(&e.outcomes))
+        })
+    }
+
+    /// Keeps what executing `action` from `turn` produced.
+    pub fn store<'a>(turn: Turn<'a>, action: &QueuedAction, budget: Budget, outcomes: &[Outcome<'a>]) {
+        let k = key(&turn, action);
+        // SAFETY: as in `copy`; the entries are dropped with the guard, before the `Reg` goes.
+        let turn: Turn<'static> = unsafe { std::mem::transmute::<Turn<'a>, Turn<'static>>(turn) };
+        let outcomes: Vec<Outcome<'static>> = outcomes
+            .iter()
+            .map(|(w, t)| (*w, unsafe { std::mem::transmute::<Turn<'a>, Turn<'static>>(t.clone()) }))
+            .collect();
+        CACHE.with(|c| {
+            if let Some(cache) = c.borrow_mut().as_mut() {
+                cache.buckets.entry(k).or_default().push(Entry { turn, action: action.clone(), budget, outcomes });
+            }
+        });
+    }
 }
 
 /// IKA-471: how many `execute` calls in one fill had a state and an action met earlier in the
