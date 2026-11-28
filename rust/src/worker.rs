@@ -684,6 +684,14 @@ fn report(stats: &Stats, elapsed: f64, out_path: &str, store: &str) {
         crate::lp::LPS.load(std::sync::atomic::Ordering::Relaxed),
         crate::lp::FALLBACKS.load(std::sync::atomic::Ordering::Relaxed),
     );
+    // IKA-471: how often a fill's action was answered from `resolve::fill_cache`.
+    let relaxed = std::sync::atomic::Ordering::Relaxed;
+    println!(
+        "  fill cache: {} lookups, {} hits, {} kept",
+        crate::resolve::fill_cache::LOOKUPS.load(relaxed),
+        crate::resolve::fill_cache::HITS.load(relaxed),
+        crate::resolve::fill_cache::STORES.load(relaxed),
+    );
     let solves = stats.solves.max(1) as f64;
     println!(
         "  selection: {} solves ({} reused, {} read from {store}), {:.1}s = {:.2}s a solve, {} positions, worst antisymmetry {:.2e}",

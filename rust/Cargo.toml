@@ -25,9 +25,11 @@ sampler = []
 count-damage = []
 # IKA-471: `fill-bench` counts the `execute` calls whose state and action were met earlier in the same fill. Off by default.
 count-execute = []
-# mimalloc as the global allocator (IKA-462), on by default since IKA-471. IKA-462 measured it
-# without its start-up having run on windows-gnu (see `main.rs`), and it bought nothing; started,
-# it resolves the fills' turns in about 0.7 of the time (records/IKA-471.md).
+# mimalloc as the global allocator (IKA-462), on by default since IKA-471. On windows-gnu its
+# start-up never ran until IKA-471 called it from `main.rs`; IKA-462 measured it that way, and it
+# bought nothing in generation. With the start-up, `fill-bench` resolves the fills' turns in 0.70
+# of the time the default allocator takes (0.80 without it), and generation's ABBA has 16.7% less
+# CPU a game (records/IKA-471.md). The start-up's own share was not run as an ABBA of its own.
 default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 # IKA-470: dump every LP the port solves to $POKEURAOU_LP_DUMP.<pid> (one in $POKEURAOU_LP_DUMP_EVERY),
@@ -91,6 +93,10 @@ bind-verify = []
 # `bind-verify` has to stop on it.
 ika429-control = []
 ika429-cache-control = []
+# IKA-471's positive control: `resolve::fill_cache` leaves Sucker Punch's read (`attacks`) out of
+# its key, so a state is answered with the outcomes of one that differs in it. Never for use;
+# `fill-bench --digest` and `tests/test_fill_cache.py` have to tell a build with it from one without.
+ika471-cache-control = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -110,6 +116,8 @@ cudarc = { version = "=0.17.8", default-features = false, features = ["std", "dr
 # below 0.1.57 too). 0.8.5 takes `windows-targets`, whose import libraries come as crates.
 libloading = "=0.8.5"
 # IKA-462: the global allocator (windows-gnu `System` is HeapAlloc, a third of the worker CPU).
+# `main.rs` calls mimalloc's internal `_mi_auto_process_init` (libmimalloc-sys 0.1.49, pinned by
+# `Cargo.lock`): read the comment there before moving the version.
 mimalloc = { version = "0.1.52", default-features = false, optional = true }
 
 [build-dependencies]

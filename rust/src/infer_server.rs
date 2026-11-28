@@ -909,7 +909,10 @@ pub fn main(args: &[String]) {
     }
     for stream in listener.incoming().flatten() {
         let server = server.clone();
-        std::thread::spawn(move || handle(server, stream));
+        std::thread::spawn(move || {
+            handle(server, stream);
+            crate::thread_done();
+        });
     }
 }
 

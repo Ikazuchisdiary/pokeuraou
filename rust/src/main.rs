@@ -98,12 +98,28 @@ use std::time::Instant;
 // "preloading" mode for the whole run: it reads its options from the environment on every
 // call and takes each page straight from the OS and gives it back. This is the call the
 // callback would have made. Elsewhere a constructor makes it before `main`.
-// A thread's exit is not reported to mimalloc either (the same callback), so a thread that
-// ends leaves its pages behind; the threads here last as long as the process, or one
-// connection to the inference server.
+//
+// `_mi_auto_process_init` is not mimalloc's public API: it is the internal function the
+// callback calls (libmimalloc-sys 0.1.49, mimalloc 3.3.2, `src/init.c`), and `Cargo.lock`
+// pins that version. A version that renames it fails to link; one that keeps the name but
+// changes what it does would not, so before moving the version, read its `init.c` and
+// `prim/windows/prim.c` again and run `fill-bench` and an ABBA (records/IKA-471.md).
 #[cfg(all(feature = "mimalloc", not(feature = "count-allocations"), windows, target_env = "gnu"))]
 extern "C" {
     fn _mi_auto_process_init();
+    fn mi_thread_done();
+}
+
+/// IKA-471: tells mimalloc that this thread is ending. On windows-gnu the TLS callback that
+/// would have told it is not registered (see `_mi_auto_process_init`), so a thread that ends
+/// without this leaves its pages to nobody. Called last on the threads that end before the
+/// process does (a connection to the inference server, `encode-games`' file threads); a no-op
+/// elsewhere. `mi_thread_done` is mimalloc's public API.
+pub(crate) fn thread_done() {
+    #[cfg(all(feature = "mimalloc", not(feature = "count-allocations"), windows, target_env = "gnu"))]
+    unsafe {
+        mi_thread_done();
+    }
 }
 
 fn main() {

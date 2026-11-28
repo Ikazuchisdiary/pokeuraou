@@ -2519,7 +2519,8 @@ fn run_queue<'a>(
 /// (`count-execute`). `execute` reads nothing but the state, the action and the budget, so
 /// its answer is the same; the key compares every field `same_turn` does and the ones it
 /// leaves out as well (the notes, the move resolving now's bookkeeping), and a turn that
-/// keeps a trace or draws one path (`sample_turn`) is never cached. Only states where at
+/// keeps a trace, is inside a switch-in's draws, or draws one path (`sample_turn`) is never
+/// cached. Only states where at
 /// most `MAX_ACTED` slots have moved are kept (`usize::MAX` turns the cache off): past that
 /// a state was met again too seldom to pay for keeping it (records/IKA-471.md).
 ///
@@ -2563,9 +2564,22 @@ pub mod fill_cache {
         }
     }
 
+    /// Lookups (states `wanted` met while a fill ran), hits among them, and entries kept, over
+    /// the process: the worker reports them on its last lines.
+    pub static LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub static HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub static STORES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// `POKEURAOU_FILL_CACHE=off` turns the cache off for the whole process, for the test that
+    /// holds the games played with it to the games played without it.
+    fn switched_off() -> bool {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *OFF.get_or_init(|| std::env::var("POKEURAOU_FILL_CACHE").map(|v| v == "off").unwrap_or(false))
+    }
+
     /// Starts a fill's cache on this thread.
     pub fn begin(_reg: &Reg) -> Guard {
-        let on = MAX_ACTED.load(std::sync::atomic::Ordering::Relaxed) != usize::MAX;
+        let on = MAX_ACTED.load(std::sync::atomic::Ordering::Relaxed) != usize::MAX && !switched_off();
         CACHE.with(|c| *c.borrow_mut() = on.then(Cache::default));
         Guard { _not_send: std::marker::PhantomData }
     }
@@ -2595,19 +2609,70 @@ pub mod fill_cache {
         eat(action.kind as u64);
         eat(action.move_id.map(|m| m.as_str().len() as u64 + 11).unwrap_or(0));
         eat(action.target.unwrap_or(-1) as u64);
-        for row in turn.acted.iter().chain(turn.attacks.iter()) {
+        for row in &turn.acted {
             eat(row[0] as u64 | (row[1] as u64) << 1);
+        }
+        // IKA-471's positive control leaves out Sucker Punch's read, so that a state is
+        // answered with the outcomes of one that differs in it.
+        if !cfg!(feature = "ika471-cache-control") {
+            for row in &turn.attacks {
+                eat(row[0] as u64 | (row[1] as u64) << 1);
+            }
         }
         hash
     }
 
+    /// Whether two states are the same input to `execute`: every field of `Turn`.
+    ///
+    /// Destructured with no `..`, as `same_turn` is: a field added to `Turn` does not build
+    /// until it is dealt with here. The three that are left out are `None` on every state that
+    /// is kept or looked up (`wanted`).
     fn same(a: &Turn, b: &Turn) -> bool {
-        a.unmodelled == b.unmodelled
-            && a.rolls_stratified == b.rolls_stratified
-            && a.move_start_hp == b.move_start_hp
-            && a.move_hit == b.move_hit
-            && a.move_dolled == b.move_dolled
-            && same_turn(a, b)
+        let Turn {
+            reg,
+            pos,
+            budget,
+            attacks,
+            hurt_this_turn,
+            move_failed,
+            move_damage_total,
+            move_connected,
+            acted,
+            actions_remaining,
+            self_switch_pending,
+            pending_secondaries,
+            current_actor,
+            wipe_order,
+            unmodelled,
+            rolls_stratified,
+            move_start_hp,
+            move_hit,
+            move_dolled,
+            draws: _,
+            log: _,
+            damaged_by,
+            sampler: _,
+        } = a;
+        std::ptr::eq(*reg, b.reg)
+            && *self_switch_pending == b.self_switch_pending
+            && *actions_remaining == b.actions_remaining
+            && *move_damage_total == b.move_damage_total
+            && *move_connected == b.move_connected
+            && *current_actor == b.current_actor
+            && *wipe_order == b.wipe_order
+            && *acted == b.acted
+            && *hurt_this_turn == b.hurt_this_turn
+            && *move_failed == b.move_failed
+            && (cfg!(feature = "ika471-cache-control") || *attacks == b.attacks)
+            && *budget == b.budget
+            && *pending_secondaries == b.pending_secondaries
+            && *damaged_by == b.damaged_by
+            && *unmodelled == b.unmodelled
+            && *rolls_stratified == b.rolls_stratified
+            && *move_start_hp == b.move_start_hp
+            && *move_hit == b.move_hit
+            && *move_dolled == b.move_dolled
+            && same_position(pos, &b.pos)
     }
 
     /// The kept outcomes, copied for the fill that is running.
@@ -2626,14 +2691,19 @@ pub mod fill_cache {
             return None;
         }
         let k = key(turn, action);
-        CACHE.with(|c| {
+        LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let found = CACHE.with(|c| {
             let cache = c.borrow();
             let bucket = cache.as_ref()?.buckets.get(&k)?;
             bucket
                 .iter()
                 .find(|e| e.budget == budget && e.action == *action && same(turn, &e.turn))
                 .map(|e| copy(&e.outcomes))
-        })
+        });
+        if found.is_some() {
+            HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        found
     }
 
     /// Keeps what executing `action` from `turn` produced.
@@ -2647,6 +2717,7 @@ pub mod fill_cache {
             .collect();
         CACHE.with(|c| {
             if let Some(cache) = c.borrow_mut().as_mut() {
+                STORES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 cache.buckets.entry(k).or_default().push(Entry { turn, action: action.clone(), budget, outcomes });
             }
         });

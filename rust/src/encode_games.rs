@@ -381,13 +381,16 @@ pub fn main(args: &[String]) {
             files.iter().map(|_| Mutex::new(None)).collect();
         std::thread::scope(|scope| {
             for _ in 0..jobs.min(files.len().max(1)) {
-                scope.spawn(|| loop {
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    if index >= files.len() {
-                        break;
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= files.len() {
+                            break;
+                        }
+                        let result = encode_file(&job, &files[index]);
+                        *slots[index].lock().unwrap() = Some(result);
                     }
-                    let result = encode_file(&job, &files[index]);
-                    *slots[index].lock().unwrap() = Some(result);
+                    crate::thread_done();
                 });
             }
         });
