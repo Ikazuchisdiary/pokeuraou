@@ -5428,21 +5428,22 @@ fn trapper_gone(turn: &Turn, source_slot: Option<Id>) -> bool {
 pub(crate) fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, Vec<(usize, usize)>), String> {
     let trick_room = turn.pos.field.trick_room();
     let field = turn.field();
-    let mut entries: Vec<(i64, i64, String, usize, usize)> = Vec::new();
+    // The species by reference: a `String` apiece was four allocations per residual phase.
+    let mut entries: Vec<(i64, i64, &str, usize, usize)> = Vec::with_capacity(4);
     for side in 0..2 {
-        let conditions = turn.pos.sides[side].side_conditions.clone();
+        let conditions = &turn.pos.sides[side].side_conditions;
         for slot in 0..turn.pos.sides[side].active.len() {
             let mon = turn.mon_at(side, slot);
             let fighter = turn.battler_at(side, slot)?;
             match (mon, fighter) {
                 (Some(mon), Some(fighter)) => {
-                    let mut speed = crate::speed::effective_speed(&fighter, &field, &conditions);
+                    let mut speed = crate::speed::effective_speed(&fighter, &field, conditions);
                     if trick_room {
                         speed = 10000 - speed;
                     }
-                    entries.push((0, -speed, mon.species.as_str().to_string(), slot, side));
+                    entries.push((0, -speed, mon.species.as_str(), slot, side));
                 }
-                _ => entries.push((1, 0, String::new(), slot, side)),
+                _ => entries.push((1, 0, "", slot, side)),
             }
         }
     }
@@ -5741,6 +5742,11 @@ fn residuals_in(reg: &Reg, turn: &mut Turn, given: Option<&[Slot]>) -> Result<()
     check_white_herb(turn);
 
     for side in 0..2 {
+        // Rewritten only when something in it counts down: the list is shared with the other
+        // branches until it changes (`Shared`, IKA-471).
+        if !turn.pos.sides[side].side_conditions.iter().any(|c| c.duration.is_some()) {
+            continue;
+        }
         let mut kept: Vec<Effect> = Vec::new();
         for mut condition in std::mem::take(&mut turn.pos.sides[side].side_conditions) {
             if let Some(duration) = condition.duration {
@@ -5752,7 +5758,7 @@ fn residuals_in(reg: &Reg, turn: &mut Turn, given: Option<&[Slot]>) -> Result<()
             }
             kept.push(condition);
         }
-        turn.pos.sides[side].side_conditions = kept;
+        turn.pos.sides[side].side_conditions = kept.into();
     }
 
     if let Some(duration) = turn.pos.field.terrain_duration {
@@ -5766,18 +5772,20 @@ fn residuals_in(reg: &Reg, turn: &mut Turn, given: Option<&[Slot]>) -> Result<()
             turn.pos.field.terrain_duration = None;
         }
     }
-    let mut kept_pseudo: Vec<Effect> = Vec::new();
-    for mut pseudo in std::mem::take(&mut turn.pos.field.pseudo_weather) {
-        if let Some(duration) = pseudo.duration {
-            pseudo.duration = Some(duration - 1);
-            if duration - 1 <= 0 {
-                log_event!(turn, "{} ended", pseudo.id);
-                continue;
+    if turn.pos.field.pseudo_weather.iter().any(|p| p.duration.is_some()) {
+        let mut kept_pseudo: Vec<Effect> = Vec::new();
+        for mut pseudo in std::mem::take(&mut turn.pos.field.pseudo_weather) {
+            if let Some(duration) = pseudo.duration {
+                pseudo.duration = Some(duration - 1);
+                if duration - 1 <= 0 {
+                    log_event!(turn, "{} ended", pseudo.id);
+                    continue;
+                }
             }
+            kept_pseudo.push(pseudo);
         }
-        kept_pseudo.push(pseudo);
+        turn.pos.field.pseudo_weather = kept_pseudo.into();
     }
-    turn.pos.field.pseudo_weather = kept_pseudo;
 
     rampage_runs_out(turn, &order);
     for (side, slot) in order.iter().copied() {

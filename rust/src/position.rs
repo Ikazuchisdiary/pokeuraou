@@ -29,6 +29,92 @@ pub fn stat_index(name: &str) -> Option<usize> {
 /// A JSON object the resolver only reads. Shared rather than copied, as Python shares it.
 pub type Blob = Rc<Map<String, Value>>;
 
+/// A list a position's clones share until one of them writes to it (IKA-471).
+///
+/// A turn clones the position once per branch and per action, and each `Vec` in it was an
+/// allocation per clone, though most of them (the side conditions, the bench order, the
+/// pseudo-weathers) are the same in every branch. Reading goes through `Deref`; anything that
+/// takes it mutably copies it first if another clone still holds it (`Rc::make_mut`), so the
+/// code that writes to it is unchanged. `Debug` and `==` are the inner value's.
+#[derive(Default)]
+pub struct Shared<T>(Rc<T>);
+
+impl<T> Shared<T> {
+    pub fn new(value: T) -> Shared<T> {
+        Shared(Rc::new(value))
+    }
+}
+
+impl<T> Clone for Shared<T> {
+    #[inline]
+    fn clone(&self) -> Shared<T> {
+        Shared(Rc::clone(&self.0))
+    }
+}
+
+impl<T> std::ops::Deref for Shared<T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for Shared<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        Rc::make_mut(&mut self.0)
+    }
+}
+
+impl<T: PartialEq> PartialEq for Shared<T> {
+    #[inline]
+    fn eq(&self, other: &Shared<T>) -> bool {
+        Rc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Shared<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (*self.0).fmt(f)
+    }
+}
+
+impl<T> From<T> for Shared<T> {
+    fn from(value: T) -> Shared<T> {
+        Shared::new(value)
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Shared<Vec<T>> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> std::slice::Iter<'a, T> {
+        self.0.iter()
+    }
+}
+
+/// The list itself, copied only if another clone still holds it.
+impl<T: Clone> IntoIterator for Shared<Vec<T>> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> std::vec::IntoIter<T> {
+        Rc::try_unwrap(self.0).unwrap_or_else(|shared| (*shared).clone()).into_iter()
+    }
+}
+
+impl<T: serde::Serialize> serde::Serialize for Shared<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (*self.0).serialize(serializer)
+    }
+}
+
+impl<T> FromIterator<T> for Shared<Vec<T>> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Shared<Vec<T>> {
+        Shared::new(iter.into_iter().collect())
+    }
+}
+
 fn empty_blob() -> Blob {
     thread_local! {
         static EMPTY: Blob = Rc::new(Map::new());
@@ -471,20 +557,20 @@ fn stats_json(values: Option<[i64; 6]>, names: &[&str; 6]) -> Value {
 pub struct Side {
     pub id: Rc<str>,
     pub name: Rc<str>,
-    pub active: Vec<Option<usize>>,
+    pub active: Shared<Vec<Option<usize>>>,
     /// Shared, not owned. A `Pokemon` is 928 bytes and a side holds six, so cloning a
     /// position used to copy eleven kilobytes -- and the resolver clones one 44 times a
     /// turn, which measured at 65% of its whole cost. A turn touches the two Pokemon that
     /// are out; the rest are on the bench and identical in every branch. `Rc::make_mut`
     /// copies one only when something writes to it while it is still shared.
-    pub pokemon: Vec<Rc<Pokemon>>,
-    pub side_conditions: Vec<Effect>,
-    pub slot_conditions: Vec<Vec<Effect>>,
+    pub pokemon: Shared<Vec<Rc<Pokemon>>>,
+    pub side_conditions: Shared<Vec<Effect>>,
+    pub slot_conditions: Shared<Vec<Vec<Effect>>>,
     pub mega_used: bool,
     /// Party slots holding their own mega stone *as numbered when the side was built*.
     /// Resolve renumbers `Pokemon.slot` on a switch and does not touch this, so it is not
     /// an identity; `Reg::holds_mega_stone` is what the encoder asks (IKA-121).
-    pub mega_capable_slots: Vec<usize>,
+    pub mega_capable_slots: Shared<Vec<usize>>,
 }
 
 impl Side {
@@ -569,7 +655,7 @@ pub struct Field {
     pub weather_duration: Option<i64>,
     pub terrain: Option<Id>,
     pub terrain_duration: Option<i64>,
-    pub pseudo_weather: Vec<Effect>,
+    pub pseudo_weather: Shared<Vec<Effect>>,
 }
 
 impl Field {

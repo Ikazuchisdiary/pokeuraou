@@ -293,9 +293,9 @@ pub(crate) fn opening(reg: &Reg, sides: [&[&SheetSet]; 2]) -> Result<Position, S
             id: Rc::from(format!("p{}", index + 1)),
             name: Rc::from(format!("p{}", index + 1)),
             active: (0..reg.active_per_side).map(Some).collect(),
-            pokemon: party,
-            side_conditions: Vec::new(),
-            slot_conditions: vec![Vec::new(); reg.active_per_side],
+            pokemon: party.into(),
+            side_conditions: Vec::new().into(),
+            slot_conditions: vec![Vec::new(); reg.active_per_side].into(),
             mega_used: false,
             mega_capable_slots,
         });

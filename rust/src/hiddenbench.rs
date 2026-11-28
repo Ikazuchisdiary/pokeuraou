@@ -348,7 +348,7 @@ fn side_completions(
             .filter(|m| reg.holds_mega_stone(m.species, m.item))
             .map(|m| m.slot)
             .collect();
-        completed.sides[side].mega_capable_slots = capable;
+        completed.sides[side].mega_capable_slots = capable.into();
         let pk: Vec<Value> = completed.sides[side]
             .pokemon
             .iter()
