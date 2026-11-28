@@ -203,8 +203,6 @@ fn fallen_of(mon: &Pokemon) -> i64 {
     mon.ability_state.get("fallen").and_then(|v| v.as_i64()).unwrap_or(0).clamp(0, 5)
 }
 
-/// The field as the calculator sees it. Owned ids, because the resolver rebuilds it
-/// whenever the field changes and the active abilities are at most four.
 /// Abilities of one side's Pokemon on the field: two inline, more on the heap (IKA-471).
 ///
 /// `field_state` builds four of these per call, and it is called for every hit and every
@@ -273,6 +271,8 @@ impl From<Vec<Id>> for Abilities {
     }
 }
 
+/// The field as the calculator sees it. Owned ids, because the resolver rebuilds it
+/// whenever the field changes and the active abilities are at most four.
 #[derive(Clone, Debug, Default)]
 pub struct FieldState {
     pub weather: Option<Id>,

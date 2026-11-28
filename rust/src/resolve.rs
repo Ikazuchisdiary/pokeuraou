@@ -2516,12 +2516,12 @@ fn run_queue<'a>(
 /// A fill resolves one turn per cell, and the cells of a row share one side's actions, so
 /// the first actions of a turn are often the same action from the same state: in the fills of
 /// generation, 39% of `execute`'s time went to states and actions met earlier in the fill
-/// (`count-execute`). `execute` reads nothing but the
-/// state, the action and the budget, so its answer is the same; the key compares every field
-/// `same_turn` does and the ones it leaves out as well (the notes, the move resolving now's
-/// bookkeeping), and a turn that keeps a trace is never cached. Only states where at most
-/// `MAX_ACTED` slots have moved are kept (`usize::MAX` turns the cache off): past that a
-/// state was met again too seldom to pay for keeping it (records/IKA-471.md).
+/// (`count-execute`). `execute` reads nothing but the state, the action and the budget, so
+/// its answer is the same; the key compares every field `same_turn` does and the ones it
+/// leaves out as well (the notes, the move resolving now's bookkeeping), and a turn that
+/// keeps a trace or draws one path (`sample_turn`) is never cached. Only states where at
+/// most `MAX_ACTED` slots have moved are kept (`usize::MAX` turns the cache off): past that
+/// a state was met again too seldom to pay for keeping it (records/IKA-471.md).
 ///
 /// The cache lives on the thread that resolves a fill's cells, from `begin` until the guard it
 /// returns is dropped; outside a fill (the turn a game plays, a cell thread of the pool) there
@@ -2578,6 +2578,7 @@ pub mod fill_cache {
     pub fn wanted(turn: &Turn) -> bool {
         turn.log.is_none()
             && turn.draws.is_none()
+            && turn.sampler.is_none()
             && turn.acted.iter().flatten().filter(|a| **a).count()
                 <= MAX_ACTED.load(std::sync::atomic::Ordering::Relaxed)
             && active()
