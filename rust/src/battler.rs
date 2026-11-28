@@ -20,6 +20,9 @@ use std::collections::{HashMap, HashSet};
 /// every time, so the count is what says whether that is worth avoiding.
 pub static BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(feature = "profile")]
+pub static BUILD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Number of damage rolls Showdown uses: 100%, 99%, ..., 85%.
 pub const N_ROLLS: usize = 16;
 
@@ -90,6 +93,15 @@ pub struct Battler {
 impl Battler {
     /// `view.battler` for a known spread: stats from the SP, HP from the position.
     pub fn from_pokemon(reg: &Reg, mon: &Pokemon) -> Result<Battler, String> {
+        #[cfg(feature = "profile")]
+        let started = std::time::Instant::now();
+        let built = Battler::from_pokemon_inner(reg, mon);
+        #[cfg(feature = "profile")]
+        BUILD_NS.fetch_add(started.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        built
+    }
+
+    fn from_pokemon_inner(reg: &Reg, mon: &Pokemon) -> Result<Battler, String> {
         BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let species = reg
             .species

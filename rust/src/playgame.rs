@@ -240,6 +240,8 @@ fn run(reg: &Reg, encoder: &Encoder, value: &Value) -> Result<Value, Value> {
         return Err(fault("position is for another regulation".into()));
     }
     let game = hidden.game;
+    #[cfg(feature = "count-resolves")]
+    crate::dupcount::set_game(game);
     let leads = hidden.leads.clone();
     let mut seen: [Vec<String>; 2] = hidden.seen.clone();
 
@@ -328,6 +330,31 @@ fn replacement_decision(pos: &Position, step: &crate::hiddenbench::Step, answer:
     }))
 }
 
+#[cfg(feature = "profile")]
+pub static STEP_NS: [std::sync::atomic::AtomicU64; 9] = [const { std::sync::atomic::AtomicU64::new(0) }; 9];
+
+#[cfg(feature = "profile")]
+fn lap(slot: usize, since: &mut Lapped) {
+    STEP_NS[slot].fetch_add(since.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    *since = Instant::now();
+}
+
+#[cfg(feature = "profile")]
+type Lapped = Instant;
+#[cfg(not(feature = "profile"))]
+type Lapped = ();
+
+#[cfg(feature = "profile")]
+fn lap_start() -> Lapped {
+    Instant::now()
+}
+
+#[cfg(not(feature = "profile"))]
+fn lap_start() -> Lapped {}
+
+#[cfg(not(feature = "profile"))]
+fn lap(_slot: usize, _since: &mut Lapped) {}
+
 #[allow(clippy::too_many_arguments)]
 fn one_step(
     reg: &Reg,
@@ -341,7 +368,11 @@ fn one_step(
     seen: &mut [Vec<String>; 2],
     rng: &mut Pcg64,
 ) -> Result<Done, Handoff> {
+    #[cfg(feature = "count-resolves")]
+    crate::dupcount::next_decision();
+    let mut lapped = lap_start();
     let step = step_of(reg, game, pos, seen, leads, None).ok_or_else(|| Handoff::of(format!("no game {game} is defined")))?;
+    lap(0, &mut lapped);
     // What a mid-turn node (a self-switch, a replacement) reads as seen is this step's.
     if let Some(h) = context.hidden.as_mut() {
         h.seen = [step.seen[0].clone(), step.seen[1].clone()];
@@ -363,6 +394,7 @@ fn one_step(
         *rng = trial;
         *seen = [step.seen[0].clone(), step.seen[1].clone()];
         *pos = after;
+        lap(1, &mut lapped);
         return Ok(Done::Event(event, false));
     }
 
@@ -381,6 +413,7 @@ fn one_step(
             Deciding::Sides(sides) => decide_sides(reg, encoder, sides, pos, [lists[0], lists[1]])?,
         };
     let seconds = started.elapsed().as_secs_f64();
+    lap(2, &mut lapped);
     if kept[0].is_empty() || kept[1].is_empty() {
         return Err(Handoff::of("a menu is empty"));
     }
@@ -403,8 +436,12 @@ fn one_step(
         kept[0][own_at].iter().map(legal::Act::slot_action).collect(),
         kept[1][foe_at].iter().map(legal::Act::slot_action).collect(),
     ];
+    #[cfg(feature = "count-resolves")]
+    crate::dupcount::end_fills();
     let result = resolve_turn(reg, pos, &chosen, *exact).map_err(|why| Handoff::of(format!("resolve: {why}")))?;
+    lap(3, &mut lapped);
     let advanced = advance_core(reg, encoder, result, Some(context), &mut trial).map_err(|failed| Handoff::of(format!("advance: {failed}")))?;
+    lap(4, &mut lapped);
     MOVES.fetch_add(1, Ordering::Relaxed);
 
     // What the caller records of the node; the matrices and the games' texts stay here.
@@ -462,6 +499,7 @@ fn one_step(
     }
     *rng = trial;
     *seen = [step.seen[0].clone(), step.seen[1].clone()];
+    lap(5, &mut lapped);
     match advanced.position {
         None => Ok(Done::Unresolved(event)),
         Some(landed) => {
@@ -569,11 +607,15 @@ fn decide_joint(
     pos: &Position,
     lists: [&Vec<Item>; 2],
 ) -> Result<Decided, Handoff> {
+    let mut lapped = lap_start();
     let node = node_of(base, pos, lists);
+    lap(6, &mut lapped);
     let got = menus_core(reg, encoder, args, pos, [&node.views[0], &node.views[1]], node.same)
         .map_err(|failed| Handoff::of(format!("menus: {failed}")))?;
+    lap(7, &mut lapped);
     let kept = got.1.clone();
     let answer = move_node_over(reg, encoder, got, node.asked);
+    lap(8, &mut lapped);
     checked(&answer, args.rules.mega_from_slots)?;
     let (own_strategy, own_value) = solved_side(&answer, 0).map_err(Handoff::of)?;
     let (foe_strategy, foe_value) = solved_side(&answer, 1).map_err(Handoff::of)?;

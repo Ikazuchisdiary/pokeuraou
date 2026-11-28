@@ -25,6 +25,8 @@ mod bind;
 #[cfg(feature = "count-allocations")]
 mod counting_alloc;
 mod deepen;
+#[cfg(feature = "count-resolves")]
+mod dupcount;
 mod damage;
 mod damage_callback;
 mod effects;
@@ -75,6 +77,10 @@ mod terrain;
 mod transform;
 mod wire;
 mod worker;
+
+#[cfg(all(feature = "mimalloc", not(feature = "count-allocations")))]
+#[global_allocator]
+static MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(feature = "count-allocations")]
 #[global_allocator]

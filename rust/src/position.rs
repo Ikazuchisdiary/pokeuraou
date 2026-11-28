@@ -625,7 +625,9 @@ pub static UNSHARED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 impl Clone for Position {
     fn clone(&self) -> Position {
         CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Position {
+        #[cfg(feature = "profile")]
+        let started = std::time::Instant::now();
+        let copy = Position {
             format: self.format.clone(),
             sides: self.sides.clone(),
             turn: self.turn,
@@ -633,9 +635,15 @@ impl Clone for Position {
             request_state: self.request_state.clone(),
             ended: self.ended,
             winner: self.winner.clone(),
-        }
+        };
+        #[cfg(feature = "profile")]
+        CLONE_NS.fetch_add(started.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        copy
     }
 }
+
+#[cfg(feature = "profile")]
+pub static CLONE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, PartialEq)]
 pub struct Position {

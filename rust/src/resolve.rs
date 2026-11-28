@@ -1449,6 +1449,21 @@ pub fn resolve_turn_logged<'a>(
     budget: Budget,
     events: bool,
 ) -> Result<TurnResult<'a>, String> {
+    let whole = phase_start();
+    let answer = resolve_turn_inner(reg, pos, side_actions, budget, events);
+    phase_end(15, whole);
+    answer
+}
+
+fn resolve_turn_inner<'a>(
+    reg: &'a Reg,
+    pos: &Position,
+    side_actions: &[Vec<SlotAction>; 2],
+    budget: Budget,
+    events: bool,
+) -> Result<TurnResult<'a>, String> {
+    #[cfg(feature = "count-resolves")]
+    crate::dupcount::record(pos, side_actions, &budget);
     let started = phase_start();
     let (adopted, notes) = showdown_volatiles(pos);
     let pos = adopted.as_ref().unwrap_or(pos);
@@ -1961,6 +1976,13 @@ fn fold_equal<T>(
 }
 
 fn merge_live<'a>(items: Vec<Live<'a>>) -> Vec<Live<'a>> {
+    let started = phase_start();
+    let merged = merge_live_inner(items);
+    phase_end(13, started);
+    merged
+}
+
+fn merge_live_inner<'a>(items: Vec<Live<'a>>) -> Vec<Live<'a>> {
     if items.len() < 2 {
         return items;
     }
@@ -1985,6 +2007,13 @@ fn merge_live<'a>(items: Vec<Live<'a>>) -> Vec<Live<'a>> {
 /// order is its own `run_queue`, so two orders that end the same way never meet until the
 /// results are collected.
 fn merge_branches(items: Vec<Branch>) -> Vec<Branch> {
+    let started = phase_start();
+    let merged = merge_branches_inner(items);
+    phase_end(14, started);
+    merged
+}
+
+fn merge_branches_inner(items: Vec<Branch>) -> Vec<Branch> {
     if items.len() < 2 {
         return items;
     }
@@ -2392,9 +2421,9 @@ fn encore_override(
 /// Wall clock inside the phases of a turn, in nanoseconds. Coarse on purpose: a timer
 /// costs about 25 ns here, so it goes around things called a handful of times a turn and
 /// never around anything in the innermost loop, where it would measure itself.
-pub static PHASE_NS: [std::sync::atomic::AtomicU64; 13] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 13];
-pub const PHASE_NAMES: [&str; 13] = [
+pub static PHASE_NS: [std::sync::atomic::AtomicU64; 16] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 16];
+pub const PHASE_NAMES: [&str; 16] = [
     "supported",
     "build_queue",
     "run_queue",
@@ -2408,6 +2437,9 @@ pub const PHASE_NAMES: [&str; 13] = [
     "    calculate",
     "    after_hit",
     "    clone+ctx",
+    "merge_live",
+    "merge_branches",
+    "resolve_turn_total",
 ];
 
 /// Zeroes every counter. The differential pass resolves each fixture once before the
@@ -2430,8 +2462,8 @@ pub fn reset_counters() {
 
 /// Allocations made inside each phase, when the counting allocator is built in. The
 /// phases nest, so an inner one's allocations are counted by the outer one too.
-pub static PHASE_ALLOCS: [std::sync::atomic::AtomicU64; 13] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 13];
+pub static PHASE_ALLOCS: [std::sync::atomic::AtomicU64; 16] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 16];
 
 #[cfg(feature = "count-allocations")]
 fn allocations_now() -> usize {

@@ -10,6 +10,13 @@ count-allocations = ["profile"]
 # Phase timers inside a turn. Off by default: a clock read is 25 ns and the innermost
 # phase runs ten times a turn.
 profile = []
+# IKA-462: log every resolve_turn input (hashes) to $POKEURAOU_RESOLVE_LOG, to count repeats. Off by default.
+count-resolves = []
+# IKA-462: the selfplay worker adds up the fills' resolve/encode/bind microseconds and the server waits, and reports them. Off by default.
+phase-report = []
+# IKA-462: mimalloc as the global allocator. Off by default: in the steady-state ABBA of 2,000 games
+# (records/IKA-462.md section 3.2) it bought nothing, and it adds a C build.
+mimalloc = ["dep:mimalloc"]
 # IKA-99: the 16 damage rolls in integer arithmetic instead of through f64. Same numbers
 # (the product is far below 2^53); off by default until it is shown to buy anything.
 int-rolls = []
@@ -83,6 +90,8 @@ cudarc = { version = "=0.17.8", default-features = false, features = ["std", "dr
 # and needs a `dlltool` on PATH with the windows-gnu toolchain (the reason `cmake` is pinned
 # below 0.1.57 too). 0.8.5 takes `windows-targets`, whose import libraries come as crates.
 libloading = "=0.8.5"
+# IKA-462: the global allocator (windows-gnu `System` is HeapAlloc, a third of the worker CPU).
+mimalloc = { version = "0.1.52", default-features = false, optional = true }
 
 [build-dependencies]
 # IKA-381: builds vendor/HiGHS (1.12.0, scipy's commit) for the LP in src/lp.rs (build.rs).

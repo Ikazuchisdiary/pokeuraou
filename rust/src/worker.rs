@@ -134,6 +134,8 @@ struct Stats {
     moves: u64,
     replacements: u64,
     selfswitches: u64,
+    #[cfg(feature = "phase-report")]
+    phases: [f64; 6],
 }
 
 pub(crate) fn arg(args: &[String], name: &str) -> Option<String> {
@@ -422,6 +424,17 @@ fn play_one(
             continue;
         }
         stats.moves += 1;
+        #[cfg(feature = "phase-report")]
+        {
+            for fill in event["answer"]["fills"].as_array().into_iter().flatten() {
+                stats.phases[0] += fill["resolveUs"].as_f64().unwrap_or(0.0);
+                stats.phases[1] += fill["encodeUs"].as_f64().unwrap_or(0.0);
+                stats.phases[2] += fill["bindUs"].as_f64().unwrap_or(0.0);
+            }
+            stats.phases[3] += event["answer"]["served"]["waitUs"].as_f64().unwrap_or(0.0);
+            stats.phases[4] += event["answer"]["served"]["copyUs"].as_f64().unwrap_or(0.0);
+            stats.phases[5] += event["seconds"].as_f64().unwrap_or(0.0) * 1e6;
+        }
         take_notes(&event["nodeNotes"], &mut notes);
         let spent = event["seconds"].as_f64().unwrap_or(0.0);
         seconds[0] += spent / 2.0;
@@ -564,6 +577,60 @@ pub(crate) fn self_switch_decision(step: &Value) -> Value {
 
 /// The worker's last lines, in the shape `tools/selfplay.py` printed them, and its own clock.
 fn report(stats: &Stats, elapsed: f64, out_path: &str, store: &str) {
+    #[cfg(feature = "count-resolves")]
+    crate::dupcount::flush();
+    #[cfg(feature = "phase-report")]
+    {
+        let finished = stats.finished.max(1) as f64;
+        let ns = |k: usize| crate::lp::NS[k].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e3;
+        eprintln!(
+            "PHASES us/game: resolve {:.0} encode {:.0} bind {:.0} serverwait {:.0} servercopy {:.0} decide_total {:.0} | lp slots {:.0} {:.0} {:.0} {:.0} | lps/game {:.1} | play_seconds/game {:.0}us",
+            stats.phases[0] / finished,
+            stats.phases[1] / finished,
+            stats.phases[2] / finished,
+            stats.phases[3] / finished,
+            stats.phases[4] / finished,
+            stats.phases[5] / finished,
+            ns(0) / finished,
+            ns(1) / finished,
+            ns(2) / finished,
+            ns(3) / finished,
+            crate::lp::LPS.load(std::sync::atomic::Ordering::Relaxed) as f64 / finished,
+            stats.play_seconds * 1e6 / finished,
+        );
+        #[cfg(feature = "profile")]
+        {
+            let relaxed = std::sync::atomic::Ordering::Relaxed;
+            let mut line = String::from("RESOLVE-PHASES us/game:");
+            for (k, name) in crate::resolve::PHASE_NAMES.iter().enumerate() {
+                line.push_str(&format!(" [{}] {:.0};", name.trim(), crate::resolve::PHASE_NS[k].load(relaxed) as f64 / 1e3 / finished));
+            }
+            line.push_str(&format!(
+                " clone_us/game {:.0}; build_us/game {:.0}; clones/game {:.0}; damage calls/game {:.0}; battler builds/game {:.0}; resorts {:.0}; residuals {:.0}",
+                crate::position::CLONE_NS.load(relaxed) as f64 / 1e3 / finished,
+                crate::battler::BUILD_NS.load(relaxed) as f64 / 1e3 / finished,
+                crate::position::CLONES.load(relaxed) as f64 / finished,
+                crate::damage::CALLS.load(relaxed) as f64 / finished,
+                crate::battler::BUILDS.load(relaxed) as f64 / finished,
+                crate::resolve::RESORTS.load(relaxed) as f64 / finished,
+                crate::resolve::RESIDUALS.load(relaxed) as f64 / finished,
+            ));
+            let steps = &crate::playgame::STEP_NS;
+            line.push_str(&format!(
+                " | step us/game: step_of {:.0}; replacement {:.0}; decide(before resolve) {:.0}; resolve-played {:.0}; advance {:.0}; record-json {:.0}; node_of {:.0}; menus_core {:.0}; move_node_over {:.0}",
+                steps[0].load(relaxed) as f64 / 1e3 / finished,
+                steps[1].load(relaxed) as f64 / 1e3 / finished,
+                steps[2].load(relaxed) as f64 / 1e3 / finished,
+                steps[3].load(relaxed) as f64 / 1e3 / finished,
+                steps[4].load(relaxed) as f64 / 1e3 / finished,
+                steps[5].load(relaxed) as f64 / 1e3 / finished,
+                steps[6].load(relaxed) as f64 / 1e3 / finished,
+                steps[7].load(relaxed) as f64 / 1e3 / finished,
+                steps[8].load(relaxed) as f64 / 1e3 / finished,
+            ));
+            eprintln!("{line}");
+        }
+    }
     let finished = stats.finished.max(1) as f64;
     println!(
         "{} games in {elapsed:.1}s ({:.2}s each)\n  finished {}, discarded unfinished {}\n  seat-0 win rate {:.1}%\n  decisions {} ({:.1} per game), turns {:.1} per game\n  mirrors {} (wins {}, draws {})\n  -> {out_path}",
