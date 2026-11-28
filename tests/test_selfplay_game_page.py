@@ -57,7 +57,9 @@ def test_the_page_carries_the_texts_numbers(tools, played) -> None:  # noqa: ANN
     kinds = [d["kind"] for d in record["decisions"]]
     by_kind = [v for v, k in zip(text_values, kinds, strict=True) if k == "move"]
     for d, section, shown in zip(moves, sections, by_kind, strict=True):
-        assert shown == pytest.approx(d["searchValue"], abs=5e-4)
+        # The text prints searchValue with :.3f; compare the printed form, since a value on
+        # the rounding edge (0.2875 shown as 0.287) sits exactly 5e-4 away.
+        assert f"{shown:.3f}" == f"{d['searchValue']:.3f}"
         assert f'<b class="n c0">{d["searchValue"] * 100:.0f}%</b>' in section
         assert f'<b class="n c1">{d["foeSearchValue"] * 100:.0f}%</b>' in section
         # Both seats' drawn moves, with the probability the text prints for them.
