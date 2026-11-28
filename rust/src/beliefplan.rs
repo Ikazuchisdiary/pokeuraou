@@ -374,6 +374,8 @@ impl Plan<'_, '_> {
         if let Some(cells) = cells {
             request["cells"] = json!(cells.iter().map(|(i, j)| json!([i, j])).collect::<Vec<_>>());
         }
+        #[cfg(feature = "dump-fills")]
+        crate::resolvebench::dump_fill(&request);
         let parsed = crate::node::parse_request(&request).map_err(error)?;
         if &*parsed.position.format != self.reg.format_id.as_str() {
             return Err(error(format!(

@@ -143,7 +143,17 @@ pub(crate) fn arg(args: &[String], name: &str) -> Option<String> {
 }
 
 pub fn main(args: &[String]) {
-    if let Err(why) = run(args) {
+    // IKA-471: the worker's main thread sampled to $POKEURAOU_SAMPLES/<pid>.bin.
+    #[cfg(feature = "sampler")]
+    let sampling = std::env::var("POKEURAOU_SAMPLES")
+        .ok()
+        .map(|dir| (format!("{dir}/{}.bin", std::process::id()), crate::resolvebench::sampler::start()));
+    let outcome = run(args);
+    #[cfg(feature = "sampler")]
+    if let Some((path, running)) = sampling {
+        running.stop(&path);
+    }
+    if let Err(why) = outcome {
         eprintln!("selfplay-worker: {why}");
         std::process::exit(1);
     }

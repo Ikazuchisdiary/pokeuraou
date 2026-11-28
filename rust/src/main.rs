@@ -63,6 +63,7 @@ mod playgame;
 mod replacenode;
 mod replacephase;
 mod resolve;
+mod resolvebench;
 mod armexe;
 mod boardworker;
 mod qfeatures;
@@ -92,7 +93,24 @@ static ALLOCATOR: counting_alloc::Counting = counting_alloc::Counting;
 use serde_json::Value;
 use std::time::Instant;
 
+// IKA-471: mimalloc starts itself from a TLS callback that it registers with MSVC's
+// `#pragma const_seg`, which GCC ignores. On windows-gnu it therefore stays in its
+// "preloading" mode for the whole run: it reads its options from the environment on every
+// call and takes each page straight from the OS and gives it back. This is the call the
+// callback would have made. Elsewhere a constructor makes it before `main`.
+// A thread's exit is not reported to mimalloc either (the same callback), so a thread that
+// ends leaves its pages behind; the threads here last as long as the process, or one
+// connection to the inference server.
+#[cfg(all(feature = "mimalloc", not(feature = "count-allocations"), windows, target_env = "gnu"))]
+extern "C" {
+    fn _mi_auto_process_init();
+}
+
 fn main() {
+    #[cfg(all(feature = "mimalloc", not(feature = "count-allocations"), windows, target_env = "gnu"))]
+    unsafe {
+        _mi_auto_process_init();
+    }
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("damage") => damage_main(&args[2..]),
@@ -103,6 +121,8 @@ fn main() {
         Some("encode-games") => encode_games::main(&args[2..]),
         Some("clones") => clones_main(&args[2..]),
         Some("bind-bench") => bind_bench_main(&args[2..]),
+        // IKA-471: the fills' turns replayed from a `dump-fills` dump.
+        Some("fill-bench") => resolvebench::main(&args[2..]),
         Some("residual-features") => residual::main(&args[2..]),
         Some("inference-server") => infer_server::main(&args[2..]),
         // IKA-458 stage 3.7: the generation worker.

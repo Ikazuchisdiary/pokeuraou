@@ -2372,9 +2372,13 @@ fn run_queue<'a>(
                     );
                 }
                 base.begin(|| action_label(reg, variant));
+                #[cfg(feature = "count-execute")]
+                let probe = execute_count::before(&base, variant, step_budget);
                 let started = phase_start();
                 let produced = execute(reg, base, variant, step_budget)?;
                 phase_end(6, started);
+                #[cfg(feature = "count-execute")]
+                execute_count::after(probe);
                 for (weight, turn) in produced {
                     outcomes.push((variant_weight * weight, turn));
                 }
@@ -2478,6 +2482,101 @@ fn run_queue<'a>(
         });
     }
     Ok(TurnResult { branches, exact, suspended, unmodelled })
+}
+
+/// IKA-471: how many `execute` calls in one fill had a state and an action met earlier in the
+/// same fill, and the time they took (`count-execute`). "Masked" compares the states without
+/// `attacks` (Sucker Punch's read), as a cache that patched it back in would.
+#[cfg(feature = "count-execute")]
+pub mod execute_count {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    pub struct Counts {
+        pub calls: usize,
+        pub ns: u64,
+        pub exact: usize,
+        pub exact_ns: u64,
+        pub masked: usize,
+        pub masked_ns: u64,
+        /// By how many slots had acted before the call: calls, ns, masked repeats, their ns.
+        pub by_depth: [[u64; 4]; 5],
+    }
+
+    struct Seen {
+        fp: u64,
+        turn: Turn<'static>,
+        action: QueuedAction,
+        budget: Budget,
+    }
+
+    thread_local! {
+        static SEEN: RefCell<Vec<Seen>> = const { RefCell::new(Vec::new()) };
+        pub static COUNTS: RefCell<Counts> = RefCell::new(Counts::default());
+    }
+
+    pub fn new_fill() {
+        SEEN.with(|s| s.borrow_mut().clear());
+    }
+
+    pub struct Probe {
+        started: std::time::Instant,
+        exact: bool,
+        masked: bool,
+        depth: usize,
+    }
+
+    pub fn before(turn: &Turn, action: &QueuedAction, budget: Budget) -> Probe {
+        let fp = state_fingerprint(&turn.pos, &[], turn.self_switch_pending);
+        let depth = turn.acted.iter().flatten().filter(|a| **a).count();
+        let (mut exact, mut masked) = (false, false);
+        // SAFETY: only compared and dropped inside one fill, while the Reg lives.
+        let stored: Turn<'static> = unsafe { std::mem::transmute(turn.clone()) };
+        SEEN.with(|seen| {
+            let mut seen = seen.borrow_mut();
+            for s in seen.iter() {
+                if s.fp != fp || s.action != *action || s.budget != budget {
+                    continue;
+                }
+                let mut probe = turn.clone();
+                probe.attacks = s.turn.attacks;
+                if same_turn(&probe, &s.turn) && probe.unmodelled == s.turn.unmodelled {
+                    masked = true;
+                    if turn.attacks == s.turn.attacks {
+                        exact = true;
+                        break;
+                    }
+                }
+            }
+            seen.push(Seen { fp, turn: stored, action: action.clone(), budget });
+        });
+        Probe { started: std::time::Instant::now(), exact, masked, depth }
+    }
+
+    pub fn after(probe: Probe) {
+        let ns = probe.started.elapsed().as_nanos() as u64;
+        COUNTS.with(|c| {
+            let mut c = c.borrow_mut();
+            c.calls += 1;
+            c.ns += ns;
+            if probe.exact {
+                c.exact += 1;
+                c.exact_ns += ns;
+            }
+            if probe.masked {
+                c.masked += 1;
+                c.masked_ns += ns;
+            }
+            let row = &mut c.by_depth[probe.depth.min(4)];
+            row[0] += 1;
+            row[1] += ns;
+            if probe.masked {
+                row[2] += 1;
+                row[3] += ns;
+            }
+        });
+    }
 }
 
 /// The residual phase of a finished branch, once per order of a Speed tie among the

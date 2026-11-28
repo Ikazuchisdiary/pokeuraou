@@ -441,6 +441,10 @@ pub fn calculate(
     attacker_is_defender: bool,
 ) -> DamageResult {
     CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "count-damage")]
+    crate::resolvebench::count_damage(&format!(
+        "{attacker:?}|{defender:?}|{move_id}|{field:?}|{defender_side}|{spread}|{crit}|{move_ctx:?}|{base_power_override:?}|{attacker_is_defender}"
+    ));
     let mv = &reg.moves[move_id];
     let owned_ctx;
     let ctx_move = match move_ctx {
