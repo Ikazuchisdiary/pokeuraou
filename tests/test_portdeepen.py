@@ -366,3 +366,10 @@ def test_the_lines_are_walked_now_and_then_and_at_the_end(pool, served, monkeypa
     assert all(f is not False for f in fresh_always) and walks_always == 0
     assert seldom.lines == always.lines and sum(seldom.lines) > 0
     assert seldom.expanded == always.expanded and seldom.cells == always.cells
+
+
+def test_the_default_batch_is_eight(monkeypatch) -> None:  # noqa: ANN001
+    """IKA-467: the user's choice of 11/28. The autouse fixture sets 1 for the other tests, so
+    this one undoes it and reads the request's ``batch`` when none is named."""
+    monkeypatch.undo()
+    assert portdeepen.BATCH == 8

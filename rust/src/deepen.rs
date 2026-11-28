@@ -1,7 +1,7 @@
 //! IKA-464: a move's best-first deepening, in the port (`deepen.py`'s ``m...sallh`` reading).
 //!
 //! A person's move (`humanplay.solve_move`) and the analysis mode read the depth-1 node and
-//! then spend the rest of the budget a step at a time (the `batch` best cells, one by default),
+//! then spend the rest of the budget a step at a time (the `batch` best cells, eight by default),
 //! best first, re-solving the tree once after every step, so that wherever the budget stops the last equilibrium is an answer. Here the
 //! whole read is the port's: the root's matrices (`beliefplan::belief_node`), the tree, the
 //! priorities, the turns of the refined cells, the children's menus by the Q
@@ -42,7 +42,7 @@
 //! inference server and its zero-sum LP. A finished branch is its result. The cell's value is
 //! its branches' values, weighted, and every node up to the root is solved again.
 //!
-//! **A batch** (IKA-467, `batch` K, default 1): a step refines the K best cells, each picked
+//! **A batch** (IKA-467, `batch` K, default 8): a step refines the K best cells, each picked
 //! as the best with the ones picked before it in this step set aside. Their turns are resolved
 //! one after another, the children's menus of all of them are one `menus_of`, and the
 //! children's fills and LPs run on the port's cell threads (`par::Pool`, each thread with its
@@ -1652,7 +1652,7 @@ fn start(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Result<V
         level_sum: 0,
         root_sum: 0,
         elapsed: std::time::Duration::ZERO,
-        batch: value["batch"].as_u64().unwrap_or(1).max(1) as usize,
+        batch: value["batch"].as_u64().unwrap_or(8).max(1) as usize,
         phase_us: [0.0; 6],
         parallel_fills: 0,
         cut: 0,
