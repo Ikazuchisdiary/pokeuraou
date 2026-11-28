@@ -41,7 +41,8 @@ BRANCHES = 3
 #: on counted cells is the same read on 1 thread or 16; 1 is the read before IKA-467. At 8 the
 #: analysis mode's 10 s read refined 1.5 to 4.1 times the cells of 1 on two recorded positions
 #: (1, 4 and 16 threads), but at equal time (4 s a move, 1 thread) 8 against 1 was undecided
-#: after 1,200 pairs: -7.5 Elo [-19.6, +4.5], SPRT(-10, 0) LLR -0.67. The user chose 8 anyway (11/28).
+#: after 1,200 pairs: -7.5 Elo [-19.6, +4.5], SPRT(-10, 0) LLR -0.67.
+#: The default is 8. The reason is the user's decision (11/28), made on that undecided result.
 BATCH = 8
 #: A slice of wall time between two readings of the move's budget, in milliseconds.
 SLICE_MS = 250.0

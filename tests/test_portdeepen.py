@@ -368,8 +368,12 @@ def test_the_lines_are_walked_now_and_then_and_at_the_end(pool, served, monkeypa
     assert seldom.expanded == always.expanded and seldom.cells == always.cells
 
 
-def test_the_default_batch_is_eight(monkeypatch) -> None:  # noqa: ANN001
+def test_the_default_batch_is_eight(pool, served, monkeypatch) -> None:  # noqa: ANN001, F811
     """IKA-467: the user's choice of 11/28. The autouse fixture sets 1 for the other tests, so
-    this one undoes it and reads the request's ``batch`` when none is named."""
+    this one undoes it, starts a read that names no ``batch`` and checks the ``batch`` the port
+    reports back in its snapshot, the one its request carried: 8."""
     monkeypatch.undo()
     assert portdeepen.BATCH == 8
+    pos = _positions(pool, 1, seed=29)[0]
+    _got, snap = _last_snapshot(pool, pos, 0, served, 3000)
+    assert snap["batch"] == 8
