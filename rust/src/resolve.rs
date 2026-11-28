@@ -2553,12 +2553,14 @@ pub mod fill_cache {
 
     /// Clears the cache when the fill is over. The entries borrow the fill's `Reg` (they are
     /// kept as `'static`), so they must not outlive it: the guard is dropped before the
-    /// fill returns.
-    pub struct Guard {
+    /// fill returns. The guard borrows the `Reg`, so the compiler stops a caller that drops
+    /// the `Reg` first.
+    pub struct Guard<'r> {
         _not_send: std::marker::PhantomData<*const ()>,
+        _reg: std::marker::PhantomData<&'r Reg>,
     }
 
-    impl Drop for Guard {
+    impl Drop for Guard<'_> {
         fn drop(&mut self) {
             CACHE.with(|c| *c.borrow_mut() = None);
         }
@@ -2578,10 +2580,10 @@ pub mod fill_cache {
     }
 
     /// Starts a fill's cache on this thread.
-    pub fn begin(_reg: &Reg) -> Guard {
+    pub fn begin(_reg: &Reg) -> Guard<'_> {
         let on = MAX_ACTED.load(std::sync::atomic::Ordering::Relaxed) != usize::MAX && !switched_off();
         CACHE.with(|c| *c.borrow_mut() = on.then(Cache::default));
-        Guard { _not_send: std::marker::PhantomData }
+        Guard { _not_send: std::marker::PhantomData, _reg: std::marker::PhantomData }
     }
 
     fn active() -> bool {
