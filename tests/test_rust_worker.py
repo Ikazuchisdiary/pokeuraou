@@ -239,7 +239,15 @@ class _MirroredQ(_ServedStub):
         f0 = arrays["feats0"].astype(np.float64).sum(1)
         f1 = arrays["feats1"].astype(np.float64).sum(1)
         x = 0.37 * (a0[:, None] - a1[None, :]) + 0.11 * (f0[:, None] - f1[None, :])
-        return 0.5 + 0.4 * np.sin(x)
+        # IKA-470: the sines alone make a game with ties, whose vertex the port's HiGHS and
+        # scipy's choose differently, and the two seats' menus then differ (no mirror in any
+        # of 16 games with the sines alone). A term that is odd under swapping the seats keeps
+        # the mirror and breaks the ties: h(i, j) - h(j, i) for a made-up h of the sides' sums.
+        def h(pa, pf, qa, qf):  # noqa: ANN001, ANN202
+            return np.sin(0.017 * pa[:, None] * qf[None, :] + 0.0031 * pf[:, None] * qa[None, :])
+
+        odd = h(a0, f0, a1, f1) - h(a1, f1, a0, f0).T
+        return 0.5 + 0.4 * np.sin(x) + 0.02 * odd
 
 
 @pytest.fixture(scope="module")
@@ -268,9 +276,15 @@ def test_a_mirror_s_two_values_sum_to_one(mirrored_games) -> None:  # noqa: ANN0
     units the two recorded values sum to one (`foeSearchValue` is ``-foe_value``, playgame.rs). A
     sign or units error breaks the sum; so does writing side 0's value twice, unless it is one
     half, which this hidden game does not give."""
+    # IKA-470: the same four, not only the same team and leads. The port's HiGHS may end on
+    # another vertex of the selection game than scipy's did, so a game with the same leads and
+    # other backs is possible, and it is not a mirror.
     same = [r for r in mirrored_games
-            if r["ownTeam"] == r["foeTeam"] and r["leads"][0] == r["leads"][1]]
-    assert same, "no game put the same four and leads in both seats; the sum would be vacuous"
+            if r["ownTeam"] == r["foeTeam"] and r["leads"][0] == r["leads"][1]
+            and sorted(r["ownPick"]) == sorted(r["foePick"])]
+    # 5 of the 6 games stay after the filter; the floor keeps the filter from emptying the test.
+    assert len(same) >= 3, (
+        f"{len(same)} of {len(mirrored_games)} games put the same four and leads in both seats")
     for record in same:
         first = record["decisions"][0]
         assert first["kind"] == "move" and first["turn"] == 1

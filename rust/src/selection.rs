@@ -293,6 +293,8 @@ pub fn solve_pair(
         };
     let matrix = matrices.remove(0);
 
+    #[cfg(feature = "lp-dump")]
+    let _tag = crate::lpbench::tag("selection");
     let solved = solve_bayesian(&[(matrix.clone(), n, n)], &[1.0], 1e-9).map_err(|why| format!("the selection game: {why:?}"))?;
     // `assemble_bayesian` for one class of weight 1.
     let value = solved.value();

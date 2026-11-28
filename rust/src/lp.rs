@@ -1,12 +1,20 @@
 //! IKA-381: the equilibria of matrix games, by HiGHS, as `equilibrium.py` solves them.
 //!
-//! The same model handed to the same solver with the same options: `equilibrium._lp` builds
-//! a column-wise matrix from the dense one (the nonzeros, column by column), bounds `x >= 0`
-//! below `free_from` and free from it on, and runs HiGHS with `linprog(method="highs")`'s
-//! defaults -- presolve on, the dual simplex. The HiGHS is the one scipy 1.18.1 builds
+//! The same model handed to the same solver: `equilibrium._lp` builds a column-wise matrix
+//! from the dense one (the nonzeros, column by column), bounds `x >= 0` below `free_from` and
+//! free from it on, and runs HiGHS with `linprog(method="highs")`'s defaults -- presolve on,
+//! the dual simplex. Since IKA-470 the port's options are its own (below); scipy's are the
+//! retry's. The HiGHS is the one scipy 1.18.1 builds
 //! (`vendor/HiGHS`, 1.12.0, `build.rs`). Success is linprog's: HiGHS optimal, then linprog's
 //! residual check (`_check_result`, 1e-9). The strategies are cleaned as `_clean` cleans
 //! them with a plain sum (IKA-460 dropped numpy's pairwise sum and OpenBLAS's dot order).
+//!
+//! IKA-470: the options are not scipy's any more. Presolve is off, scaling is off and the
+//! feasibility tolerances are 1e-8 (`Instance::new(true)`); an LP that fails under them is
+//! solved again with scipy's options (`FALLBACKS` counts them, `report`). The game values
+//! differ from scipy's by at most 9.87e-8 on 5,578 LPs (records/IKA-470.md), and a degenerate
+//! game may end on another optimal vertex: the port's strategies are no longer scipy's to the
+//! bit. The `lp-dump` feature's `lp-bench` command and `POKEURAOU_HIGHS_OPTS` found the options.
 //!
 //! The port's own requests (belief nodes, replacements, selection, the deepening) call
 //! `solve` and `solve_bayesian` directly. One command reaches it from Python (`portlp.py`):
@@ -59,6 +67,13 @@ extern "C" {
         row_dual: *mut f64,
     ) -> HighsInt;
     fn Highs_getObjectiveValue(highs: *const c_void) -> f64;
+    fn Highs_setDoubleOptionValue(highs: *mut c_void, option: *const c_char, value: f64) -> HighsInt;
+    #[cfg(feature = "lp-dump")]
+    fn Highs_setOptionValue(
+        highs: *mut c_void,
+        option: *const c_char,
+        value: *const c_char,
+    ) -> HighsInt;
 }
 
 const STATUS_ERROR: HighsInt = -1;
@@ -81,11 +96,13 @@ fn tick(slot: usize, since: std::time::Instant) -> std::time::Instant {
     now
 }
 
-/// A HiGHS instance with `equilibrium._highs_options` set (kept per thread, `Held`).
+/// A HiGHS instance (kept per thread, `Held`). `fast` instances carry IKA-470's options;
+/// the others carry `equilibrium._highs_options`, which scipy's `linprog` also runs.
 struct Instance(*mut c_void);
 
 impl Instance {
-    fn new() -> Instance {
+    /// `fast`: the options of IKA-470 (`FAST_TOLERANCE`); else scipy's (`equilibrium._highs_options`).
+    fn new(fast: bool) -> Instance {
         // SAFETY: `Highs_create` returns a fresh instance or aborts.
         let highs = unsafe { Highs_create() };
         let set_bool = |name: &[u8], value: bool| unsafe {
@@ -100,7 +117,7 @@ impl Instance {
             Highs_setStringOptionValue(
                 highs,
                 b"presolve\0".as_ptr() as *const c_char,
-                b"on\0".as_ptr() as *const c_char,
+                if fast { b"off\0".as_ptr() } else { b"on\0".as_ptr() } as *const c_char,
             );
         }
         set_int(b"highs_debug_level\0", 0);
@@ -109,10 +126,65 @@ impl Instance {
         set_int(b"simplex_strategy\0", SIMPLEX_DUAL);
         // One thread: the dual simplex is serial (`simplex_strategy` 1), and a scheduler of
         // more would be started and stopped with every instance (`Highs_destroy`). scipy
-        // leaves the default; the captured LPs are the same to the bit either way.
+        // leaves the default; the answers are the same to the bit either way (IKA-381).
         set_int(b"threads\0", THREADS);
+        if fast {
+            set_int(b"simplex_scale_strategy\0", 0);
+            // SAFETY: NUL-terminated names.
+            unsafe {
+                Highs_setDoubleOptionValue(highs, b"primal_feasibility_tolerance\0".as_ptr() as *const c_char, FAST_TOLERANCE);
+                Highs_setDoubleOptionValue(highs, b"dual_feasibility_tolerance\0".as_ptr() as *const c_char, FAST_TOLERANCE);
+            }
+        }
+        // The bench's options (`set_extra_options`) and `POKEURAOU_HIGHS_OPTS` ("name=value;..."):
+        // on the fast instances only, the retry's instance stays scipy's.
+        #[cfg(feature = "lp-dump")]
+        if fast {
+            EXTRA.with(|e| {
+                for (name, value) in e.borrow().iter().chain(env_options().iter()) {
+                    let (n, v) = (
+                        std::ffi::CString::new(name.as_str()).unwrap(),
+                        std::ffi::CString::new(value.as_str()).unwrap(),
+                    );
+                    // SAFETY: NUL-terminated strings.
+                    let status = unsafe { Highs_setOptionValue(highs, n.as_ptr(), v.as_ptr()) };
+                    if status == STATUS_ERROR {
+                        eprintln!("HiGHS refused option {name}={value}");
+                        std::process::exit(2);
+                    }
+                }
+            });
+        }
         Instance(highs)
     }
+}
+
+#[cfg(feature = "lp-dump")]
+thread_local! {
+    static EXTRA: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `POKEURAOU_HIGHS_OPTS`: "name=value;name=value", applied after the fast defaults (IKA-470;
+/// the feature `lp-dump` only, a tool of the bench).
+#[cfg(feature = "lp-dump")]
+fn env_options() -> &'static Vec<(String, String)> {
+    static OPTS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    OPTS.get_or_init(|| {
+        std::env::var("POKEURAOU_HIGHS_OPTS")
+            .unwrap_or_default()
+            .split(';')
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .collect()
+    })
+}
+
+/// The bench's options for this thread's instances; the kept instance is dropped so the next LP
+/// makes one with them.
+#[cfg(feature = "lp-dump")]
+pub fn set_extra_options(options: Vec<(String, String)>) {
+    EXTRA.with(|e| *e.borrow_mut() = options);
+    KEPT.with(|k| *k.borrow_mut() = None);
 }
 
 /// HiGHS's `threads` option for every instance (see `Instance::new`).
@@ -149,9 +221,13 @@ struct Held {
 }
 
 impl Held {
-    fn take() -> Held {
+    fn take(fast: bool) -> Held {
+        if !fast {
+            // The retry after a failed fast solve: scipy's options, on an instance of its own.
+            return Held { instance: Some(Instance::new(false)), keep: false };
+        }
         if !reuse() {
-            return Held { instance: Some(Instance::new()), keep: false };
+            return Held { instance: Some(Instance::new(true)), keep: false };
         }
         let kept = KEPT.with(|k| k.borrow_mut().take());
         let instance = match kept {
@@ -160,7 +236,7 @@ impl Held {
                 unsafe { Highs_clearModel(instance.0) };
                 instance
             }
-            None => Instance::new(),
+            None => Instance::new(true),
         };
         Held { instance: Some(instance), keep: true }
     }
@@ -185,7 +261,7 @@ impl Drop for Held {
 /// `equilibrium._lp`: minimise `c.x` subject to `a_ub x <= b_ub`, `a_eq x = b_eq`, `x >= 0`
 /// below `free_from` and free from it on. `a` is the dense `[a_ub; a_eq]`, row-major, with
 /// `n_ub` rows of the first. The solution, or linprog's failure message.
-fn solve_lp(
+pub(crate) fn solve_lp(
     c: &[f64],
     a: &[f64],
     n_ub: usize,
@@ -193,6 +269,56 @@ fn solve_lp(
     b_eq: &[f64],
     free_from: usize,
 ) -> Result<Vec<f64>, String> {
+    #[cfg(feature = "lp-dump")]
+    crate::lpbench::dump(c, a, n_ub, b_ub, b_eq, free_from);
+    match solve_lp_with(c, a, n_ub, b_ub, b_eq, free_from, true) {
+        Err(_) if !stay_fast() => {
+            FALLBACKS.fetch_add(1, Ordering::Relaxed);
+            solve_lp_with(c, a, n_ub, b_ub, b_eq, free_from, false)
+        }
+        done => done,
+    }
+}
+
+/// `POKEURAOU_LP_NOFALLBACK=1`: no retry with scipy's options (the bench's control; the
+/// feature `lp-dump` only).
+#[cfg(feature = "lp-dump")]
+fn stay_fast() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("POKEURAOU_LP_NOFALLBACK").is_ok_and(|v| v == "1"))
+}
+#[cfg(not(feature = "lp-dump"))]
+fn stay_fast() -> bool {
+    false
+}
+
+/// LPs the fast options failed and scipy's options answered (IKA-470).
+pub static FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+/// IKA-470: the feasibility tolerances of the fast options (presolve off, no scaling). Against
+/// scipy's options these were 4.5 times faster on 5,578 LPs of generation's games, the values
+/// within 9.87e-8 (records/IKA-470.md).
+const FAST_TOLERANCE: f64 = 1e-8;
+
+/// The tests' hook: this thread's fast solves fail.
+#[cfg(test)]
+thread_local! {
+    static FAIL_FAST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn solve_lp_with(
+    c: &[f64],
+    a: &[f64],
+    n_ub: usize,
+    b_ub: &[f64],
+    b_eq: &[f64],
+    free_from: usize,
+    fast: bool,
+) -> Result<Vec<f64>, String> {
+    #[cfg(test)]
+    if fast && FAIL_FAST.with(|f| f.get()) {
+        return Err("the fast options are refused (test hook)".into());
+    }
     let cols = c.len();
     let rows = n_ub + b_eq.len();
     debug_assert_eq!(a.len(), rows * cols);
@@ -223,7 +349,7 @@ fn solve_lp(
     row_upper.extend_from_slice(b_eq);
     LPS.fetch_add(1, Ordering::Relaxed);
     let clock = std::time::Instant::now();
-    let highs = Held::take();
+    let highs = Held::take(fast);
     let clock = tick(0, clock);
     // SAFETY: every array is as long as the counts passed with it.
     let passed = unsafe {
@@ -920,6 +1046,7 @@ pub fn lp_command(value: &Value) -> Value {
 pub fn report() -> Value {
     json!({
         "lps": LPS.load(Ordering::Relaxed),
+        "fallbacks": FALLBACKS.load(Ordering::Relaxed),
         "games": GAMES.load(Ordering::Relaxed),
         "ns": NS.iter().map(|n| n.load(Ordering::Relaxed)).collect::<Vec<_>>(),
     })
@@ -928,6 +1055,86 @@ pub fn report() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    extern "C" {
+        fn Highs_getStringOptionValue(h: *const c_void, o: *const c_char, v: *mut c_char) -> HighsInt;
+        fn Highs_getIntOptionValue(h: *const c_void, o: *const c_char, v: *mut HighsInt) -> HighsInt;
+        fn Highs_getDoubleOptionValue(h: *const c_void, o: *const c_char, v: *mut f64) -> HighsInt;
+    }
+
+    /// (presolve, simplex_scale_strategy, primal and dual feasibility tolerance), read back.
+    fn options_of(instance: &Instance) -> (String, HighsInt, f64, f64) {
+        let name = |s: &'static [u8]| s.as_ptr() as *const c_char;
+        let (mut scale, mut ptol, mut dtol) = (-1, -1.0, -1.0);
+        let mut buf = [0 as c_char; 256];
+        // SAFETY: a live instance, NUL-terminated names, the 256 bytes HiGHS may write.
+        unsafe {
+            Highs_getStringOptionValue(instance.0, name(b"presolve\0"), buf.as_mut_ptr());
+            Highs_getIntOptionValue(instance.0, name(b"simplex_scale_strategy\0"), &mut scale);
+            Highs_getDoubleOptionValue(instance.0, name(b"primal_feasibility_tolerance\0"), &mut ptol);
+            Highs_getDoubleOptionValue(instance.0, name(b"dual_feasibility_tolerance\0"), &mut dtol);
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let presolve = buf[..end].iter().map(|&b| b as u8 as char).collect();
+        (presolve, scale, ptol, dtol)
+    }
+
+    /// IKA-470: the fast options and scipy's give the same game value on a 12 x 12 game, and
+    /// the fast options are the ones `solve_lp` runs first (the positive control: a build whose
+    /// fast options were scipy's would also pass the value check, so the options are read back).
+    #[test]
+    fn fast_options_agree_with_scipys_on_the_value() {
+        let (m, n) = (12usize, 12usize);
+        let mut seed = 12345u64;
+        let mut payoff = vec![0.0; m * n];
+        for v in payoff.iter_mut() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *v = ((seed >> 33) % 1000) as f64 / 1000.0;
+        }
+        let cols = m + 1;
+        let mut c = vec![0.0; cols];
+        c[m] = -1.0;
+        let mut a = vec![0.0; (n + 1) * cols];
+        for j in 0..n {
+            for i in 0..m {
+                a[j * cols + i] = -payoff[i * n + j];
+            }
+            a[j * cols + m] = 1.0;
+        }
+        for i in 0..m {
+            a[n * cols + i] = 1.0;
+        }
+        let zeros = vec![0.0; n];
+        let fast = solve_lp_with(&c, &a, n, &zeros, &[1.0], m, true).unwrap();
+        let slow = solve_lp_with(&c, &a, n, &zeros, &[1.0], m, false).unwrap();
+        assert!((fast[m] - slow[m]).abs() < 1e-6, "{} against {}", fast[m], slow[m]);
+        // The instance the thread kept after `solve_lp` carries the fast options.
+        solve_lp(&c, &a, n, &zeros, &[1.0], m).unwrap();
+        KEPT.with(|k| {
+            let kept = k.borrow();
+            assert_eq!(options_of(kept.as_ref().expect("a kept instance")), ("off".to_string(), 0, 1e-8, 1e-8));
+        });
+        // scipy's instance: presolve on, HiGHS's default scaling (2) and tolerance (1e-7).
+        assert_eq!(options_of(&Instance::new(false)), ("on".to_string(), 2, 1e-7, 1e-7));
+    }
+
+    /// IKA-470: an LP the fast options fail is solved again with scipy's, and the answer is
+    /// returned. The hook makes every fast solve fail; the positive control is the count of
+    /// retries and that a build without the retry would return the error.
+    #[test]
+    fn a_failed_fast_solve_is_solved_again_with_scipys_options() {
+        let (c, a, zeros) = ([0.0, -1.0], [-0.5, 1.0, -0.5, 1.0, 1.0, 0.0], [0.0, 0.0]);
+        let before = FALLBACKS.load(Ordering::Relaxed);
+        let plain = solve_lp(&c, &a, 2, &zeros, &[1.0], 1).unwrap();
+        assert_eq!(FALLBACKS.load(Ordering::Relaxed), before, "no retry without the hook");
+        FAIL_FAST.with(|f| f.set(true));
+        assert!(solve_lp_with(&c, &a, 2, &zeros, &[1.0], 1, true).is_err(), "the hook fails fast");
+        let again = solve_lp(&c, &a, 2, &zeros, &[1.0], 1);
+        FAIL_FAST.with(|f| f.set(false));
+        let again = again.expect("the retry answers");
+        assert_eq!(FALLBACKS.load(Ordering::Relaxed), before + 1);
+        assert!((again[1] - plain[1]).abs() < 1e-9, "{again:?} against {plain:?}");
+    }
 
     #[test]
     fn matching_pennies_is_a_half_each() {

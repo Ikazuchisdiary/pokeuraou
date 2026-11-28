@@ -314,8 +314,10 @@ HiGHS 1.12.0 を同梱していない（1.12.x は 1.11.0、1.14.x は 1.14.0）
   PATH に dlltool が要る）。
 
 初回の build は HiGHS の分だけ延びます（このマシンで 4 コア 83 秒。以後は target の中に残る）。
-LP の答えは scipy の `equilibrium.solve` とビット一致（捕まえた 59,050 の LP で全部。
-records/IKA-381.md）。
+LP の答えは、IKA-470 までは scipy の `equilibrium.solve` とビット一致だった（捕まえた
+59,050 の LP で全部。records/IKA-381.md）。IKA-470 から HiGHS の option が違う（presolve off・
+scaling 0・tolerance 1e-8。失敗したら scipy の option で解き直す）。ゲームの値の差は 1e-7 以内で、
+縮退した LP では別の最適な頂点を返すことがある（records/IKA-470.md）。
 
 ### 境界はノード単位
 

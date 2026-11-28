@@ -24,6 +24,8 @@ from pokeuraou.selection import SpreadClass, cyclic_share, render, solve_selecti
 from pokeuraou.standin import RowStub
 from pokeuraou.teams import all_selections, load_roster
 
+from ._equilibrium import VALUE_TOL, is_bayesian_equilibrium
+
 REGULATION = "gen9championsvgc2026regmb"
 
 
@@ -229,7 +231,14 @@ def test_the_port_s_solve_is_the_python_solve_it_replaced(roster) -> None:  # no
         np.testing.assert_allclose(got, want, rtol=0, atol=1e-12)
     eq = analysis.equilibrium
     assert len(eq.row_support()) > 1, "a pure answer would not tell the mixtures apart"
-    np.testing.assert_allclose(eq.row_strategy, reference.row_strategy, atol=1e-9)
-    for got, want in zip(eq.col_strategies, reference.col_strategies, strict=True):
-        np.testing.assert_allclose(got, want, atol=1e-9)
-    assert analysis.value == pytest.approx(float(reference.value), abs=1e-12)
+    # IKA-470: the port's HiGHS may end on another optimal vertex than scipy's options do
+    # (the 90 x 90 game is degenerate: the strategies differ by up to 0.28 in an entry), so the
+    # answer is held to the reference's value and to being an equilibrium of the matrices.
+    weights = [c.weight for c in classes]
+    assert is_bayesian_equilibrium(list(matrices), weights, eq.row_strategy,
+                                   list(eq.col_strategies), float(reference.value))
+    uniform = np.full(len(eq.row_strategy), 1.0 / len(eq.row_strategy))
+    assert not is_bayesian_equilibrium(list(matrices), weights, uniform,
+                                       list(eq.col_strategies), float(reference.value)), (
+        "the check cannot fail")
+    assert analysis.value == pytest.approx(float(reference.value), abs=VALUE_TOL)

@@ -28,6 +28,8 @@ use crate::served::{Server, Stats};
 use serde_json::{json, Value};
 
 pub fn replacement_node(reg: &Reg, encoder: &Encoder, value: &Value) -> Value {
+    #[cfg(feature = "lp-dump")]
+    let _tag = crate::lpbench::tag("replacement");
     match node(reg, encoder, value) {
         Ok(answer) | Err(answer) => answer,
     }

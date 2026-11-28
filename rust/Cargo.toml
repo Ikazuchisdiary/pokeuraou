@@ -17,6 +17,9 @@ phase-report = []
 # IKA-462: mimalloc as the global allocator. Off by default: in the steady-state ABBA of 2,000 games
 # (records/IKA-462.md section 3.2) it bought nothing, and it adds a C build.
 mimalloc = ["dep:mimalloc"]
+# IKA-470: dump every LP the port solves to $POKEURAOU_LP_DUMP.<pid> (one in $POKEURAOU_LP_DUMP_EVERY),
+# and the `lp-bench` command that solves a dump under HiGHS option sets. Off by default.
+lp-dump = []
 # IKA-99: the 16 damage rolls in integer arithmetic instead of through f64. Same numbers
 # (the product is far below 2^53); off by default until it is shown to buy anything.
 int-rolls = []

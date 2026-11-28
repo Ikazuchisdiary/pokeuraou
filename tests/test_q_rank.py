@@ -107,8 +107,26 @@ def _q_scores(reg, pos, side):  # noqa: ANN001, ANN202
     """What the ranking should score: value against the other side's half of the solve."""
     pools = (qhead.legal_pool(reg, pos, 0), qhead.legal_pool(reg, pos, 1))
     m = _stub_matrix(qrank._pool_arrays(reg, Encoder(reg), pos, pools, True))  # noqa: SLF001
+    # IKA-470: the port's HiGHS and scipy's may end on different optimal vertices of this game
+    # (the made-up Q has ties), so the scores of the candidates off the support, and the order
+    # among those on it (equal up to rounding), are not `solve`'s. The scores are the port's
+    # own `qScores` answer for the game (held to `solve`'s up to a vertex by
+    # `test_port_menus.test_the_ports_scores_are_numpys`); the test holds the menus
+    # built from them: the root menu is ranked by the foe's half of the Q solve.
+    import base64
+
+    from pokeuraou import rustnode
+
+    request = {"kind": "qScores", "games": [
+        {"rows": m.shape[0], "cols": m.shape[1],
+         "data": base64.b64encode(m.astype("<f8").tobytes()).decode()}]}
+    answer = rustnode.require_node(reg)._exchange(request)["answers"][0]  # noqa: SLF001
+    scores = np.frombuffer(base64.b64decode(answer["rows" if side == 0 else "cols"]), "<f8")
+    # The scores are the same game's as `solve` gives, within the vertex's freedom.
     e = solve(m)
-    return m @ e.col_strategy if side == 0 else -(e.row_strategy @ m)
+    own = m @ e.col_strategy if side == 0 else -(e.row_strategy @ m)
+    assert abs(scores.max() - own.max()) <= 1e-6
+    return scores
 
 
 def test_the_q_labels_rank_by_q_and_say_whether_the_menu_is_covered() -> None:

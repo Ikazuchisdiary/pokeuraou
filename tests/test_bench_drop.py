@@ -47,6 +47,7 @@ from pokeuraou.search import belief_solve
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
+from ._equilibrium import GUARD_TOL, VALUE_TOL, bayesian_row_guarantee
 from .test_beliefnode import _Leaf
 from .test_poolplay import _stub
 
@@ -205,9 +206,13 @@ def test_the_solve_over_what_is_left_is_the_full_node_restricted(setup) -> None:
         for mine, theirs_ in zip(small.matrices[side], kept, strict=True):
             assert np.array_equal(mine, theirs_), f"side {side}"
         weights = np.asarray([c.weight for c in dropped[1 - side]])
-        want = solve_bayesian([m if side == 0 else -m.T for m in kept], weights)
-        assert np.array_equal(got[side].strategy, want.row_strategy), f"side {side}"
-        assert got[side].value == want.value
+        games = [m if side == 0 else -m.T for m in kept]
+        want = solve_bayesian(games, weights)
+        # IKA-470: the port's HiGHS may end on another optimal vertex than scipy's options
+        # do: the value within VALUE_TOL, the strategy an optimal row strategy of the games.
+        assert abs(got[side].value - want.value) <= VALUE_TOL
+        floor = want.value - GUARD_TOL
+        assert bayesian_row_guarantee(games, weights, got[side].strategy) >= floor, f"side {side}"
         assert got[side].classes == len(at)
     # Positive control: the full belief is a different game here.
     whole = belief_solve(reg, position, ours, theirs, full, {0: leaf, 1: leaf}, budget=budget)

@@ -646,6 +646,12 @@ fn report(stats: &Stats, elapsed: f64, out_path: &str, store: &str) {
         stats.mirror_wins,
         stats.mirror_draws,
     );
+    // IKA-470: the LPs the fast HiGHS options failed and scipy's options solved again.
+    println!(
+        "  lp: {} solves, {} solved again with scipy's options",
+        crate::lp::LPS.load(std::sync::atomic::Ordering::Relaxed),
+        crate::lp::FALLBACKS.load(std::sync::atomic::Ordering::Relaxed),
+    );
     let solves = stats.solves.max(1) as f64;
     println!(
         "  selection: {} solves ({} reused, {} read from {store}), {:.1}s = {:.2}s a solve, {} positions, worst antisymmetry {:.2e}",

@@ -142,6 +142,8 @@ pub(crate) fn phase_core(
     let asks: Vec<(i64, Vec<f64>)> = (0..2).map(|side| (side as i64, spreads[1 - side].1.clone())).collect();
     let mut strategies: Vec<Vec<f64>> = Vec::new();
     let mut values: Vec<f64> = Vec::new();
+    #[cfg(feature = "lp-dump")]
+    let _tag = crate::lpbench::tag("replacement");
     for (_side, solved) in solve_asks(&asks, &matrices, &job_sides, m, n) {
         match solved {
             Ok(s) => {

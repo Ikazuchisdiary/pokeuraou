@@ -44,6 +44,8 @@ mod inert;
 mod legal;
 mod level_struggle;
 mod lp;
+#[cfg(feature = "lp-dump")]
+mod lpbench;
 mod magic_guard;
 mod modelled;
 mod move_hooks;
@@ -107,6 +109,8 @@ fn main() {
         Some("selfplay-worker") => worker::main(&args[2..]),
         // The board's worker (`tools/match_queue.py --pool`).
         Some("pool-match-worker") => boardworker::main(&args[2..]),
+        #[cfg(feature = "lp-dump")]
+        Some("lp-bench") => lpbench::main(&args[2..]),
         _ => {
             eprintln!(
                 "usage:\n  {0} damage <regulation.json> <cases.json> [repeats]\n  \

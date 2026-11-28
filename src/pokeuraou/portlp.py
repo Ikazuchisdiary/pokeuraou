@@ -2,9 +2,14 @@
 
 `equilibrium.solve` spends more of an LP in Python than in HiGHS: building the model, handing
 it over and reading the answer (0.31 ms an LP against 0.22 ms of HiGHS, IKA-379). The port
-solves the games with the same HiGHS (1.12.0, scipy's commit), the same model and the same
-options (`rust/src/lp.rs`), so an answer is `solve`'s to the bit wherever HiGHS takes the same
-pivots -- all 59,050 LPs captured from open and hidden reads did (records/IKA-381.md).
+solves the games with the same HiGHS (1.12.0, scipy's commit) and the same model, with the
+options of IKA-470 (`rust/src/lp.rs`: no presolve, no scaling, tolerance 1e-8; scipy's
+options only when those fail). Until IKA-470 the options were scipy's and an answer was
+`solve`'s to the bit (all 59,050 LPs captured from open and hidden reads, records/IKA-381.md).
+Now the game value is `solve`'s to 1e-7 and the strategies are an equilibrium of the game, but
+on a degenerate game they may be another optimal vertex than `solve`'s
+(records/IKA-470.md). Tests hold the port to the value and to "is an equilibrium"
+(`tests/_equilibrium.py`), not to the bits.
 
 Two requests, both one crossing for many games, on the `lp` command:
 

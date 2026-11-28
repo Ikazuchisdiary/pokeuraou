@@ -51,6 +51,8 @@ from pokeuraou.pool import load_pool
 from pokeuraou.regulation import repo_root
 from pokeuraou.selfplay import position_from_sets
 
+from ._equilibrium import GUARD_TOL, VALUE_TOL, bayesian_col_concession, bayesian_row_guarantee
+
 # Antisymmetric: HP summed per side, the active pair counted twice; a served stand-in, since
 # the port scores the selection game on the server (IKA-463).
 from .test_poolplay import _stub
@@ -284,7 +286,8 @@ def _replacement_before_ika463(game, pos, options, side, shown, leads):  # noqa:
     """The reference: `HumanGame._replacement_mixture` as it was before IKA-463 (572bbcd),
     the cells filled by `selfplay.replacement_matrix` and the game solved by Python's
     `solve_bayesian`. Side ``side``'s mixture, its model of the other side, the value in
-    side 0's units; None where it fell back."""
+    side 0's units; None where it fell back. Then the games it solved (side ``side``'s view)
+    and their weights, and the value in that side's units, for the equilibrium check."""
     from pokeuraou.equilibrium import solve_bayesian
     from pokeuraou.hidden import completions
     from pokeuraou.selfplay import _bench_weights, replacement_matrix
@@ -301,7 +304,9 @@ def _replacement_before_ika463(game, pos, options, side, shown, leads):  # noqa:
     solved = solve_bayesian([m if side == 0 else -m.T for m in built], weights)
     model = humanplay._averaged(solved.col_strategies, weights)  # noqa: SLF001
     value = float(solved.value) if side == 0 else -float(solved.value)
-    return [float(x) for x in solved.row_strategy], model, value, len(items)
+    games = [m if side == 0 else -m.T for m in built]
+    return ([float(x) for x in solved.row_strategy], model, value, len(items), games, weights,
+            float(solved.value))
 
 
 def test_the_agent_s_replacement_is_the_port_s_replacement_node(  # noqa: ANN001
@@ -323,9 +328,12 @@ def test_the_agent_s_replacement_is_the_port_s_replacement_node(  # noqa: ANN001
     asked: list[tuple[int, ...]] = []
     real_solve = replacenode.solve
 
+    answers: list[dict] = []
+
     def counting(reg, options, spreads, leaves, sides=(0, 1)):  # noqa: ANN001, ANN202
         asked.append(tuple(sides))
-        return real_solve(reg, options, spreads, leaves, sides=sides)
+        answers.append(real_solve(reg, options, spreads, leaves, sides=sides))
+        return answers[-1]
 
     compared: list[tuple] = []
     real_mixture = humanplay.HumanGame._replacement_mixture  # noqa: SLF001
@@ -333,8 +341,9 @@ def test_the_agent_s_replacement_is_the_port_s_replacement_node(  # noqa: ANN001
     def checked(game, pos, options, side, shown, leads):  # noqa: ANN001, ANN202, PLR0913
         got = real_mixture(game, pos, options, side, shown, leads)
         if len(options[side]) * len(options[1 - side]) > 1:
+            # The port's per-completion replies of the asked side (the other side's mixtures).
             compared.append((side, got, _replacement_before_ika463(
-                game, pos, options, side, shown, leads)))
+                game, pos, options, side, shown, leads), answers[-1][side][2]))
         return got
 
     monkeypatch.setattr(replacenode, "solve", counting)
@@ -364,11 +373,25 @@ def test_the_agent_s_replacement_is_the_port_s_replacement_node(  # noqa: ANN001
     assert len(compared) == 16, "a start did not reach its replacement phase"
     assert {c[0] for c in mixed} == {0, 1}, "no mixed answer at one of the seats"
     assert all(c[2][3] > 1 for c in compared), "a bench was not hidden at a replacement"
-    for _side, (policy, model, value), (ref_policy, ref_model, ref_value, _n) in compared:
+    # The control: the check refuses a mixture worse than the reference's value.
+    assert not any(bayesian_row_guarantee(c[2][4], c[2][5], np.eye(len(c[1][0]))[0])
+                   >= c[2][6] - GUARD_TOL for c in mixed), "a pure policy passed the check"
+    assert not any(bayesian_col_concession(c[2][4], c[2][5], [np.eye(len(r))[0] for r in c[3]])
+                   <= c[2][6] + GUARD_TOL for c in mixed), "a pure reply passed the check"
+    for _side, (policy, model, value), ref, replies in compared:
+        # IKA-470: the port's HiGHS may end on another optimal vertex than scipy's options
+        # do, so on a degenerate game the mixture is not the reference's. It is held to the
+        # reference's value and to being an optimal row strategy of the reference's games.
+        ref_value, games, weights, raw_value = ref[2], ref[4], ref[5], ref[6]
         assert sum(policy) == pytest.approx(1.0)
-        np.testing.assert_allclose(policy, ref_policy, atol=1e-9)
-        np.testing.assert_allclose(model, ref_model, atol=1e-9)
-        assert value == pytest.approx(ref_value, abs=1e-9)
+        assert sum(model) == pytest.approx(1.0) and min(model) >= 0.0
+        # The model is the port's per-completion replies averaged by the completions' weights,
+        # and those replies concede no more than the value to the row player's best reply
+        # (they are the column side of an equilibrium, as the policy is the row side).
+        np.testing.assert_allclose(model, humanplay._averaged(replies, weights), atol=1e-12)  # noqa: SLF001
+        assert bayesian_col_concession(games, weights, list(replies)) <= raw_value + GUARD_TOL
+        assert value == pytest.approx(ref_value, abs=VALUE_TOL)
+        assert bayesian_row_guarantee(games, weights, np.asarray(policy)) >= raw_value - GUARD_TOL
     # One request a phase, the agent's own game only.
     assert len(asked) == len(compared) and portlp.COUNTS["replaced"] - before == len(asked)
     assert asked == [(c[0],) for c in compared]

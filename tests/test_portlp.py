@@ -2,10 +2,13 @@
 
 What these hold:
 
-- **the same games**: `solve_many` gives `solve`'s `Equilibrium` to the bit -- value,
-  strategies, both sides' EVs -- on random games, degenerate ones (ties, dominated actions,
-  a single row or column) and Bayesian ones; a non-finite matrix is `solve`'s ValueError,
-  returned in its place. The port's own count of LPs is the positive control.
+- **the same games**: `solve_many` gives an `Equilibrium` of `solve`'s game -- the value
+  within `VALUE_TOL`, strategies that are an equilibrium (`tests/_equilibrium.py`), the EVs
+  of those strategies -- on random games, degenerate ones (ties, dominated actions, a single
+  row or column) and Bayesian ones; a non-finite matrix is `solve`'s ValueError, returned in
+  its place. The port's own count of LPs is the positive control. Since IKA-470 the port's
+  HiGHS options are not scipy's, so on a degenerate game the strategy may be another optimal
+  vertex: the strategies are not held to the bit any more.
 
 The depth-2 refine's sub-games (`solve_subs`) and the one-game switch (`solve_one`,
 `solve_bayesian_one`) went with the depth-2 refine (IKA-464). No torch.
@@ -19,6 +22,7 @@ import pytest
 from pokeuraou import equilibrium, portlp, rustnode
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.teams import load_roster
+from tests._equilibrium import VALUE_TOL, is_bayesian_equilibrium, is_the_solve
 
 
 @pytest.fixture(scope="module")
@@ -41,21 +45,12 @@ def _games(rng: np.random.Generator) -> list[np.ndarray]:
     return games
 
 
-#: The port normalises the strategies with a plain sum (IKA-460), numpy with a pairwise one:
-#: the same LP answer, to the last bit or two.
 TOL = 1e-12
 
 
 def _close(a, b) -> bool:  # noqa: ANN001
     a, b = (np.zeros(0) if v is None else np.asarray(v, dtype=np.float64) for v in (a, b))
     return a.shape == b.shape and bool(np.all(np.abs(a - b) <= TOL))
-
-
-def _same_equilibrium(a: equilibrium.Equilibrium, b: equilibrium.Equilibrium) -> bool:
-    return (abs(a.value - b.value) <= TOL and abs(a.duality_gap - b.duality_gap) <= TOL
-            and all(_close(getattr(a, f), getattr(b, f))
-                    for f in ("row_strategy", "col_strategy", "row_ev", "col_ev",
-                              "row_ev_loss", "col_ev_loss")))
 
 
 def test_the_ports_games_are_solves(roster) -> None:  # noqa: ANN001
@@ -66,11 +61,11 @@ def test_the_ports_games_are_solves(roster) -> None:  # noqa: ANN001
     assert portlp.COUNTS["lps"] - before == 2 * len(games)
     for a, e in zip(games, got, strict=True):
         assert isinstance(e, equilibrium.Equilibrium)
-        assert _same_equilibrium(e, equilibrium.solve(a))
+        assert is_the_solve(a, e, equilibrium.solve(a))
     bad = np.array([[0.5, np.nan], [0.1, 0.2]])
     errors = portlp.solve_many(reg, [bad, np.zeros((0, 3)), games[0]])
     assert isinstance(errors[0], ValueError) and isinstance(errors[1], ValueError)
-    assert _same_equilibrium(errors[2], equilibrium.solve(games[0]))
+    assert is_the_solve(games[0], errors[2], equilibrium.solve(games[0]))
 
 
 def test_the_ports_bayesian_games_are_solves(roster) -> None:  # noqa: ANN001
@@ -87,28 +82,30 @@ def test_the_ports_bayesian_games_are_solves(roster) -> None:  # noqa: ANN001
         want = equilibrium.solve_bayesian(mats, w)
         game = {"bayes": [portlp._game(a) for a in mats], "weights": portlp._b64(w)}
         one = node.lp({"kind": "lp", "games": [game]})["answers"][0]
-        assert abs(0.5 * (one["valueRow"] + one["valueCol"]) - want.value) <= TOL
+        assert abs(0.5 * (one["valueRow"] + one["valueCol"]) - want.value) <= VALUE_TOL
         x = np.frombuffer(base64.b64decode(one["x"]), dtype="<f8")
-        assert _close(x, want.row_strategy)
-        for y, theirs in zip(one["ys"], want.col_strategies, strict=True):
-            assert _close(np.frombuffer(base64.b64decode(y), dtype="<f8"), theirs)
+        ys = [np.frombuffer(base64.b64decode(y), dtype="<f8") for y in one["ys"]]
+        assert len(ys) == len(want.col_strategies)
+        assert is_bayesian_equilibrium(mats, w, x, ys, want.value)
         json.dumps(one)  # the answer is plain JSON
 
 
-def _same_bayesian(a: equilibrium.BayesianEquilibrium,
-                   b: equilibrium.BayesianEquilibrium) -> bool:
-    return (abs(a.value - b.value) <= TOL and abs(a.duality_gap - b.duality_gap) <= TOL
-            and all(_close(getattr(a, f), getattr(b, f))
-                    for f in ("row_strategy", "col_marginal", "row_ev", "row_ev_loss", "weights"))
-            and len(a.col_strategies) == len(b.col_strategies)
-            and all(_close(x, y) for x, y in zip(a.col_strategies, b.col_strategies,
-                                                 strict=True))
-            and all(_close(x, y) for x, y in zip(a.col_ev_loss, b.col_ev_loss, strict=True)))
+def _is_the_bayesian_solve(mats, w, got, want) -> bool:  # noqa: ANN001
+    """`got` is an equilibrium of the game `want = solve_bayesian(mats, w)` solved."""
+    ws = np.asarray(w, dtype=np.float64) / np.sum(w)
+    return (abs(got.value - want.value) <= VALUE_TOL
+            and is_bayesian_equilibrium(mats, w, got.row_strategy, list(got.col_strategies),
+                                        want.value)
+            and len(got.col_strategies) == len(want.col_strategies)
+            and _close(got.weights, ws)
+            and np.allclose(got.row_ev, sum(ws[k] * (mats[k] @ got.col_strategies[k])
+                                            for k in range(len(mats))), atol=1e-9))
 
 
 def test_the_ports_bayesian_equilibria_are_solve_bayesians(roster) -> None:  # noqa: ANN001
-    """IKA-387: `solve_bayesian_many` gives `solve_bayesian`'s `BayesianEquilibrium` to the bit
-    (every field) -- one class (a deep child's pass rectangle, `ladder._kids_solve`) and
+    """IKA-387: `solve_bayesian_many` gives an equilibrium of `solve_bayesian`'s game
+    (the value, the strategies as an equilibrium, the EVs of those strategies) -- one class
+    (a deep child's pass rectangle, `ladder._kids_solve`) and
     several (a stage's rectangle, `ladder.read`), with ties, a dominating row, a shared or
     uneven column count and weights not summing to 1 -- in one crossing; an invalid game is
     `solve_bayesian`'s ValueError in its place. The positive control: the port's LPs."""
@@ -134,11 +131,22 @@ def test_the_ports_bayesian_equilibria_are_solve_bayesians(roster) -> None:  # n
     assert portlp.COUNTS["crossings"] - before[1] == 1
     for (mats, w), e in zip(games, got, strict=True):
         assert isinstance(e, equilibrium.BayesianEquilibrium)
-        assert _same_bayesian(e, equilibrium.solve_bayesian(mats, w))
+        assert _is_the_bayesian_solve(mats, w, e, equilibrium.solve_bayesian(mats, w))
     good = games[1]
     bad = [([np.array([[0.5, np.nan]])], np.asarray([1.0])), ([], np.asarray([])),
            ([np.ones((2, 2)), np.ones((3, 2))], np.asarray([0.5, 0.5])),
            ([np.ones((2, 2))], np.asarray([-1.0])), good]
     errors = portlp.solve_bayesian_many(roster.reg, bad)
     assert all(isinstance(e, ValueError) for e in errors[:4])
-    assert _same_bayesian(errors[4], equilibrium.solve_bayesian(*good))
+    assert _is_the_bayesian_solve(*good, errors[4], equilibrium.solve_bayesian(*good))
+
+
+def test_the_equilibrium_check_can_fail() -> None:
+    """The control of the tests above (IKA-470): a strategy that is not an equilibrium, or a
+    value that is off, is refused."""
+    a = np.array([[1.0, 0.0], [0.0, 1.0]])
+    good = equilibrium.solve(a)
+    assert is_the_solve(a, good, good)
+    from dataclasses import replace
+    assert not is_the_solve(a, replace(good, row_strategy=np.array([1.0, 0.0])), good)
+    assert not is_the_solve(a, replace(good, value=good.value + 1e-4), good)

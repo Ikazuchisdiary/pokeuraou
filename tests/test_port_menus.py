@@ -138,6 +138,10 @@ def test_the_ports_q_arrays_are_pythons(roster) -> None:  # noqa: ANN001
     assert compared >= 20
 
 
+#: The scores of a game solved by the port against `solve`'s (IKA-470).
+TOL_SCORES = 1e-9
+
+
 def test_the_ports_scores_are_numpys(roster) -> None:  # noqa: ANN001
     """The candidates' scores: `solve`'s `row_ev` and minus its `col_ev`, and the means
     against every reply where the game has no answer. The port's sums are plain (IKA-460),
@@ -155,7 +159,9 @@ def test_the_ports_scores_are_numpys(roster) -> None:  # noqa: ANN001
     def unpack(text: str) -> np.ndarray:
         return np.frombuffer(base64.b64decode(text), "<f8")
 
-    for g, got, mean in zip(games, solved, means, strict=True):
+    tied_games = set(range(150, 150 + 40))
+    checked_ties = 0
+    for k, (g, got, mean) in enumerate(zip(games, solved, means, strict=True)):
         m, n = g.shape
         np.testing.assert_allclose(unpack(mean["rows"]), g.mean(axis=1), rtol=0, atol=1e-12)
         np.testing.assert_allclose(unpack(mean["cols"]), -g.mean(axis=0), rtol=0, atol=1e-12)
@@ -165,7 +171,18 @@ def test_the_ports_scores_are_numpys(roster) -> None:  # noqa: ANN001
         except (EquilibriumError, ValueError):
             want = (g.mean(axis=1), -g.mean(axis=0))
         # One score orders nothing, and numpy takes `dot` rather than `gemv` there.
-        if m > 1:
-            np.testing.assert_allclose(unpack(got["rows"]), want[0], rtol=0, atol=1e-12)
-        if n > 1:
-            np.testing.assert_allclose(unpack(got["cols"]), want[1], rtol=0, atol=1e-12)
+        # IKA-470: the port's HiGHS runs without presolve and scaling. On a game with one
+        # equilibrium its scores are `solve`'s to rounding; on a game with ties (the rounded
+        # ones) it may end on another optimal vertex, whose scores differ off the support, so
+        # the scores must be those of an equilibrium: the best reply to it earns the value.
+        tied = k in tied_games
+        if m > 1 and not tied:
+            np.testing.assert_allclose(unpack(got["rows"]), want[0], rtol=0, atol=TOL_SCORES)
+        if n > 1 and not tied:
+            np.testing.assert_allclose(unpack(got["cols"]), want[1], rtol=0, atol=TOL_SCORES)
+        if tied and m > 1 and n > 1:
+            value = solve(g).value
+            assert abs(unpack(got["rows"]).max() - value) <= 1e-6
+            assert abs(unpack(got["cols"]).max() + value) <= 1e-6
+            checked_ties += 1
+    assert checked_ties >= 30, "the ties were not checked"

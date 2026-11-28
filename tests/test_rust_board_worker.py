@@ -87,15 +87,21 @@ def served(pool):  # noqa: ANN001, ANN201, F811
     server.server_close()
 
 
-def _flags(pool_path: Path, address: str, tmp: Path, kind: str) -> list[str]:
+def _flags(pool_path: Path, address: str, tmp: Path, kind: str, games: int = GAMES) -> list[str]:
     flags = [
         "--pool", str(pool_path), "--inference", address, "--inference-arm", "value", "--q-arm", "q",
         "--hide-bench", "--limit", "4", "--baseline-limit", "3", "--rank-leaf", "--baseline-rank-leaf",
-        "--seed", "4581", "--games", str(GAMES), "--max-turns", "40",
+        "--seed", "4581", "--games", str(games), "--max-turns", "40",
         "--selection-store", str(tmp / "store-value"),
     ]
     if kind == "hp":
         return [*flags, "--baseline-hp-share"]
+    if kind == "swapped":
+        # The tested arm plays the inverted leaf, the other arm the plain one (IKA-470's control).
+        flags[flags.index("--inference-arm") + 1] = "baseline"
+        flags[flags.index("--selection-store") + 1] = str(tmp / "store-baseline")
+        return [*flags, "--baseline-inference-arm", "value",
+                "--baseline-selection-store", str(tmp / "store-value")]
     if kind == "same":
         flags[flags.index("--baseline-limit") + 1] = "4"
         return [*flags, "--baseline-inference-arm", "value"]
@@ -108,7 +114,8 @@ def _records(path: Path) -> dict[tuple[int, int], dict]:
     return {(r["gameIndex"], r["seatIndex"]): r for r in rows}
 
 
-def _rust_board(flags: list[str], tmp: Path, address: str) -> tuple[dict, dict, str]:
+def _rust_board(flags: list[str], tmp: Path, address: str,
+                games: int = GAMES) -> tuple[dict, dict, str]:
     config = tmp / "worker-config.json"
     made = subprocess.run(  # noqa: S603
         [sys.executable, str(ROOT / "tools" / "pool_match.py"), *flags,
@@ -119,7 +126,7 @@ def _rust_board(flags: list[str], tmp: Path, address: str) -> tuple[dict, dict, 
     out = tmp / "rust.jsonl"
     done = subprocess.run(  # noqa: S603
         rustworker.board_command(config, address, out, tmp / "summary.jsonl",
-                                 first_index=0, indices=2 * GAMES),
+                                 first_index=0, indices=2 * games),
         capture_output=True, text=True, timeout=900, check=False,
     )
     assert done.returncode == 0, done.stderr
@@ -370,11 +377,43 @@ def test_an_arm_on_another_executable_asks_it(pool, split, tmp_path) -> None:  #
     assert re.search(r"requests to other executables 0\b", plain), plain
 
 
+WIN_GAMES = 12  # per seat
+
+
+def _tested_wins(records: dict) -> int:
+    """Seat-games the tested arm won: the pool's side 0 is the tested arm in seat 0."""
+    return sum((r["outcome"] > 0.5) == (which == 0) for (_, which), r in records.items())
+
+
+def test_the_inverted_leaf_loses_most_games(pool, split, tmp_path) -> None:  # noqa: ANN001, F811
+    """The side of the inverted leaf plays to lose, so the tested arm wins most of its games; with
+    the leaves swapped it loses most of them (the control: the count can fall). Before IKA-470 the
+    tested arm won all 6 of 6 seat-games; the port's HiGHS ends on other vertices than scipy's did,
+    which changed one game's course (5 of 6), so the test plays `WIN_GAMES` games a seat and holds
+    the share (with the old exe 22 of 24 and 3 of 24 swapped, with the new one 19 and 3; the
+    bounds are 70% and 30%). No game of the tested arm is a draw here: a lost game has outcome 0.0."""
+    address, _, _ = split
+    total = 2 * WIN_GAMES
+    plain, _, _ = _rust_board(
+        _flags(Path(pool.path), address, tmp_path / "plain", "leaves", WIN_GAMES),
+        tmp_path / "plain", address, WIN_GAMES)
+    swapped, _, _ = _rust_board(
+        _flags(Path(pool.path), address, tmp_path / "swapped", "swapped", WIN_GAMES),
+        tmp_path / "swapped", address, WIN_GAMES)
+    assert len(plain) == total and len(swapped) == total
+    assert all(r["outcome"] in (0.0, 1.0) for r in [*plain.values(), *swapped.values()]), "a draw"
+    won, won_swapped = _tested_wins(plain), _tested_wins(swapped)
+    print(f"tested arm won {won} of {total}; with the leaves swapped {won_swapped} of {total}")
+    assert won >= 0.7 * total, f"the tested arm won {won} of {total}"
+    assert won_swapped <= 0.3 * total, f"with the leaves swapped it won {won_swapped} of {total}"
+
+
 def test_each_side_plays_its_arm_s_leaf_and_width(pool, split, tmp_path) -> None:  # noqa: ANN001, F811
     """Read off the games and the server, not the config: the tested side's menus reach width 4
     and never more, the other side's 3; both leaves were asked, and the side of the inverted leaf
-    lost every game. A board of one leaf asks the second leaf nothing (the control of the count).
-    Arms whose widths or leaves were swapped fail (records/IKA-458.md section 19)."""
+    lost most games (`test_the_inverted_leaf_loses_most_games`). A board of one leaf asks the
+    second leaf nothing (the control of the count). Arms whose widths or leaves were swapped
+    fail (records/IKA-458.md section 19)."""
     address, leaves, _ = split
     before = leaves["baseline"].rows
     records, _, _ = _rust_board(_flags(Path(pool.path), address, tmp_path / "w", "leaves"),
@@ -389,9 +428,6 @@ def test_each_side_plays_its_arm_s_leaf_and_width(pool, split, tmp_path) -> None
                 arm = 0 if side == which else 1
                 widest[arm] = max(widest[arm], len(menu))
     assert widest == {0: 4, 1: 3}
-    # The leaf: the side of the inverted leaf plays to lose, so the tested arm wins its games.
-    won = sum((r["outcome"] > 0.5) == (which == 0) for (_, which), r in records.items())
-    assert won == len(records), f"the tested arm won {won} of {len(records)}"
     before = leaves["baseline"].rows
     _rust_board(_flags(Path(pool.path), address, tmp_path / "o", "same"), tmp_path / "o", address)
     assert leaves["baseline"].rows == before
